@@ -4,7 +4,7 @@ const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
-const { signToken, verifyToken, authenticate } = require('./auth');
+const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
 const path = require('path');
 const { upload } = require('./media');
 
@@ -76,6 +76,43 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       size: req.file.size,
       mimetype: req.file.mimetype,
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/profile', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, username, display_name, bio, profile_pic_url FROM users WHERE username = $1`,
+      [req.user.username]
+    );
+    const u = result.rows[0];
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    res.json({ id: u.id, username: u.username, displayName: u.display_name, bio: u.bio, profilePic: u.profile_pic_url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/profile', authMiddleware, async (req, res) => {
+  try {
+    const { displayName, bio, profilePic } = req.body;
+    const fields = [];
+    const values = [];
+    if (displayName !== undefined) { values.push(displayName); fields.push(`display_name = $${values.length}`); }
+    if (bio !== undefined) { values.push(bio); fields.push(`bio = $${values.length}`); }
+    if (profilePic !== undefined) { values.push(profilePic); fields.push(`profile_pic_url = $${values.length}`); }
+    if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    values.push(req.user.username);
+    const result = await pool.query(
+      `UPDATE users SET ${fields.join(', ')} WHERE username = $${values.length} RETURNING id, username, display_name, bio, profile_pic_url`,
+      values
+    );
+    const u = result.rows[0];
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    const updated = { id: u.id, username: u.username, displayName: u.display_name, bio: u.bio, profilePic: u.profile_pic_url };
+    res.json({ user: updated });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

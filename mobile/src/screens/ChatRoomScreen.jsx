@@ -1,18 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
+  View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
+  KeyboardAvoidingView, Platform, Image,
 } from 'react-native';
-import { TojeyColors, quickReactions } from '../theme';
+import { useTheme } from '../theme/ThemeContext';
+import { Icon } from '../components/AppIcon';
+import { quickReactions } from '../theme';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
+  const { theme } = useTheme();
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
@@ -22,7 +18,21 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [recordTime, setRecordTime] = useState(0);
   const listRef = useRef(null);
   const recTimer = useRef(null);
-  const lastScroll = useRef(0);
+  const typingTimer = useRef(null);
+
+  const onType = (t) => {
+    setText(t);
+    if (socket && t.trim()) {
+      if (!typingTimer.current) {
+        socket.emit('typing:start', { otherUserId: otherUser.id });
+      }
+      clearTimeout(typingTimer.current);
+      typingTimer.current = setTimeout(() => {
+        if (socket) socket.emit('typing:stop', { otherUserId: otherUser.id });
+        typingTimer.current = null;
+      }, 1500);
+    }
+  };
 
   useEffect(() => {
     if (!socket) return;
@@ -38,16 +48,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     const hDelivered = ({ messageId }) => updateStatus(messageId, 'DELIVERED');
     const hRead = ({ messageIds }) => {
-      setMessages((prev) =>
-        prev.map((m) => (messageIds.includes(m.id) ? { ...m, status: 'READ' } : m))
-      );
+      setMessages((prev) => prev.map((m) => (messageIds.includes(m.id) ? { ...m, status: 'READ' } : m)));
     };
-    const hTyping = ({ userId }) => {
-      if (userId === otherUser.id) setTyping(true);
-    };
-    const hTypingStop = ({ userId }) => {
-      if (userId === otherUser.id) setTyping(false);
-    };
+    const hTyping = ({ userId }) => { if (userId === otherUser.id) setTyping(true); };
+    const hTypingStop = ({ userId }) => { if (userId === otherUser.id) setTyping(false); };
     const hEdited = ({ messageId, content }) =>
       setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content, is_edited: true } : m)));
     const hDeleted = ({ messageId, mode }) =>
@@ -94,6 +98,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       content: text.trim(),
       replyTo: replyingTo?.id || null,
     };
+    if (socket) socket.emit('typing:stop', { otherUserId: otherUser.id });
+    if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
     socket.emit('message:send', payload, (ack) => {
       if (ack?.ok) {
         setMessages((prev) => [...prev, ack.message]);
@@ -121,8 +127,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     recTimer.current = setInterval(() => setRecordTime((t) => t + 1), 1000);
   };
 
-  const stopRecording = () => {
+  const stopRecording = (cancel) => {
     clearInterval(recTimer.current);
+    if (cancel) { setRecording(false); setRecordTime(0); return; }
     setRecording(false);
     sendVoice();
   };
@@ -151,24 +158,33 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
+  const headerStatus = typing ? 'typing…' : 'online';
+
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={[styles.container, { backgroundColor: theme.background }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
         <TouchableOpacity onPress={onBack} style={styles.backBtn}>
-          <Text style={styles.backIcon}>‹</Text>
+          <Icon name="chevron-back" size={28} color={theme.primary} />
         </TouchableOpacity>
-        <View style={[styles.avatarSmall, { backgroundColor: otherUser.id === 1 ? TojeyColors.primary : TojeyColors.primaryDeep }]}>
-          <Text style={styles.avatarSmallText}>{otherUser.display_name[0].toUpperCase()}</Text>
+        <View style={[styles.avatarSmall, { backgroundColor: otherUser.id === 1 ? theme.primary : theme.primaryDeep }]}>
+          {otherUser.profile_pic_url ? (
+            <Image source={{ uri: otherUser.profile_pic_url }} style={styles.avatarImg} />
+          ) : (
+            <Text style={styles.avatarSmallText}>{otherUser.display_name[0].toUpperCase()}</Text>
+          )}
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerName}>{otherUser.display_name}</Text>
-          <Text style={styles.headerStatus}>
-            {typing ? 'typing…' : 'online'}
-          </Text>
+          <Text style={[styles.headerName, { color: theme.text }]}>{otherUser.display_name}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {typing && <Icon name="pulse" size={12} color={theme.primary} />}
+            <Text style={[styles.headerStatus, { color: typing ? theme.primary : (otherUser.online ? theme.online : theme.textSecondary) }]}>
+              {headerStatus}
+            </Text>
+          </View>
         </View>
       </View>
 
@@ -187,7 +203,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
               message={item}
               isSent={isSent}
               grouped={grouped}
-              themeColors={TojeyColors}
+              theme={theme}
               onLongPress={() => setReactionMenu(item)}
             />
           );
@@ -195,30 +211,30 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         contentContainerStyle={styles.messageList}
       />
 
-      {/* Reaction/Action menu */}
+      {/* Action menu */}
       {reactionMenu && (
         <View style={styles.menuOverlay}>
           <TouchableOpacity style={styles.menuBackdrop} onPress={() => setReactionMenu(null)} />
-          <View style={styles.menu}>
-            <Text style={styles.menuTitle}>Actions</Text>
+          <View style={[styles.menu, { backgroundColor: theme.card }]}>
+            <Text style={[styles.menuTitle, { color: theme.textSecondary }]}>Message actions</Text>
             <View style={styles.reactionRow}>
               {quickReactions.map((r) => (
-                <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={styles.reactionBtn}>
-                  <Text style={{ fontSize: 24 }}>{r}</Text>
+                <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
+                  <Text style={{ fontSize: 22 }}>{r}</Text>
                 </TouchableOpacity>
               ))}
             </View>
             <View style={styles.actionRow}>
-              <ActionBtn label="Reply" onPress={() => doAction('reply', reactionMenu)} />
-              <ActionBtn label="Like" onPress={() => reactTo(reactionMenu.id, '❤️')} />
+              <ActionBtn label="Reply" icon="return-down-back-outline" onPress={() => doAction('reply', reactionMenu)} theme={theme} />
+              <ActionBtn label="Like" icon="heart-outline" onPress={() => reactTo(reactionMenu.id, '❤️')} theme={theme} />
             </View>
             <View style={styles.actionRow}>
-              <ActionBtn label="Edit" onPress={() => doAction('edit', reactionMenu)} visible={reactionMenu.sender_id === currentUser.id} />
-              <ActionBtn label="Copy" onPress={() => { }} />
+              <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id} />
+              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { }} theme={theme} />
             </View>
             <View style={styles.actionRow}>
-              <ActionBtn label="Delete for me" onPress={() => doAction('deleteMe', reactionMenu)} danger visible={reactionMenu.sender_id === currentUser.id} />
-              <ActionBtn label="Delete for all" onPress={() => doAction('deleteAll', reactionMenu)} danger visible={reactionMenu.sender_id === currentUser.id} />
+              <ActionBtn label="Delete for me" icon="trash-outline" onPress={() => doAction('deleteMe', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
+              <ActionBtn label="Delete for all" icon="trash" onPress={() => doAction('deleteAll', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
             </View>
           </View>
         </View>
@@ -226,73 +242,73 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
       {/* Replying bar */}
       {replyingTo && (
-        <View style={styles.replyBar}>
-          <View style={styles.replyLine} />
+        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <View style={[styles.replyLine, { backgroundColor: theme.primary }]} />
           <View style={{ flex: 1 }}>
-            <Text style={styles.replyTitle}>Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUser.display_name}</Text>
-            <Text style={styles.replyPreview} numberOfLines={1}>
-              {replyingTo.type === 'VOICE' ? '🎤 Voice message' : (replyingTo.content || 'Media message')}
+            <Text style={[styles.replyTitle, { color: theme.primary }]}>
+              Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUser.display_name}
+            </Text>
+            <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
+              {replyingTo.type === 'VOICE' ? 'Voice message' : (replyingTo.content || 'Media message')}
             </Text>
           </View>
           <TouchableOpacity onPress={() => setReplyingTo(null)}>
-            <Text style={{ color: TojeyColors.textSecondary }}>✕</Text>
+            <Icon name="close" size={18} color={theme.textSecondary} />
           </TouchableOpacity>
         </View>
       )}
 
       {/* Recording UI */}
       {recording && (
-        <View style={styles.recBar}>
-          <Text style={{ color: TojeyColors.danger }}>●</Text>
-          <Text style={{ flex: 1, color: TojeyColors.textLight, marginLeft: 8, fontWeight: '600' }}>
+        <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <Icon name="radio-button-on" size={18} color={theme.danger} />
+          <Text style={{ flex: 1, color: theme.text, marginLeft: 8, fontWeight: '600' }}>
             Recording… 0:{String(recordTime).padStart(2, '0')}
           </Text>
-          <TouchableOpacity onPress={stopRecording} style={styles.recStop}>
-            <Text style={{ color: '#fff' }}>Send</Text>
+          <TouchableOpacity onPress={() => stopRecording(true)} style={[styles.recCancel, { backgroundColor: theme.inputBg }]}>
+            <Icon name="close" size={18} color={theme.danger} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => stopRecording(false)} style={{ backgroundColor: theme.primary, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, marginLeft: 8 }}>
+            <Text style={{ color: '#fff', fontWeight: '600' }}>Send</Text>
           </TouchableOpacity>
         </View>
       )}
 
       {/* Composer */}
-      <View style={styles.composer}>
+      <View style={[styles.composer, { backgroundColor: theme.composerBg, borderTopColor: theme.border }]}>
         {recording ? (
           <View style={{ flex: 1, alignItems: 'center' }}>
-            <TouchableOpacity onPress={stopRecording} style={styles.micBtnRec}>
-              <Text style={styles.micIcon}>■</Text>
+            <TouchableOpacity onPress={() => stopRecording(false)} style={[styles.micBtnRec, { backgroundColor: theme.danger }]}>
+              <Icon name="stop" size={18} color="#fff" />
             </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.composerRow}>
-            <TouchableOpacity style={styles.composerBtn}>
-              <Text style={{ fontSize: 18 }}>😊</Text>
+            <TouchableOpacity style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}>
+              <Icon name="add-circle-outline" size={22} color={theme.textSecondary} />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.composerBtn}>
-              <Text style={{ fontSize: 16 }}>📎</Text>
-            </TouchableOpacity>
-            <View style={styles.inputWrap}>
+            <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
                 value={text}
-                onChangeText={setText}
-                placeholder="Message"
-                placeholderTextColor="#9B96A8"
-                style={styles.input}
+                onChangeText={onType}
+                placeholder="Type a message"
+                placeholderTextColor={theme.textSecondary}
+                style={[styles.input, { color: theme.text }]}
                 multiline
               />
             </View>
-            <TouchableOpacity style={styles.composerBtn}>
-              <Text style={{ fontSize: 18 }}>📷</Text>
-            </TouchableOpacity>
             {text.trim() ? (
-              <TouchableOpacity style={styles.sendBtn} onPress={sendText}>
-                <Text style={styles.sendIcon}>➤</Text>
+              <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
+                <Icon name="send" size={20} color="#fff" />
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
-                style={styles.micBtn}
+                style={[styles.micBtn, { backgroundColor: theme.primary }]}
                 onPressIn={startRecording}
-                onPressOut={stopRecording}
+                onPressOut={() => stopRecording(false)}
+                accessibilityLabel="Record voice message"
               >
-                <Text style={styles.micIcon}>🎤</Text>
+                <Icon name="mic" size={20} color="#fff" />
               </TouchableOpacity>
             )}
           </View>
@@ -302,82 +318,86 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   );
 }
 
-function ActionBtn({ label, onPress, danger, visible = true }) {
+function ActionBtn({ label, icon, onPress, theme, danger, visible = true }) {
   if (!visible) return null;
   return (
-    <TouchableOpacity onPress={onPress} style={styles.actionBtn}>
-      <Text style={{ color: danger ? TojeyColors.danger : TojeyColors.primary, fontWeight: '600', fontSize: 13 }}>
+    <TouchableOpacity onPress={onPress} style={[styles.actionBtn, { backgroundColor: theme.primaryLight }]}>
+      <Icon name={icon} size={16} color={danger ? theme.danger : theme.primary} />
+      <Text style={{ color: danger ? theme.danger : theme.primary, fontWeight: '600', fontSize: 13, marginLeft: 6 }}>
         {label}
       </Text>
     </TouchableOpacity>
   );
 }
 
-function MessageRow({ message, isSent, grouped, themeColors, onLongPress }) {
+function MessageRow({ message, isSent, grouped, theme, onLongPress }) {
+  const statusIcon = message.status === 'READ'
+    ? 'checkmark-done' : message.status === 'DELIVERED'
+      ? 'checkmark-done' : 'checkmark';
+  const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
+
   return (
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
-      <TouchableOpacity
-        style={[
-          styles.bubble,
-          isSent ? styles.sentBubble : styles.recvBubble,
-          grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
-        ]}
-        onLongPress={onLongPress}
-        delayLongPress={350}
-      >
-        {message.is_deleted_for_everyone ? (
-          <Text style={{ fontStyle: 'italic', opacity: 0.7, color: isSent ? '#fff' : themeColors.textSecondary }}>
-            This message was deleted
-          </Text>
-        ) : message.type === 'VOICE' ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', minWidth: 160 }}>
-            <Text style={{ fontSize: 18, marginRight: 8, color: isSent ? '#fff' : themeColors.primary }}>▶</Text>
-            <View style={{ flex: 1 }}>
-              <View style={{ flexDirection: 'row', gap: 2 }}>
-                {[4, 8, 12, 6, 14, 10, 7, 12, 6, 9].map((h, i) => (
-                  <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? '#fff' : themeColors.primary, borderRadius: 2 }} />
-                ))}
-              </View>
-              <Text style={{ marginTop: 4, fontSize: 10, color: isSent ? 'rgba(255,255,255,0.8)' : themeColors.textSecondary }}>
-                0:{String(message.duration || 26).padStart(2, '0')} · 1×
-              </Text>
-            </View>
-          </View>
-        ) : (
-          <View>
-            {message.reply_to ? (
-              <View style={[styles.replyRef, isSent && { backgroundColor: 'rgba(255,255,255,0.15)' }]}>
-                <Text style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : themeColors.primary }}>Reply</Text>
-                <Text numberOfLines={1} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : themeColors.textSecondary }}>preview…</Text>
-              </View>
-            ) : null}
-            <Text style={{ fontSize: 15, color: isSent ? '#fff' : themeColors.textLight }}>{message.content}</Text>
-          </View>
-        )}
-
-        {!message.is_deleted_for_everyone && (
-          <View style={styles.msgMeta}>
-            {message.is_view_once && <Text style={{ fontSize: 10, color: isSent ? '#fff' : themeColors.textSecondary }}>🔒</Text>}
-            {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
-            <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
-              {message.created_at ? timeOf(message.created_at) : ''}
+      <View style={{ maxWidth: '78%' }}>
+        <TouchableOpacity
+          style={[
+            styles.bubble,
+            isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble }],
+            grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
+          ]}
+          onLongPress={onLongPress}
+          delayLongPress={350}
+        >
+          {message.is_deleted_for_everyone ? (
+            <Text style={{ fontStyle: 'italic', opacity: 0.7, color: isSent ? '#fff' : theme.textSecondary }}>
+              This message was deleted
             </Text>
-            {isSent && (message.status === 'READ'
-              ? <Text style={{ fontSize: 11, color: '#A5D6FF' }}>✓✓</Text>
-              : message.status === 'DELIVERED'
-                ? <Text style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : themeColors.textSecondary }}>✓✓</Text>
-                : <Text style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : themeColors.textSecondary }}>✓</Text>)}
+          ) : message.type === 'VOICE' ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', minWidth: 160 }}>
+              <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
+              <View style={{ flex: 1, marginLeft: 8 }}>
+                <View style={{ flexDirection: 'row', gap: 2 }}>
+                  {[4, 8, 12, 6, 14, 10, 7, 12, 6, 9].map((h, i) => (
+                    <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? '#fff' : theme.primary, borderRadius: 2 }} />
+                  ))}
+                </View>
+                <Text style={{ marginTop: 4, fontSize: 10, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>
+                  0:{String(message.duration || 26).padStart(2, '0')} · 1×
+                </Text>
+              </View>
+            </View>
+          ) : (
+            <View>
+              {message.reply_to ? (
+                <View style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight }]}>
+                  <Text style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : theme.primary }}>Reply</Text>
+                  <Text numberOfLines={1} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>preview…</Text>
+                </View>
+              ) : null}
+              <Text style={{ fontSize: 15, color: isSent ? '#fff' : theme.receivedText }}>{message.content}</Text>
+            </View>
+          )}
+
+          {!message.is_deleted_for_everyone && (
+            <View style={styles.msgMeta}>
+              {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
+              {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
+              <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
+                {message.created_at ? timeOf(message.created_at) : ''}
+              </Text>
+              {isSent && <Icon name={statusIcon} size={13} color={statusColor} />}
+            </View>
+          )}
+        </TouchableOpacity>
+
+        {message.reactions && message.reactions.length > 0 && (
+          <View style={[styles.reactionBadge, { backgroundColor: theme.primaryLight }, isSent ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
+            {message.reactions.map((r, i) => (
+              <Text key={i} style={{ fontSize: 11 }}>{r.reaction}</Text>
+            ))}
           </View>
         )}
-      </TouchableOpacity>
-
-      {message.reactions && message.reactions.length > 0 && (
-        <View style={[styles.reactionBadge, isSent ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
-          {message.reactions.map((r, i) => (
-            <Text key={i} style={{ fontSize: 11 }}>{r.reaction}</Text>
-          ))}
-        </View>
-      )}
+      </View>
     </View>
   );
 }
@@ -388,146 +408,46 @@ function timeOf(t) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8F7FC' },
+  container: { flex: 1 },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#fff',
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: TojeyColors.border,
   },
   backBtn: { marginRight: 8 },
-  backIcon: { fontSize: 34, color: TojeyColors.primaryDeep, lineHeight: 34 },
-  avatarSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  avatarSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10, overflow: 'hidden' },
   avatarSmallText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  headerName: { fontSize: 16, fontWeight: '700', color: TojeyColors.textLight },
-  headerStatus: { fontSize: 12, color: TojeyColors.primary },
+  avatarImg: { width: '100%', height: '100%' },
+  headerName: { fontSize: 16, fontWeight: '700' },
+  headerStatus: { fontSize: 12, marginLeft: 4 },
   messageList: { padding: 14, paddingBottom: 20 },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
-  bubble: { maxWidth: '78%', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14 },
-  sentBubble: { backgroundColor: TojeyColors.primary, borderBottomRightRadius: 4 },
-  recvBubble: { backgroundColor: '#FFFFFF', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#F0EDF8' },
+  bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14 },
+  sentBubble: { borderBottomRightRadius: 4 },
+  recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#F0EDF8' },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   metaText: { fontSize: 10, color: '#9B96A8' },
-  replyRef: {
-    backgroundColor: TojeyColors.primaryLight,
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    marginBottom: 4,
-    marginLeft: -2,
-    borderLeftWidth: 3,
-    borderLeftColor: TojeyColors.primary,
-  },
-  reactionBadge: {
-    backgroundColor: TojeyColors.primaryLight,
-    borderRadius: 12,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    marginTop: -6,
-    marginHorizontal: 8,
-  },
-  composer: {
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: TojeyColors.border,
-    padding: 10,
-    paddingBottom: Platform.OS === 'ios' ? 20 : 12,
-  },
-  composerRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  composerBtn: { padding: 4 },
-  inputWrap: {
-    flex: 1,
-    backgroundColor: '#F0EDF8',
-    borderRadius: 22,
-    paddingHorizontal: 12,
-    maxHeight: 100,
-  },
-  input: { fontSize: 14, color: TojeyColors.textLight, paddingVertical: 8, maxHeight: 100 },
-  sendBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: TojeyColors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendIcon: { color: '#fff', fontSize: 18 },
-  micBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: TojeyColors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  micIcon: { fontSize: 18 },
-  micBtnRec: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: TojeyColors.danger,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  recBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    padding: 14,
-    borderTopWidth: 1,
-    borderTopColor: TojeyColors.border,
-  },
-  recStop: {
-    backgroundColor: TojeyColors.primary,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  replyBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    padding: 10,
-    borderTopWidth: 1,
-    borderTopColor: TojeyColors.border,
-  },
-  replyLine: { width: 3, height: 32, backgroundColor: TojeyColors.primary, borderRadius: 2, marginRight: 10 },
-  replyTitle: { fontWeight: '700', fontSize: 12, color: TojeyColors.primary },
-  replyPreview: { fontSize: 12, color: TojeyColors.textSecondary },
+  replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
+  reactionBadge: { borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, marginTop: -6, marginHorizontal: 8, flexDirection: 'row' },
+  composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
+  composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  composerBtn: { padding: 6, borderRadius: 20 },
+  inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
+  input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
+  sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  micBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  micBtnRec: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
+  recBar: { flexDirection: 'row', alignItems: 'center', padding: 14, borderTopWidth: 1 },
+  recCancel: { borderRadius: 10, padding: 8 },
+  replyBar: { flexDirection: 'row', alignItems: 'center', padding: 10, borderTopWidth: 1 },
+  replyLine: { width: 3, height: 32, borderRadius: 2, marginRight: 10 },
+  replyTitle: { fontWeight: '700', fontSize: 12 },
+  replyPreview: { fontSize: 12 },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)' },
-  menu: {
-    position: 'absolute',
-    bottom: 90,
-    left: 24,
-    right: 24,
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 14,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    elevation: 8,
-  },
-  menuTitle: { fontSize: 13, color: TojeyColors.textSecondary, fontWeight: '700' },
+  menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
+  menuTitle: { fontSize: 13, fontWeight: '700' },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },
-  reactionBtn: {
-    backgroundColor: TojeyColors.primaryLight,
-    borderRadius: 14,
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  reactionBtn: { borderRadius: 14, width: 48, height: 44, alignItems: 'center', justifyContent: 'center' },
   actionRow: { flexDirection: 'row', gap: 8, marginVertical: 3 },
-  actionBtn: {
-    flex: 1,
-    backgroundColor: TojeyColors.primaryLight,
-    borderRadius: 10,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
+  actionBtn: { flex: 1, borderRadius: 10, paddingVertical: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
 });

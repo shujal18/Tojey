@@ -1,3 +1,5 @@
+import { lightTheme, darkTheme } from './ThemeContext';
+
 export const TojeyColors = {
   primary: '#6C3CE9',
   primaryDeep: '#4E22B8',
@@ -19,3 +21,5 @@ export const TojeyColors = {
 };
 
 export const quickReactions = ['❤️', '😂', '😮', '😢', '👍', '👎'];
+
+export { lightTheme, darkTheme };

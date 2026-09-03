@@ -8,8 +8,16 @@ import { quickReactions, wallpapers } from '../theme';
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
-  const { conversation, sendMessage, setConversation } = useChat();
+  const { conversation, openConversation, sendMessage, setConversation } = useChat();
   const { messages, typing, wallpaper } = conversation;
+
+  useEffect(() => {
+    openConversation(otherUser);
+  }, [otherUser?.id]);
+
+  useEffect(() => {
+    return () => setConversation({ id: null, other: null, messages: [], typing: false });
+  }, []);
 
   const [text, setText] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
@@ -133,9 +141,11 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           width: 40, height: 40, borderRadius: 20, marginRight: 10,
           background: otherUser.id === 1 ? '#6C3CE9' : '#4E22B8',
           color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontWeight: 700, fontSize: 16,
+          fontWeight: 700, fontSize: 16, overflow: 'hidden', flexShrink: 0,
         }}>
-          {otherUser.display_name[0].toUpperCase()}
+          {otherUser.profile_pic_url
+            ? <img src={otherUser.profile_pic_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            : otherUser.display_name[0].toUpperCase()}
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ color: wallpaper ? '#fff' : theme.text, fontSize: 16, fontWeight: 600 }}>

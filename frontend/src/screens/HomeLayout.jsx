@@ -74,7 +74,7 @@ export default function HomeLayout() {
         }}>
           {activeTab === 'chats' && <ChatListScreen onOpenChat={handleOpenChat} />}
           {activeTab === 'contacts' && <ContactsScreen onOpenChat={handleOpenChat} />}
-          {activeTab === 'settings' && <SettingsScreen />}
+          {activeTab === 'settings' && <SettingsScreen onLogout={logout} />}
         </div>
 
         <div style={{

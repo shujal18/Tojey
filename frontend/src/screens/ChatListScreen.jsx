@@ -140,8 +140,11 @@ function ConversationRow({ contact, isOnline, onPress }) {
           justifyContent: 'center',
           fontSize: 20,
           fontWeight: 600,
+          overflow: 'hidden',
         }}>
-          {initial}
+          {contact.profile_pic_url
+            ? <img src={contact.profile_pic_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            : initial}
         </div>
         {isOnline && (
           <div style={{

@@ -5,12 +5,16 @@ import { connect, disconnect } from './src/services/socket';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
+import SettingsScreen from './src/screens/SettingsScreen';
+import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 
-export default function App() {
+function Shell() {
+  const { theme } = useTheme();
   const [session, setSession] = useState(null);
   const [booted, setBooted] = useState(false);
   const [activeChat, setActiveChat] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [socket, setSocket] = useState(null);
 
   useEffect(() => {
@@ -34,6 +38,7 @@ export default function App() {
     await logout();
     setSession(null);
     setActiveChat(null);
+    setShowSettings(false);
     setSocket(null);
   };
 
@@ -47,6 +52,23 @@ export default function App() {
         <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primary} />
         <SafeAreaView style={{ flex: 1 }}>
           <LoginScreen onLogin={handleLogin} />
+        </SafeAreaView>
+      </>
+    );
+  }
+
+  if (showSettings) {
+    return (
+      <>
+        <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
+          <SettingsScreen
+            user={session.user}
+            token={session.token}
+            onBack={() => setShowSettings(false)}
+            onLogout={handleLogout}
+            setUser={(u) => setSession({ ...session, user: u })}
+          />
         </SafeAreaView>
       </>
     );
@@ -70,15 +92,25 @@ export default function App() {
 
   return (
     <>
-      <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primary} />
-      <SafeAreaView style={{ flex: 1 }}>
+      <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
         <HomeScreen
           socket={socket}
           user={session.user}
+          setUser={(u) => setSession({ ...session, user: u })}
           onLogout={handleLogout}
           onOpenChat={setActiveChat}
+          onOpenSettings={() => setShowSettings(true)}
         />
       </SafeAreaView>
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <Shell />
+    </ThemeProvider>
   );
 }

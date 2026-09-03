@@ -47,8 +47,13 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('tojey-user');
   }
 
+  function setUserData(updatedUser) {
+    setUser(updatedUser);
+    localStorage.setItem('tojey-user', JSON.stringify(updatedUser));
+  }
+
   return (
-    <AuthContext.Provider value={{ user, token, loading, error, login, logout, setUser }}>
+    <AuthContext.Provider value={{ user, token, loading, error, login, logout, setUser: setUserData }}>
       {children}
     </AuthContext.Provider>
   );

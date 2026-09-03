@@ -8,10 +8,12 @@
     "build:apk": "cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.1.0",
     "react": "18.2.0",
     "react-native": "0.73.11",
-    "socket.io-client": "4.8.1",
-    "@react-native-async-storage/async-storage": "2.1.0"
+    "react-native-image-picker": "^7.1.2",
+    "react-native-vector-icons": "^10.3.0",
+    "socket.io-client": "4.8.1"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

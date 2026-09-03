@@ -41,9 +41,11 @@ export default function ContactsScreen({ onOpenChat }) {
               width: 46, height: 46, borderRadius: 23,
               background: c.id === 1 ? '#6C3CE9' : '#4E22B8',
               color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 18, fontWeight: 600, marginRight: 12,
+              fontSize: 18, fontWeight: 600, marginRight: 12, overflow: 'hidden', flexShrink: 0,
             }}>
-              {c.display_name[0].toUpperCase()}
+              {c.profile_pic_url
+                ? <img src={c.profile_pic_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                : c.display_name[0].toUpperCase()}
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ color: theme.text, fontSize: 16, fontWeight: 600 }}>{c.display_name}</div>
