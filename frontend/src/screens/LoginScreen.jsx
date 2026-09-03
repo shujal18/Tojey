@@ -15,11 +15,6 @@ export default function LoginScreen() {
     await login(username.trim(), password);
   };
 
-  const fillDemo = (u, p) => {
-    setUsername(u);
-    setPassword(p);
-  };
-
   return (
     <div style={{
       minHeight: '100vh',
@@ -68,7 +63,7 @@ export default function LoginScreen() {
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="tom or jerry"
+            placeholder="Username"
             style={{
               width: '100%',
               padding: '14px 16px',
@@ -128,26 +123,6 @@ export default function LoginScreen() {
           }}>
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
-
-          <div style={{ marginTop: 22, textAlign: 'center', color: theme.textSecondary, fontSize: 13 }}>
-            Demo accounts
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <button type="button" onClick={() => fillDemo('tom', 'tom18')} style={{
-              flex: 1, padding: 10, borderRadius: 10,
-              background: theme.primaryLight, color: theme.primary,
-              fontSize: 13, fontWeight: 500,
-            }}>
-              Tom · tom18
-            </button>
-            <button type="button" onClick={() => fillDemo('jerry', 'jerry22')} style={{
-              flex: 1, padding: 10, borderRadius: 10,
-              background: theme.primaryLight, color: theme.primary,
-              fontSize: 13, fontWeight: 500,
-            }}>
-              Jerry · jerry22
-            </button>
-          </div>
         </form>
       </div>
     </div>

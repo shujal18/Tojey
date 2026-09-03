@@ -1,0 +1,84 @@
+import React, { useEffect, useState } from 'react';
+import { SafeAreaView, StatusBar } from 'react-native';
+import { loadSession, logout } from './src/services/auth';
+import { connect, disconnect } from './src/services/socket';
+import LoginScreen from './src/screens/LoginScreen';
+import HomeScreen from './src/screens/HomeScreen';
+import ChatRoomScreen from './src/screens/ChatRoomScreen';
+import { TojeyColors } from './src/theme';
+
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [booted, setBooted] = useState(false);
+  const [activeChat, setActiveChat] = useState(null);
+  const [socket, setSocket] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const s = await loadSession();
+      setSession(s);
+      if (s) {
+        setSocket(connect(s.token));
+      }
+      setBooted(true);
+    })();
+  }, []);
+
+  const handleLogin = (user, token) => {
+    setSession({ user, token });
+    setSocket(connect(token));
+  };
+
+  const handleLogout = async () => {
+    disconnect();
+    await logout();
+    setSession(null);
+    setActiveChat(null);
+    setSocket(null);
+  };
+
+  if (!booted) {
+    return null;
+  }
+
+  if (!session) {
+    return (
+      <>
+        <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primary} />
+        <SafeAreaView style={{ flex: 1 }}>
+          <LoginScreen onLogin={handleLogin} />
+        </SafeAreaView>
+      </>
+    );
+  }
+
+  if (activeChat) {
+    return (
+      <>
+        <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primaryDeep} />
+        <SafeAreaView style={{ flex: 1 }}>
+          <ChatRoomScreen
+            socket={socket}
+            currentUser={session.user}
+            otherUser={activeChat}
+            onBack={() => setActiveChat(null)}
+          />
+        </SafeAreaView>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primary} />
+      <SafeAreaView style={{ flex: 1 }}>
+        <HomeScreen
+          socket={socket}
+          user={session.user}
+          onLogout={handleLogout}
+          onOpenChat={setActiveChat}
+        />
+      </SafeAreaView>
+    </>
+  );
+}

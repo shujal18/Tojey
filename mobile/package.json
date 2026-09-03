@@ -1,0 +1,26 @@
+{
+  "name": "Tojey",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "build:apk": "cd android && ./gradlew assembleRelease"
+  },
+  "dependencies": {
+    "react": "18.2.0",
+    "react-native": "0.73.11",
+    "socket.io-client": "4.8.1",
+    "@react-native-async-storage/async-storage": "2.1.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native-community/cli": "12.3.6",
+    "@react-native-community/cli-platform-android": "12.3.6",
+    "@react-native/babel-preset": "0.73.11",
+    "@react-native/metro-config": "0.73.5",
+    "@react-native/typescript-config": "0.73.0"
+  }
+}

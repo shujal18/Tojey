@@ -40,15 +40,13 @@ export function ChatProvider({ socket, currentUser, children }) {
     });
 
     socket.on('message:receive', ({ message }) => {
-      const m = { ...message, status: 'SENT', _local: message.sender_id === currentUser?.id ? false : true };
-      setConversation(prev =>
-        prev.id === message.conversation_id
-          ? { ...prev, messages: [...prev.messages, m] }
-          : prev
-      );
-      if (message.sender_id !== currentUser?.id && prev?.id === message.conversation_id) {
-        socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
-      }
+      const isMine = message.sender_id === currentUser?.id;
+      setConversation(prev => {
+        if (prev.id !== message.conversation_id) return prev;
+        if (isMine) return prev;
+        if (socket) socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
+        return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
+      });
     });
 
     socket.on('message:delivered', ({ messageId }) => {
@@ -127,7 +125,6 @@ export function ChatProvider({ socket, currentUser, children }) {
             ? prev.messages.map(x => (x._tempId === payload._tempId ? { ...m, _tempId: undefined } : x))
             : [...prev.messages, m],
         }));
-        setTimeout(() => socket.emit('message:read', { messageIds: [], otherUserId: prev.other?.id }), 0);
       }
     });
   }

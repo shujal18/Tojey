@@ -123,15 +123,17 @@ io.on('connection', async (socket) => {
         socket.emit('conversation:opened', { conversationId: convo.id, otherUserId });
 
         const msgs = await pool.query(
-          `SELECT m.*,
-                  COALESCE((SELECT json_agg(r.*)
-                    FROM message_reactions r
-                    WHERE r.message_id = m.id), '[]') AS reactions
-           FROM messages m
-           WHERE m.conversation_id = $1
-             AND m.is_deleted_for_everyone = FALSE
-           ORDER BY m.created_at ASC
-           LIMIT 200`,
+          `SELECT * FROM (
+             SELECT m.*,
+                    COALESCE((SELECT json_agg(r.*) FROM message_reactions r
+                              WHERE r.message_id = m.id), '[]') AS reactions
+             FROM messages m
+             WHERE m.conversation_id = $1
+               AND m.is_deleted_for_everyone = FALSE
+             ORDER BY m.created_at DESC
+             LIMIT 200
+           ) sub
+           ORDER BY created_at ASC`,
           [convo.id]
         );
         socket.emit('messages:history', msgs.rows);
