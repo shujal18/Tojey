@@ -1,0 +1,14 @@
+{
+  "name": "tojey",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tojey — Private one-to-one chat app (purple theme)",
+  "scripts": {
+    "postinstall": "npm --prefix frontend install && npm --prefix frontend run build",
+    "install:all": "npm install && npm --prefix backend install",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "start:backend": "npm --prefix backend run start"
+  }
+}
