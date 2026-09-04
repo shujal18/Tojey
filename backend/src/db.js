@@ -128,6 +128,15 @@ CREATE TABLE IF NOT EXISTS settings (
   vibration_enabled BOOLEAN DEFAULT TRUE
 );
 
+CREATE TABLE IF NOT EXISTS stored_media (
+  id SERIAL PRIMARY KEY,
+  filename TEXT UNIQUE NOT NULL,
+  mimetype TEXT NOT NULL,
+  size BIGINT NOT NULL,
+  data BYTEA NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);

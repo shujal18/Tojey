@@ -13,7 +13,6 @@ const server = http.createServer(app);
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 const FRONTEND_DIST = path.join(__dirname, '..', '..', 'frontend', 'dist');
 const fs = require('fs');
@@ -69,15 +68,37 @@ app.get('/api/users', async (req, res) => {
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const relative = `/uploads/${req.file.path.split('uploads')[1].replace(/\\/g, '/')}`;
+    const path = require('path');
+    const { v4: uuidv4 } = require('uuid');
+    const ext = path.extname(req.file.originalname) || '.bin';
+    const filename = `${uuidv4()}${ext}`;
+    await pool.query(
+      `INSERT INTO stored_media (filename, mimetype, size, data) VALUES ($1, $2, $3, $4)`,
+      [filename, req.file.mimetype, req.file.size, req.file.buffer]
+    );
     res.json({
-      url: relative,
-      filename: req.file.filename,
+      url: `/uploads/${filename}`,
+      filename,
       size: req.file.size,
       mimetype: req.file.mimetype,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/uploads/:filename', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT mimetype, data FROM stored_media WHERE filename = $1',
+      [req.params.filename]
+    );
+    if (result.rows.length === 0) return res.status(404).send('Not found');
+    res.set('Content-Type', result.rows[0].mimetype);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(result.rows[0].data);
+  } catch (e) {
+    res.status(500).send('Server error');
   }
 });
 
@@ -276,6 +297,9 @@ io.on('connection', async (socket) => {
         const msg = (await pool.query('SELECT * FROM messages WHERE id = $1', [messageId])).rows[0];
         const otherId = await getOtherId(msg, dbUser.userId);
         if (mode === 'everyone') {
+          if (msg && msg.media_url && msg.media_url.startsWith('/uploads/')) {
+            await pool.query('DELETE FROM stored_media WHERE filename = $1', [msg.media_url.replace('/uploads/', '')]);
+          }
           await pool.query(
             `UPDATE messages SET is_deleted_for_everyone = TRUE, content = NULL, media_url = NULL
              WHERE id = $1 AND sender_id = $2`,
@@ -357,6 +381,13 @@ io.on('connection', async (socket) => {
       try {
         const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
         const convoId = convo.id;
+        await pool.query(
+          `DELETE FROM stored_media WHERE filename IN (
+             SELECT regexp_replace(media_url, '^/uploads/', '') FROM messages
+             WHERE conversation_id = $1 AND media_url LIKE '/uploads/%'
+           )`,
+          [convoId]
+        );
         await pool.query(
           `DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)`,
           [convoId]
