@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image,
+  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
+import { absUrl } from '../config';
 import ContactsScreen from './ContactsScreen';
 
 export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat, onOpenSettings }) {
@@ -14,6 +15,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   const [presence, setPresence] = useState({});
   const [conversations, setConversations] = useState([]);
   const [query, setQuery] = useState('');
+  const [clearTarget, setClearTarget] = useState(null);
 
   useEffect(() => {
     fetchUsers().then((data) => {
@@ -21,30 +23,54 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
     });
 
     if (socket) {
-      socket.on('presence:update', ({ userId, isOnline }) => {
-        setPresence((prev) => ({ ...prev, [userId]: { isOnline } }));
+      const refreshList = () => socket.emit('conversation:list');
+      const hList = (list) => {
+        setConversations(list.map((c) => ({
+          conversationId: c.conversationId,
+          other: c.other,
+          lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
+        })));
+      };
+      socket.on('conversation:list', hList);
+      socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
+        setPresence((prev) => ({ ...prev, [userId]: { isOnline, lastSeen } }));
+        refreshList();
       });
       socket.on('message:receive', ({ message, sender, conversationId }) => {
         setConversations((prev) => {
           const mine = prev.filter((c) => c.other.id !== sender.userId);
           return [
             {
-              other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: sender.profilePic || '' },
-              lastMsg: message.content || '📎 Media',
-              time: new Date(message.created_at),
               conversationId,
+              other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: sender.profilePic || '' },
+              lastMsg: { content: message.content || '📎 Media', type: message.type, time: new Date(message.created_at) },
             },
             ...mine,
           ];
         });
       });
+      socket.on('conversation:cleared', ({ conversationId }) => {
+        setConversations((prev) => prev.map((c) =>
+          c.conversationId === conversationId ? { ...c, lastMsg: null } : c
+        ));
+      });
+
+      refreshList();
 
       return () => {
+        socket.off('conversation:list', hList);
         socket.off('presence:update');
         socket.off('message:receive');
+        socket.off('conversation:cleared');
       };
     }
   }, [socket, user.id]);
+
+  const clearChat = (contact) => {
+    if (socket) socket.emit('conversation:clear', { otherUserId: contact.id });
+    setConversations((prev) => prev.map((c) => (c.other.id === contact.id ? { ...c, lastMsg: null } : c)) || []);
+    setClearTarget(null);
+  };
 
   const filtered = users.filter(
     (u) => !query || u.display_name.toLowerCase().includes(query.toLowerCase())
@@ -85,8 +111,10 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                 <ConversationRow
                   contact={item}
                   isOnline={presence[item.id]?.isOnline}
+                  lastSeen={presence[item.id]?.lastSeen}
                   theme={theme}
-                  onPress={() => onOpenChat(item)}
+                  onPress={() => onOpenChat({ ...item, online: presence[item.id]?.isOnline, last_seen: presence[item.id]?.lastSeen })}
+                  onLongPress={() => setClearTarget(item)}
                 />
               )}
               contentContainerStyle={styles.list}
@@ -103,8 +131,10 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                   contact={item.other || item}
                   preview={item.lastMsg}
                   isOnline={presence[(item.other || item).id]?.isOnline}
+                  lastSeen={presence[(item.other || item).id]?.lastSeen}
                   theme={theme}
-                  onPress={() => onOpenChat(item.other || item)}
+                  onPress={() => onOpenChat({ ...(item.other || item), online: presence[(item.other || item).id]?.isOnline, last_seen: presence[(item.other || item).id]?.lastSeen })}
+                  onLongPress={() => setClearTarget(item.other || item)}
                 />
               )}
               contentContainerStyle={styles.list}
@@ -119,6 +149,26 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
         <ContactsScreen users={filtered} presence={presence} onOpenChat={onOpenChat} theme={theme} />
       )}
 
+      {/* Clear chat confirmation */}
+      <Modal transparent visible={!!clearTarget} animationType="fade" onRequestClose={() => setClearTarget(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>Clear chat with {clearTarget?.display_name}?</Text>
+            <Text style={[styles.modalSub, { color: theme.textSecondary }]}>
+              This will delete this conversation for both users, on all devices and from the server.
+            </Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={() => setClearTarget(null)} style={[styles.modalBtn, { backgroundColor: theme.inputBg }]}>
+                <Text style={{ color: theme.text, fontWeight: '600' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => clearChat(clearTarget)} style={[styles.modalBtn, { backgroundColor: theme.danger }]}>
+                <Text style={{ color: '#fff', fontWeight: '600' }}>Clear</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
         <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
         <TabBtn label="Contacts" active={tab === 'contacts'} onPress={() => setTab('contacts')} icon="people-outline" theme={theme} activeIcon="people" />
@@ -128,14 +178,15 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   );
 }
 
-function ConversationRow({ contact, isOnline, onPress, theme, preview }) {
+function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview }) {
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
+  const lastMsg = preview && preview.content ? preview.content : (preview && preview.type ? '📎 Media' : '');
   return (
-    <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={onPress}>
+    <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={onPress} onLongPress={onLongPress} delayLongPress={400}>
       <View style={styles.avatarWrap}>
         <View style={[styles.avatar, { backgroundColor: contact.id === 1 ? theme.primary : theme.primaryDeep }]}>
           {contact.profile_pic_url ? (
-            <Image source={{ uri: contact.profile_pic_url }} style={styles.avatarImg} />
+            <Image source={{ uri: absUrl(contact.profile_pic_url) }} style={styles.avatarImg} />
           ) : (
             <Text style={styles.avatarText}>{initial}</Text>
           )}
@@ -145,24 +196,37 @@ function ConversationRow({ contact, isOnline, onPress, theme, preview }) {
       <View style={styles.rowBody}>
         <View style={styles.rowTop}>
           <Text style={[styles.rowName, { color: theme.text }]}>{contact.display_name}</Text>
-          {preview && <Text style={[styles.rowTime, { color: theme.textSecondary }]}>{fmtTime(preview)}</Text>}
+          {preview?.time && <Text style={[styles.rowTime, { color: theme.textSecondary }]}>{fmtTime(preview.time)}</Text>}
         </View>
         <View style={styles.rowPreviewRow}>
           <View style={{ flex: 1 }}>
             <Text numberOfLines={1} style={[styles.rowPreview, { color: theme.textSecondary }]}>
-              {preview ? preview : (isOnline ? 'Online' : 'Tap to say hello')}
+              {lastMsg || (isOnline ? 'Online' : 'Tap to say hello')}
             </Text>
           </View>
           <View style={[styles.onlineChip, { backgroundColor: theme.primaryLight }]}>
             <Icon name={isOnline ? 'radio-button-on' : 'radio-button-off'} size={12} color={isOnline ? theme.online : theme.textSecondary} />
             <Text style={{ fontSize: 11, color: isOnline ? theme.online : theme.textSecondary, marginLeft: 3 }}>
-              {isOnline ? 'Online' : 'Offline'}
+              {isOnline ? 'Online' : presenceText(lastSeen)}
             </Text>
           </View>
         </View>
       </View>
     </TouchableOpacity>
   );
+}
+
+function presenceText(lastSeen) {
+  if (!lastSeen) return 'Offline';
+  const d = new Date(lastSeen);
+  if (isNaN(d.getTime())) return 'Offline';
+  const now = new Date();
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 1) return 'Active now';
+  if (mins < 60) return `last seen ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `last seen ${hours}h`;
+  return `last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }
 
 function EmptyChats({ theme }) {
@@ -239,4 +303,10 @@ const styles = StyleSheet.create({
   tab: { flex: 1, alignItems: 'center', gap: 3 },
   tabLabel: { fontSize: 11 },
   tabLabelActive: { fontWeight: '700' },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  modalCard: { borderRadius: 16, padding: 22, width: '100%', maxWidth: 340 },
+  modalTitle: { fontSize: 17, fontWeight: '700' },
+  modalSub: { fontSize: 13, marginTop: 8, lineHeight: 19 },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
+  modalBtn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10 },
 });

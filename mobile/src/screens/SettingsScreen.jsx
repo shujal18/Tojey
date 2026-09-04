@@ -6,7 +6,7 @@ import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
-import { SERVER_URL } from '../config';
+import { SERVER_URL, absUrl } from '../config';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser }) {
   const { theme, mode, setMode } = useTheme();
@@ -36,10 +36,11 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser 
           const up = await fetch(`${SERVER_URL}/api/upload`, { method: 'POST', body: fd });
           const upData = await up.json();
           if (!upData.url) throw new Error(upData.error || 'Upload failed');
+          const absolute = upData.url.startsWith('http') ? upData.url : `${SERVER_URL}${upData.url}`;
           const pRes = await fetch(`${SERVER_URL}/api/profile`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ profilePic: upData.url }),
+            body: JSON.stringify({ profilePic: absolute }),
           });
           const data = await pRes.json();
           if (data.user) {
@@ -69,7 +70,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser 
         <TouchableOpacity onPress={pickAndUpload} style={styles.avatarWrap} disabled={saving}>
           <View style={[styles.avatarBig, { backgroundColor: theme.primary }]}>
             {profilePic ? (
-              <Image source={{ uri: profilePic }} style={styles.avatarImg} />
+              <Image source={{ uri: absUrl(profilePic) }} style={styles.avatarImg} />
             ) : (
               <Text style={styles.avatarText}>{user.displayName[0].toUpperCase()}</Text>
             )}

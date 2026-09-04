@@ -1,14 +1,14 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChat } from '../services/ChatContext';
 import { useTheme } from '../theme/ThemeContext';
-import { ArrowLeft, Search, MoreVertical, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon, Copy, Pencil, Trash, Check, CheckCheck, Lock } from 'lucide-react';
+import { ArrowLeft, Search, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon, Copy, Pencil, Trash, Check, CheckCheck, Lock } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
 import { quickReactions, wallpapers } from '../theme';
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
-  const { conversation, openConversation, sendMessage, setConversation } = useChat();
+  const { conversation, presence, openConversation, sendMessage, setConversation } = useChat();
   const { messages, typing, wallpaper } = conversation;
 
   useEffect(() => {
@@ -20,6 +20,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   }, []);
 
   const [text, setText] = useState('');
+  const [editing, setEditing] = useState(null);
   const [showEmoji, setShowEmoji] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   const [reactionBar, setReactionBar] = useState(null);
@@ -49,6 +50,12 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   const sendText = () => {
     if (!text.trim()) return;
+    if (editing) {
+      window.__socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
+      setEditing(null);
+      setText('');
+      return;
+    }
     const _tempId = Date.now();
     sendMessage({
       otherUserId: otherUser.id,
@@ -109,11 +116,11 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setReactionBar(message);
   };
 
+  const isOnline = presence[otherUser.id] ? presence[otherUser.id].isOnline : !!otherUser.online;
+  const lastSeen = presence[otherUser.id]?.lastSeen || otherUser.last_seen;
   const headerText = typing
     ? 'typing…'
-    : otherUser.online
-      ? 'online'
-      : 'last seen recently';
+    : (isOnline ? 'online' : lastSeenText(lastSeen));
 
   return (
     <div style={{
@@ -156,7 +163,6 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           </div>
         </div>
         <button style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}><Search size={20} /></button>
-        <button style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}><MoreVertical size={20} /></button>
       </div>
 
       {/* Messages */}
@@ -198,7 +204,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
       {/* Reactions bar */}
       {reactionBar && (
-        <ReactionMenu message={reactionBar} theme={theme} onReact={(r) => { reactTo(reactionBar.id, r); setReactionBar(null); }} onReply={() => { setReplyingTo(reactionBar); setReactionBar(null); }} onCopy={() => { if (reactionBar.content) navigator.clipboard?.writeText(reactionBar.content); setReactionBar(null); }} onEdit={() => { setText(reactionBar.content || ''); setReactionBar(null); }} onDelete={(mode) => { deleteMessage(reactionBar.id, mode); setReactionBar(null); }} isMine={reactionBar.sender_id === currentUser.id} />
+        <ReactionMenu message={reactionBar} theme={theme} onReact={(r) => { reactTo(reactionBar.id, r); setReactionBar(null); }} onReply={() => { setReplyingTo(reactionBar); setReactionBar(null); }} onCopy={() => { if (reactionBar.content) navigator.clipboard?.writeText(reactionBar.content); setReactionBar(null); }} onEdit={() => { setEditing(reactionBar); setText(reactionBar.content || ''); setReactionBar(null); }} onDelete={(mode) => { deleteMessage(reactionBar.id, mode); setReactionBar(null); }} isMine={reactionBar.sender_id === currentUser.id} />
       )}
 
       {/* Replying bar */}
@@ -219,6 +225,29 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
             </div>
           </div>
           <button onClick={() => setReplyingTo(null)} style={{ color: theme.textSecondary }}>
+            <X size={18} />
+          </button>
+        </div>
+      )}
+
+      {/* Editing bar */}
+      {editing && (
+        <div style={{
+          display: 'flex', alignItems: 'center',
+          padding: '8px 14px', background: theme.card,
+          borderTop: `1px solid ${theme.border}`,
+          fontSize: 13,
+        }}>
+          <div style={{ width: 3, height: 32, background: theme.primary, borderRadius: 2, marginRight: 10 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ color: theme.primary, fontWeight: 600, fontSize: 12 }}>
+              Editing message
+            </div>
+            <div style={{ color: theme.textSecondary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {editing.content || ''}
+            </div>
+          </div>
+          <button onClick={() => { setEditing(null); setText(''); }} style={{ color: theme.textSecondary }}>
             <X size={18} />
           </button>
         </div>
@@ -547,4 +576,16 @@ function ReactionMenu({ message, theme, onReact, onReply, onCopy, onEdit, onDele
       </div>
     </div>
   );
+}
+
+function lastSeenText(ts) {
+  if (!ts) return 'offline';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return 'offline';
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'active now';
+  if (mins < 60) return `last seen ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `last seen today at ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }

@@ -150,7 +150,7 @@ io.on('connection', async (socket) => {
     );
 
     socket.join(`user:${dbUser.userId}`);
-    io.emit('presence:update', { userId: dbUser.userId, isOnline: true, displayName: dbUser.displayName });
+    io.emit('presence:update', { userId: dbUser.userId, isOnline: true, displayName: dbUser.displayName, lastSeen: new Date().toISOString() });
 
     socket.emit('connected:ack', { userId: dbUser.userId, displayName: dbUser.displayName });
 
@@ -314,6 +314,67 @@ io.on('connection', async (socket) => {
       }
     });
 
+    socket.on('conversation:list', async () => {
+      try {
+        const result = await pool.query(
+          `SELECT c.id AS conversation_id,
+                  CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END AS other_id,
+                  u.display_name, u.username, u.profile_pic_url,
+                  p.is_online, p.last_seen,
+                  m.id AS message_id, m.type, m.content, m.created_at, m.sender_id
+           FROM conversations c
+           JOIN users u ON u.id = CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END
+           LEFT JOIN user_presence p ON p.user_id = u.id
+           LEFT JOIN LATERAL (
+             SELECT * FROM messages ms
+             WHERE ms.conversation_id = c.id AND ms.is_deleted_for_everyone = FALSE
+             ORDER BY ms.created_at DESC LIMIT 1
+           ) m ON TRUE
+           WHERE c.user1_id = $1 OR c.user2_id = $1`,
+          [dbUser.userId]
+        );
+        const list = result.rows.map((r) => ({
+          conversationId: r.conversation_id,
+          other: {
+            id: r.other_id,
+            username: r.username,
+            display_name: r.display_name,
+            profile_pic_url: r.profile_pic_url,
+            isOnline: r.is_online,
+            last_seen: r.last_seen,
+          },
+          lastMessage: r.message_id
+            ? { id: r.message_id, type: r.type, content: r.content, created_at: r.created_at, sender_id: r.sender_id }
+            : null,
+        }));
+        socket.emit('conversation:list', list);
+      } catch (e) {
+        console.error('conversation:list error', e);
+      }
+    });
+
+    socket.on('conversation:clear', async ({ otherUserId }) => {
+      try {
+        const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
+        const convoId = convo.id;
+        await pool.query(
+          `DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)`,
+          [convoId]
+        );
+        await pool.query(
+          `DELETE FROM read_receipts WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)`,
+          [convoId]
+        );
+        await pool.query(`DELETE FROM media WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)`, [convoId]);
+        await pool.query(`DELETE FROM voice_messages WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)`, [convoId]);
+        await pool.query(`DELETE FROM messages WHERE conversation_id = $1`, [convoId]);
+        io.to(`user:${otherUserId}`).emit('conversation:cleared', { conversationId: convoId, userId: dbUser.userId });
+        socket.emit('conversation:cleared', { conversationId: convoId });
+      } catch (e) {
+        console.error('conversation:clear error', e);
+      }
+    });
+
     socket.on('voice:transcribe', async ({ messageId }) => {
       try {
         const msg = (await pool.query('SELECT * FROM messages WHERE id = $1', [messageId])).rows[0];
@@ -330,7 +391,8 @@ io.on('connection', async (socket) => {
         `UPDATE user_presence SET is_online = FALSE, last_seen = NOW(), typing_to = NULL WHERE user_id = $1`,
         [dbUser.userId]
       );
-      io.emit('presence:update', { userId: dbUser.userId, isOnline: false });
+      const p = (await pool.query('SELECT last_seen FROM user_presence WHERE user_id = $1', [dbUser.userId])).rows[0];
+      io.emit('presence:update', { userId: dbUser.userId, isOnline: false, lastSeen: p ? p.last_seen : new Date().toISOString() });
     });
   } catch (e) {
     console.error('connection setup error', e);

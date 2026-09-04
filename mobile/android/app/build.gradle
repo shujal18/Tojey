@@ -67,6 +67,7 @@ android {
 
 dependencies {
     implementation(project(":react-native-async-storage_async-storage"))
+    implementation(project(":react-native-clipboard_clipboard"))
     implementation("com.facebook.react:react-android")
 
     if (hermesEnabled.toBoolean()) {

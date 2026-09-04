@@ -6,6 +6,7 @@ export function ChatProvider({ socket, currentUser, children }) {
   const [users, setUsers] = useState([]);
   const [conversation, setConversation] = useState({ id: null, other: null, messages: [], typing: false });
   const [presence, setPresence] = useState({});
+  const [conversations, setConversations] = useState([]);
   const [wallpaper, setWallpaper] = useState(null);
   const socketRef = useRef(socket);
   socketRef.current = socket;
@@ -13,6 +14,7 @@ export function ChatProvider({ socket, currentUser, children }) {
   useEffect(() => {
     if (!socket) return;
     fetchUsers();
+    socket.emit('conversation:list');
   }, [socket]);
 
   const fetchUsers = useCallback(async () => {
@@ -27,8 +29,20 @@ export function ChatProvider({ socket, currentUser, children }) {
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('presence:update', ({ userId, isOnline }) => {
-      setPresence(prev => ({ ...prev, [userId]: { isOnline, lastSeen: Date.now() } }));
+    socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
+      setPresence(prev => ({ ...prev, [userId]: { isOnline, lastSeen: lastSeen || Date.now() } }));
+      socket.emit('conversation:list');
+    });
+
+    socket.on('conversation:list', (list) => {
+      setConversations(list);
+    });
+
+    socket.on('conversation:cleared', ({ conversationId }) => {
+      setConversation(prev => (prev.id === conversationId ? { ...prev, messages: [] } : prev));
+      setConversations(prev => prev.map(c =>
+        c.conversationId === conversationId ? { ...c, lastMessage: null } : c
+      ));
     });
 
     socket.on('typing:start', ({ userId }) => {
@@ -96,6 +110,8 @@ export function ChatProvider({ socket, currentUser, children }) {
 
     return () => {
       socket.off('presence:update');
+      socket.off('conversation:list');
+      socket.off('conversation:cleared');
       socket.off('typing:start');
       socket.off('typing:stop');
       socket.off('message:receive');
@@ -125,12 +141,19 @@ export function ChatProvider({ socket, currentUser, children }) {
             ? prev.messages.map(x => (x._tempId === payload._tempId ? { ...m, _tempId: undefined } : x))
             : [...prev.messages, m],
         }));
+        socket.emit('conversation:list');
       }
     });
   }
 
+  function clearConversation(otherId) {
+    if (!socket) return;
+    socket.emit('conversation:clear', { otherUserId: otherId });
+    setConversations(prev => prev.map(c => (c.other.id === otherId ? { ...c, lastMessage: null } : c)));
+  }
+
   return (
-    <ChatContext.Provider value={{ users, conversation, presence, wallpaper, setWallpaper, openConversation, sendMessage, setConversation, fetchUsers }}>
+    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, clearConversation, setConversation, fetchUsers }}>
       {children}
     </ChatContext.Provider>
   );

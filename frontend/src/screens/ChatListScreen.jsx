@@ -2,39 +2,57 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useChat } from '../services/ChatContext';
 import { useAuth } from '../services/AuthContext';
 import { useTheme } from '../theme/ThemeContext';
-import { Search, MessageSquarePlus, Mic, Camera, ImageIcon } from 'lucide-react';
+import { Search, MessageSquarePlus, Trash2 } from 'lucide-react';
 
 export default function ChatListScreen({ onOpenChat }) {
   const { theme } = useTheme();
-  const { users, conversation, presence } = useChat();
+  const { users, conversations, presence, clearConversation } = useChat();
   const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [clearTarget, setClearTarget] = useState(null);
 
   const contacts = useMemo(
     () => users.filter(u => u.id !== user.id),
     [users, user.id]
   );
 
-  const unread = {
-    tombay: 0,
-  };
+  const convoMap = useMemo(() => {
+    const m = {};
+    conversations.forEach(c => { m[c.other.id] = c; });
+    return m;
+  }, [conversations]);
+
+  const items = useMemo(() => {
+    const list = contacts.map(c => {
+      const conv = convoMap[c.id];
+      const pres = presence[c.id] || {};
+      return {
+        contact: c,
+        lastMessage: conv?.lastMessage || null,
+        isOnline: pres.isOnline,
+        lastSeen: pres.lastSeen,
+      };
+    });
+    list.sort((a, b) => {
+      const ta = a.lastMessage ? new Date(a.lastMessage.created_at).getTime() : 0;
+      const tb = b.lastMessage ? new Date(b.lastMessage.created_at).getTime() : 0;
+      return tb - ta;
+    });
+    return list;
+  }, [contacts, convoMap, presence]);
 
   useEffect(() => {
     if (query.trim()) {
-      setSearchResults(contacts.filter(c => c.display_name.toLowerCase().includes(query.toLowerCase())));
+      setSearchResults(items.filter(i => i.contact.display_name.toLowerCase().includes(query.toLowerCase())));
     } else {
       setSearchResults([]);
     }
-  }, [query, contacts]);
+  }, [query, items]);
 
-  const previewText = (type) => {
-    switch (type) {
-      case 'VOICE': return '🎤 Voice message';
-      case 'IMAGE': return '📷 Photo';
-      case 'VIDEO': return '🎬 Video';
-      default: return 'New conversation';
-    }
+  const startClear = (item, e) => {
+    e.stopPropagation();
+    setClearTarget(item);
   };
 
   return (
@@ -73,20 +91,18 @@ export default function ChatListScreen({ onOpenChat }) {
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
         {query.trim() ? (
           searchResults.length > 0 ? (
-            searchResults.map(c => (
-              <ConversationRow key={c.id} contact={c} isOnline={presence[c.id]?.isOnline} onPress={() => onOpenChat(c)} />
+            searchResults.map(item => (
+              <ConversationRow key={item.contact.id} item={item} onPress={() => onOpenChat(item.contact)} onClear={(e) => startClear(item, e)} />
             ))
           ) : (
-            <EmptySearch results={searchResults.length} onFind={fetchSearchResults} />
+            <EmptySearch />
           )
         ) : (
-          <>
-            {contacts.length > 0 ? contacts.map(c => (
-              <ConversationRow key={c.id} contact={c} isOnline={presence[c.id]?.isOnline} onPress={() => onOpenChat(c)} />
-            )) : (
-              <EmptyChats onStart={() => {}} />
-            )}
-          </>
+          items.length > 0 ? items.map(item => (
+            <ConversationRow key={item.contact.id} item={item} onPress={() => onOpenChat(item.contact)} onClear={(e) => startClear(item, e)} />
+          )) : (
+            <EmptyChats onStart={() => {}} />
+          )
         )}
       </div>
 
@@ -106,27 +122,77 @@ export default function ChatListScreen({ onOpenChat }) {
       }}>
         <MessageSquarePlus size={24} />
       </button>
+
+      {clearTarget && (
+        <div style={{
+          position: 'absolute',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 50,
+          padding: 24,
+        }}>
+          <div style={{
+            background: theme.card,
+            borderRadius: 16,
+            padding: 22,
+            width: '100%',
+            maxWidth: 340,
+            boxShadow: theme.shadow,
+          }}>
+            <h3 style={{ color: theme.text, fontSize: 17, fontWeight: 700, margin: 0 }}>
+              Clear chat with {clearTarget.contact.display_name}?
+            </h3>
+            <p style={{ color: theme.textSecondary, fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
+              This will delete this conversation for both users, on all devices and from the server.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
+              <button onClick={() => setClearTarget(null)} style={{
+                padding: '10px 18px',
+                borderRadius: 10,
+                background: theme.inputBg,
+                color: theme.text,
+                fontWeight: 600,
+              }}>Cancel</button>
+              <button onClick={() => { clearConversation(clearTarget.contact.id); setClearTarget(null); }} style={{
+                padding: '10px 18px',
+                borderRadius: 10,
+                background: '#E53935',
+                color: '#fff',
+                fontWeight: 600,
+              }}>Clear</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function ConversationRow({ contact, isOnline, onPress }) {
+function ConversationRow({ item, onPress, onClear }) {
   const { theme } = useTheme();
+  const { contact, lastMessage, isOnline, lastSeen } = item;
   const [avatarColor] = useState(() => {
     const colors = ['#6C3CE9', '#4E22B8', '#7C4DFF', '#9C6BFF', '#B39DDB'];
     return colors[Math.floor(Math.random() * colors.length)];
   });
 
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
+  const preview = lastMessage
+    ? (lastMessage.content ? lastMessage.content : (lastMessage.type === 'VOICE' ? '🎤 Voice message' : '📎 Media'))
+    : (isOnline ? 'Online' : statusText(lastSeen));
+  const time = lastMessage ? fmtTime(new Date(lastMessage.created_at)) : '';
 
   return (
-    <button onClick={onPress} style={{
+    <div onClick={onPress} style={{
       width: '100%',
       display: 'flex',
       alignItems: 'center',
       padding: '10px 16px',
       background: theme.background,
       transition: 'background 0.15s',
+      position: 'relative',
+      cursor: 'pointer',
     }}>
       <div style={{ position: 'relative', marginRight: 12 }}>
         <div style={{
@@ -165,7 +231,7 @@ function ConversationRow({ contact, isOnline, onPress }) {
           <span style={{ color: theme.text, fontSize: 16, fontWeight: 600 }}>
             {contact.display_name}
           </span>
-          <span style={{ color: theme.textSecondary, fontSize: 12 }}>10:42 AM</span>
+          {time && <span style={{ color: theme.textSecondary, fontSize: 12 }}>{time}</span>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 3 }}>
           <span style={{
@@ -177,32 +243,47 @@ function ConversationRow({ contact, isOnline, onPress }) {
             maxWidth: '70%',
             fontWeight: 400,
           }}>
-            {isOnline ? 'online' : 'Say hello 👋'}
+            {preview}
           </span>
-          <div style={{
-            background: theme.primary,
-            color: '#fff',
-            fontSize: 11,
-            minWidth: 18,
-            height: 18,
-            borderRadius: 9,
-            padding: '0 5px',
+          <button onClick={onClear} title="Clear chat" style={{
+            color: theme.textSecondary,
+            padding: 6,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontWeight: 600,
+            background: 'transparent',
           }}>
-            0
-          </div>
+            <Trash2 size={16} />
+          </button>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
-function fetchSearchResults() {}
+function statusText(lastSeen) {
+  if (!lastSeen) return 'Offline';
+  const d = new Date(lastSeen);
+  if (isNaN(d.getTime())) return 'Offline';
+  const now = Date.now();
+  const mins = Math.floor((now - d.getTime()) / 60000);
+  if (mins < 1) return 'Active now';
+  if (mins < 60) return `last seen ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `last seen ${hours}h`;
+  return `last seen ${d.getDate()}/${d.getMonth() + 1}`;
+}
 
-function EmptySearch({ onFind }) {
+function fmtTime(d) {
+  const now = Date.now();
+  const diff = (now - d.getTime()) / 60000;
+  if (diff < 1) return 'now';
+  if (diff < 60) return `${Math.floor(diff)}m`;
+  if (diff < 1440) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${d.getDate()}/${d.getMonth() + 1}`;
+}
+
+function EmptySearch() {
   const { theme } = useTheme();
   return (
     <div style={{ textAlign: 'center', padding: 60, color: theme.textSecondary }}>

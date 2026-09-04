@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, FlatList, StyleSheet, Image } from 'react-native';
 import { Icon } from '../components/AppIcon';
+import { absUrl } from '../config';
 
 export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
   return (
@@ -21,7 +22,7 @@ export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
           <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onOpenChat(item)}>
             <View style={[styles.avatar, { backgroundColor: item.id === 1 ? theme.primary : theme.primaryDeep }]}>
               {item.profile_pic_url ? (
-                <Image source={{ uri: item.profile_pic_url }} style={styles.avatarImg} />
+                <Image source={{ uri: absUrl(item.profile_pic_url) }} style={styles.avatarImg} />
               ) : (
                 <Text style={styles.avatarText}>{item.display_name[0].toUpperCase()}</Text>
               )}
@@ -32,7 +33,7 @@ export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
                 <Icon name={presence[item.id]?.isOnline ? 'radio-button-on' : 'radio-button-off'} size={12}
                   color={presence[item.id]?.isOnline ? theme.online : theme.textSecondary} />
                 <Text style={[styles.status, { color: theme.textSecondary }]}>
-                  {presence[item.id]?.isOnline ? 'Online' : 'Tap to start a chat'}
+                  {presence[item.id]?.isOnline ? 'Online' : presenceText(presence[item.id]?.lastSeen)}
                 </Text>
               </View>
             </View>
@@ -62,3 +63,16 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', justifyContent: 'center', padding: 60 },
   emptyText: { fontSize: 15, marginTop: 12 },
 });
+
+function presenceText(lastSeen) {
+  if (!lastSeen) return 'Offline';
+  const d = new Date(lastSeen);
+  if (isNaN(d.getTime())) return 'Offline';
+  const now = new Date();
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 1) return 'Active now';
+  if (mins < 60) return `Last seen ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Last seen today at ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `Last seen ${d.getDate()}/${d.getMonth() + 1}`;
+}

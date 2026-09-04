@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
-  KeyboardAvoidingView, Platform, Image,
+  KeyboardAvoidingView, Platform, Image, Keyboard,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { quickReactions } from '../theme';
+import { absUrl } from '../config';
+import Clipboard from '@react-native-clipboard/clipboard';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -13,9 +15,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
+  const [editing, setEditing] = useState(null);
   const [reactionMenu, setReactionMenu] = useState(null);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
+  const [showAttach, setShowAttach] = useState(false);
+  const [presence, setPresence] = useState(null);
   const listRef = useRef(null);
   const recTimer = useRef(null);
   const typingTimer = useRef(null);
@@ -72,6 +77,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:edited', hEdited);
     socket.on('message:deleted', hDeleted);
     socket.on('message:reaction', hReaction);
+    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); };
+    socket.on('conversation:cleared', hCleared);
+    const hPresence = ({ userId, isOnline }) => { if (userId === otherUser.id) setPresence(isOnline); };
+    socket.on('presence:update', hPresence);
 
     return () => {
       socket.off('messages:history', hHistory);
@@ -83,6 +92,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('message:edited', hEdited);
       socket.off('message:deleted', hDeleted);
       socket.off('message:reaction', hReaction);
+      socket.off('conversation:cleared', hCleared);
+      socket.off('presence:update', hPresence);
     };
   }, [socket, otherUser.id, currentUser.id]);
 
@@ -92,6 +103,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const sendText = () => {
     if (!text.trim()) return;
+    if (editing) {
+      socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
+      setMessages((prev) => prev.map((m) => (m.id === editing.id ? { ...m, content: text.trim(), is_edited: true } : m)));
+      setEditing(null);
+      setText('');
+      return;
+    }
     const payload = {
       otherUserId: otherUser.id,
       type: 'TEXT',
@@ -149,7 +167,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const doAction = (action, message) => {
     setReactionMenu(null);
     if (action === 'reply') { setReplyingTo(message); }
-    else if (action === 'edit') { setText(message.content || ''); }
+    else if (action === 'edit') { setEditing(message); setText(message.content || ''); }
     else if (action === 'deleteMe') {
       socket.emit('message:delete', { messageId: message.id, mode: 'me' });
       setMessages((prev) => prev.filter((m) => m.id !== message.id));
@@ -158,7 +176,43 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
-  const headerStatus = typing ? 'typing…' : 'online';
+  const pickMedia = (kind) => {
+    setShowAttach(false);
+    if (kind === 'photo' || kind === 'camera' || kind === 'gallery') {
+      try {
+        const ImagePicker = require('react-native-image-picker');
+        const opts = [];
+        if (kind === 'camera') {
+          ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
+            if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+          });
+        } else {
+          const sel = ImagePicker.launchImageLibrary;
+          sel({ mediaType: 'photo', selectionLimit: 1 }, (r) => {
+            if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+          });
+        }
+      } catch (e) {
+        socket.emit('message:send', { otherUserId: otherUser.id, type: 'IMAGE', content: '📷 Photo', mediaUrl: '' });
+      }
+    } else {
+      socket.emit('message:send', { otherUserId: otherUser.id, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' });
+    }
+  };
+
+  const sendMedia = (asset) => {
+    if (!asset || !asset.uri) return;
+    socket.emit('message:send', {
+      otherUserId: otherUser.id,
+      type: 'IMAGE',
+      content: '📷 Photo',
+      mediaUrl: asset.uri,
+      thumbUrl: asset.uri,
+    });
+  };
+
+  const isOnline = presence !== null ? presence : !!otherUser.online;
+  const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(otherUser.last_seen));
 
   return (
     <KeyboardAvoidingView
@@ -172,7 +226,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         </TouchableOpacity>
         <View style={[styles.avatarSmall, { backgroundColor: otherUser.id === 1 ? theme.primary : theme.primaryDeep }]}>
           {otherUser.profile_pic_url ? (
-            <Image source={{ uri: otherUser.profile_pic_url }} style={styles.avatarImg} />
+            <Image source={{ uri: absUrl(otherUser.profile_pic_url) }} style={styles.avatarImg} />
           ) : (
             <Text style={styles.avatarSmallText}>{otherUser.display_name[0].toUpperCase()}</Text>
           )}
@@ -181,7 +235,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           <Text style={[styles.headerName, { color: theme.text }]}>{otherUser.display_name}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             {typing && <Icon name="pulse" size={12} color={theme.primary} />}
-            <Text style={[styles.headerStatus, { color: typing ? theme.primary : (otherUser.online ? theme.online : theme.textSecondary) }]}>
+            <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
               {headerStatus}
             </Text>
           </View>
@@ -194,6 +248,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         data={messages}
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
         renderItem={({ item, index }) => {
           const isSent = item.sender_id === currentUser.id;
           const prev = messages[index - 1];
@@ -230,7 +286,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             </View>
             <View style={styles.actionRow}>
               <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id} />
-              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { }} theme={theme} />
+              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { if (reactionMenu.content) Clipboard.setString(reactionMenu.content); }} theme={theme} />
             </View>
             <View style={styles.actionRow}>
               <ActionBtn label="Delete for me" icon="trash-outline" onPress={() => doAction('deleteMe', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
@@ -258,6 +314,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         </View>
       )}
 
+      {/* Editing bar */}
+      {editing && (
+        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <View style={[styles.replyLine, { backgroundColor: theme.primary }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.replyTitle, { color: theme.primary }]}>
+              Editing message
+            </Text>
+            <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
+              {editing.content || ''}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={() => { setEditing(null); setText(''); }}>
+            <Icon name="close" size={18} color={theme.textSecondary} />
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Recording UI */}
       {recording && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
@@ -274,6 +348,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         </View>
       )}
 
+      {/* Attach options */}
+      {showAttach && !recording && (
+        <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <AttachBtn label="Photo" icon="image-outline" color={theme.primary} onPress={() => pickMedia('photo')} theme={theme} />
+          <AttachBtn label="Camera" icon="camera-outline" color={theme.primaryDeep} onPress={() => pickMedia('camera')} theme={theme} />
+          <AttachBtn label="Gallery" icon="images-outline" color={theme.primary} onPress={() => pickMedia('gallery')} theme={theme} />
+          <AttachBtn label="Document" icon="document-outline" color={theme.primaryDeep} onPress={() => pickMedia('document')} theme={theme} />
+        </View>
+      )}
+
       {/* Composer */}
       <View style={[styles.composer, { backgroundColor: theme.composerBg, borderTopColor: theme.border }]}>
         {recording ? (
@@ -284,8 +368,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           </View>
         ) : (
           <View style={styles.composerRow}>
-            <TouchableOpacity style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}>
-              <Icon name="add-circle-outline" size={22} color={theme.textSecondary} />
+            <TouchableOpacity
+              style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
+              onPress={() => { Keyboard.dismiss(); setShowAttach(!showAttach); setRecording(false); }}
+              accessibilityLabel="Add attachments"
+            >
+              <Icon name={showAttach ? 'close' : 'add-circle-outline'} size={22} color={theme.textSecondary} />
             </TouchableOpacity>
             <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
@@ -328,6 +416,30 @@ function ActionBtn({ label, icon, onPress, theme, danger, visible = true }) {
       </Text>
     </TouchableOpacity>
   );
+}
+
+function AttachBtn({ label, icon, color, onPress, theme }) {
+  return (
+    <TouchableOpacity onPress={onPress} style={styles.attachBtn}>
+      <View style={[styles.attachIcon, { backgroundColor: theme.inputBg }]}>
+        <Icon name={icon} size={24} color={color} />
+      </View>
+      <Text style={[styles.attachLabel, { color: theme.text }]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function lastSeenText(ts) {
+  if (!ts) return 'Offline';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return 'Offline';
+  const now = new Date();
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 1) return 'Active now';
+  if (mins < 60) return `Last seen ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Last seen today at ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `Last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }
 
 function MessageRow({ message, isSent, grouped, theme, onLongPress }) {
@@ -431,6 +543,10 @@ const styles = StyleSheet.create({
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { padding: 6, borderRadius: 20 },
+  attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
+  attachBtn: { alignItems: 'center', marginRight: 22 },
+  attachIcon: { width: 54, height: 54, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  attachLabel: { fontSize: 12, marginTop: 6 },
   inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
   input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
   sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
