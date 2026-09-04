@@ -8,12 +8,13 @@ import { Icon } from '../components/AppIcon';
 import { absUrl } from '../config';
 import ContactsScreen from './ContactsScreen';
 
-export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat, onOpenSettings }) {
+export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   const [users, setUsers] = useState([]);
   const [presence, setPresence] = useState({});
   const [conversations, setConversations] = useState([]);
+  const [unread, setUnread] = useState({});
   const [query, setQuery] = useState('');
   const [clearTarget, setClearTarget] = useState(null);
 
@@ -30,6 +31,15 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
           other: c.other,
           lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
         })));
+        setPresence((prev) => {
+          const next = { ...prev };
+          list.forEach((c) => {
+            if (c.other) {
+              next[c.other.id] = { isOnline: c.other.isOnline, lastSeen: c.other.last_seen };
+            }
+          });
+          return next;
+        });
       };
       socket.on('conversation:list', hList);
       socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
@@ -48,6 +58,9 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
             ...mine,
           ];
         });
+        if (sender.userId !== activeChatId) {
+          setUnread((u) => ({ ...u, [sender.userId]: (u[sender.userId] || 0) + 1 }));
+        }
       });
       socket.on('conversation:cleared', ({ conversationId }) => {
         setConversations((prev) => prev.map((c) =>
@@ -70,6 +83,11 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
     if (socket) socket.emit('conversation:clear', { otherUserId: contact.id });
     setConversations((prev) => prev.map((c) => (c.other.id === contact.id ? { ...c, lastMsg: null } : c)) || []);
     setClearTarget(null);
+  };
+
+  const openChat = (contact) => {
+    setUnread((u) => { const n = { ...u }; delete n[contact.id]; return n; });
+    onOpenChat(contact);
   };
 
   const filtered = users.filter(
@@ -112,8 +130,9 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                   contact={item}
                   isOnline={presence[item.id]?.isOnline}
                   lastSeen={presence[item.id]?.lastSeen}
+                  unread={unread[item.id]}
                   theme={theme}
-                  onPress={() => onOpenChat({ ...item, online: presence[item.id]?.isOnline, last_seen: presence[item.id]?.lastSeen })}
+                  onPress={() => openChat({ ...item, online: presence[item.id]?.isOnline, last_seen: presence[item.id]?.lastSeen })}
                   onLongPress={() => setClearTarget(item)}
                 />
               )}
@@ -132,8 +151,9 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                   preview={item.lastMsg}
                   isOnline={presence[(item.other || item).id]?.isOnline}
                   lastSeen={presence[(item.other || item).id]?.lastSeen}
+                  unread={unread[(item.other || item).id]}
                   theme={theme}
-                  onPress={() => onOpenChat({ ...(item.other || item), online: presence[(item.other || item).id]?.isOnline, last_seen: presence[(item.other || item).id]?.lastSeen })}
+                  onPress={() => openChat({ ...(item.other || item), online: presence[(item.other || item).id]?.isOnline, last_seen: presence[(item.other || item).id]?.lastSeen })}
                   onLongPress={() => setClearTarget(item.other || item)}
                 />
               )}
@@ -178,7 +198,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   );
 }
 
-function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview }) {
+function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview, unread }) {
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
   const lastMsg = preview && preview.content ? preview.content : (preview && preview.type ? '📎 Media' : '');
   return (
@@ -204,13 +224,18 @@ function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, th
               {lastMsg || (isOnline ? 'Online' : 'Tap to say hello')}
             </Text>
           </View>
+          {!!unread && (
+            <View style={[styles.unreadBadge, { backgroundColor: theme.primary }]}>
+              <Text style={styles.unreadBadgeText}>{unread > 99 ? '99+' : unread}</Text>
+            </View>
+          )}
           <View style={[styles.onlineChip, { backgroundColor: theme.primaryLight }]}>
             <Icon name={isOnline ? 'radio-button-on' : 'radio-button-off'} size={12} color={isOnline ? theme.online : theme.textSecondary} />
             <Text style={{ fontSize: 11, color: isOnline ? theme.online : theme.textSecondary, marginLeft: 3 }}>
               {isOnline ? 'Online' : presenceText(lastSeen)}
             </Text>
-          </View>
-        </View>
+</View>
+      </View>
       </View>
     </TouchableOpacity>
   );
@@ -294,6 +319,8 @@ const styles = StyleSheet.create({
   rowPreviewRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3, gap: 8 },
   rowPreview: { fontSize: 13 },
   onlineChip: { flexDirection: 'row', alignItems: 'center', borderRadius: 10, paddingHorizontal: 6, paddingVertical: 2 },
+  unreadBadge: { minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  unreadBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
   emptyTitle: { fontSize: 18, fontWeight: '700', marginTop: 14 },
   emptySub: { fontSize: 13, marginTop: 8, textAlign: 'center' },

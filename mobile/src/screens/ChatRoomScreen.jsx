@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
-  KeyboardAvoidingView, Platform, Image, Keyboard,
+  KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { quickReactions } from '../theme';
 import { absUrl } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
+import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -24,6 +25,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const listRef = useRef(null);
   const recTimer = useRef(null);
   const typingTimer = useRef(null);
+  const [viewingMedia, setViewingMedia] = useState(null);
+  const [atBottomNear, setAtBottomNear] = useState(true);
+  const [pendingCount, setPendingCount] = useState(0);
+  const atBottomRef = useRef(true);
+
+  const openMedia = (message) => {
+    if (!message || !message.media_url) return;
+    const uri = absUrl(message.media_url);
+    if (message.type === 'VIDEO' || message.type === 'VOICE') {
+      Linking.openURL(uri).catch(() => {});
+    } else {
+      setViewingMedia({ uri, message });
+    }
+  };
 
   const onType = (t) => {
     setText(t);
@@ -48,6 +63,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const hReceive = ({ message }) => {
       setMessages((prev) => [...prev, { ...message, _local: message.sender_id === currentUser.id }]);
       if (message.sender_id !== currentUser.id) {
+        if (!atBottomRef.current) {
+          setPendingCount((n) => n + 1);
+        } else {
+          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+        }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
     };
@@ -79,7 +99,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:reaction', hReaction);
     const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); };
     socket.on('conversation:cleared', hCleared);
-    const hPresence = ({ userId, isOnline }) => { if (userId === otherUser.id) setPresence(isOnline); };
+    const hPresence = ({ userId, isOnline, lastSeen }) => {
+      if (userId === otherUser.id) setPresence({ isOnline, lastSeen });
+    };
     socket.on('presence:update', hPresence);
 
     return () => {
@@ -102,25 +124,40 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   }
 
   const sendText = () => {
-    if (!text.trim()) return;
+    const content = text.trim();
+    if (!content) return;
     if (editing) {
-      socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
-      setMessages((prev) => prev.map((m) => (m.id === editing.id ? { ...m, content: text.trim(), is_edited: true } : m)));
+      socket.emit('message:edit', { messageId: editing.id, content });
+      setMessages((prev) => prev.map((m) => (m.id === editing.id ? { ...m, content, is_edited: true } : m)));
       setEditing(null);
       setText('');
       return;
     }
+    const tempId = `tmp-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: 'TEXT',
+      content,
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reply_to: replyingTo?.id || null,
+      reactions: [],
+      _local: true,
+      _pending: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
     const payload = {
       otherUserId: otherUser.id,
       type: 'TEXT',
-      content: text.trim(),
+      content,
       replyTo: replyingTo?.id || null,
     };
     if (socket) socket.emit('typing:stop', { otherUserId: otherUser.id });
     if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
     socket.emit('message:send', payload, (ack) => {
       if (ack?.ok) {
-        setMessages((prev) => [...prev, ack.message]);
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? ack.message : m)));
       }
     });
     setText('');
@@ -140,6 +177,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   };
 
   const startRecording = () => {
+    ensureMicPermission();
     setRecording(true);
     setRecordTime(0);
     recTimer.current = setInterval(() => setRecordTime((t) => t + 1), 1000);
@@ -183,14 +221,21 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         const ImagePicker = require('react-native-image-picker');
         const opts = [];
         if (kind === 'camera') {
-          ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
-            if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
-          });
+          (async () => {
+            const ok = await ensureCameraPermission();
+            if (!ok) return;
+            ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
+              if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+            });
+          })();
         } else {
-          const sel = ImagePicker.launchImageLibrary;
-          sel({ mediaType: 'photo', selectionLimit: 1 }, (r) => {
-            if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
-          });
+          (async () => {
+            await ensureMediaPermission();
+            const sel = ImagePicker.launchImageLibrary;
+            sel({ mediaType: 'photo', selectionLimit: 1 }, (r) => {
+              if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+            });
+          })();
         }
       } catch (e) {
         socket.emit('message:send', { otherUserId: otherUser.id, type: 'IMAGE', content: '📷 Photo', mediaUrl: '' });
@@ -211,8 +256,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   };
 
-  const isOnline = presence !== null ? presence : !!otherUser.online;
-  const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(otherUser.last_seen));
+  const isOnline = presence !== null ? presence.isOnline : !!otherUser.online;
+  const lastSeen = presence !== null ? presence.lastSeen : otherUser.last_seen;
+  const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
 
   return (
     <KeyboardAvoidingView
@@ -247,7 +293,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         ref={listRef}
         data={messages}
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+        onContentSizeChange={() => { if (atBottom.current) listRef.current?.scrollToEnd({ animated: true }); }}
+        onScroll={(e) => {
+          const y = e.nativeEvent.contentOffset.y;
+          const h = e.nativeEvent.layoutMeasurement.height;
+          const cs = e.nativeEvent.contentSize.height;
+          const nearBottom = y + h >= cs - 50;
+          atBottom.current = nearBottom;
+          if (nearBottom) setPendingCount(0);
+          setAtBottomNear(nearBottom);
+        }}
+        scrollEventThrottle={120}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
         renderItem={({ item, index }) => {
@@ -261,11 +317,31 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
               grouped={grouped}
               theme={theme}
               onLongPress={() => setReactionMenu(item)}
+              onOpenMedia={openMedia}
             />
           );
         }}
         contentContainerStyle={styles.messageList}
       />
+
+      {!atBottomNear && (
+        <TouchableOpacity
+          onPress={() => {
+            listRef.current?.scrollToEnd({ animated: true });
+            setAtBottomNear(true);
+            setPendingCount(0);
+          }}
+          style={[styles.fab, { backgroundColor: theme.primary }]}
+          accessibilityLabel="Scroll to bottom"
+        >
+          {pendingCount > 0 && (
+            <View style={[styles.fabBadge, { backgroundColor: theme.danger }]}>
+              <Text style={styles.fabBadgeText}>{pendingCount > 99 ? '99+' : pendingCount}</Text>
+            </View>
+          )}
+          <Icon name="arrow-down" size={22} color="#fff" />
+        </TouchableOpacity>
+      )}
 
       {/* Action menu */}
       {reactionMenu && (
@@ -335,15 +411,23 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       {/* Recording UI */}
       {recording && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
-          <Icon name="radio-button-on" size={18} color={theme.danger} />
-          <Text style={{ flex: 1, color: theme.text, marginLeft: 8, fontWeight: '600' }}>
-            Recording… 0:{String(recordTime).padStart(2, '0')}
-          </Text>
-          <TouchableOpacity onPress={() => stopRecording(true)} style={[styles.recCancel, { backgroundColor: theme.inputBg }]}>
-            <Icon name="close" size={18} color={theme.danger} />
+          <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
+            <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
+            <Icon name="mic" size={15} color={theme.danger} />
+            <Text style={[styles.recTime, { color: theme.text }]}>
+              0:{String(recordTime).padStart(2, '0')}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity onPress={() => stopRecording(true)} style={styles.recCancel} accessibilityLabel="Cancel recording">
+            <Icon name="trash-outline" size={18} color={theme.danger} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => stopRecording(false)} style={{ backgroundColor: theme.primary, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, marginLeft: 8 }}>
-            <Text style={{ color: '#fff', fontWeight: '600' }}>Send</Text>
+          <TouchableOpacity
+            onPress={() => stopRecording(false)}
+            style={[styles.recSend, { backgroundColor: theme.primary }]}
+            accessibilityLabel="Send voice message"
+          >
+            <Icon name="send" size={16} color="#fff" />
           </TouchableOpacity>
         </View>
       )}
@@ -369,11 +453,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         ) : (
           <View style={styles.composerRow}>
             <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
+              style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
               onPress={() => { Keyboard.dismiss(); setShowAttach(!showAttach); setRecording(false); }}
               accessibilityLabel="Add attachments"
             >
-              <Icon name={showAttach ? 'close' : 'add-circle-outline'} size={22} color={theme.textSecondary} />
+              <Icon name="add" size={24} color={showAttach ? '#fff' : theme.primary} />
             </TouchableOpacity>
             <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
@@ -387,7 +471,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             </View>
             {text.trim() ? (
               <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
-                <Icon name="send" size={20} color="#fff" />
+                <Icon name="send" size={18} color="#fff" />
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
@@ -402,6 +486,33 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           </View>
         )}
       </View>
+
+      {viewingMedia && (
+        <Modal
+          visible
+          transparent
+          animationType="fade"
+          onRequestClose={() => setViewingMedia(null)}
+        >
+          <View style={[styles.mediaModal, { backgroundColor: 'rgba(0,0,0,0.95)' }]}>
+            <TouchableOpacity style={styles.mediaModalClose} onPress={() => setViewingMedia(null)}>
+              <Icon name="close" size={26} color="#fff" />
+            </TouchableOpacity>
+            <Image
+              source={{ uri: viewingMedia.uri }}
+              style={styles.mediaModalImg}
+              resizeMode="contain"
+            />
+            <View style={styles.mediaModalHint}>
+              <Icon name="download" size={14} color="rgba(255,255,255,0.7)" />
+              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginLeft: 6 }}>
+                Saved in your messages
+                {viewingMedia.message && viewingMedia.message.duration ? ` · ${viewingMedia.message.duration}s` : ''}
+              </Text>
+            </View>
+          </View>
+        </Modal>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -442,7 +553,9 @@ function lastSeenText(ts) {
   return `Last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }
 
-function MessageRow({ message, isSent, grouped, theme, onLongPress }) {
+function MessageRow({ message, isSent, grouped, theme, onLongPress, onOpenMedia }) {
+  
+  const hasMedia = !!(message.media_url || message.thumb_url);
   const statusIcon = message.status === 'READ'
     ? 'checkmark-done' : message.status === 'DELIVERED'
       ? 'checkmark-done' : 'checkmark';
@@ -464,20 +577,55 @@ function MessageRow({ message, isSent, grouped, theme, onLongPress }) {
             <Text style={{ fontStyle: 'italic', opacity: 0.7, color: isSent ? '#fff' : theme.textSecondary }}>
               This message was deleted
             </Text>
-          ) : message.type === 'VOICE' ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center', minWidth: 160 }}>
-              <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
-              <View style={{ flex: 1, marginLeft: 8 }}>
-                <View style={{ flexDirection: 'row', gap: 2 }}>
-                  {[4, 8, 12, 6, 14, 10, 7, 12, 6, 9].map((h, i) => (
-                    <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? '#fff' : theme.primary, borderRadius: 2 }} />
-                  ))}
-                </View>
-                <Text style={{ marginTop: 4, fontSize: 10, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>
-                  0:{String(message.duration || 26).padStart(2, '0')} · 1×
-                </Text>
+          ) : message.type === 'IMAGE' || message.type === 'VIDEO' ? (
+            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.85}>
+              <View>
+                <Image
+                  source={{ uri: absUrl(message.thumb_url || message.media_url) }}
+                  style={[styles.mediaImage, { backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
+                  resizeMode="cover"
+                />
+                {message.type === 'VIDEO' && (
+                  <View style={styles.videoPlayWrap}>
+                    <View style={[styles.videoPlay, { backgroundColor: 'rgba(0,0,0,0.45)' }]}>
+                      <Icon name="play" size={26} color="#fff" />
+                    </View>
+                  </View>
+                )}
               </View>
-            </View>
+            </TouchableOpacity>
+          ) : message.type === 'VOICE' ? (
+            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.7} style={{ minWidth: 180 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
+                  <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                    {[5, 9, 13, 7, 15, 11, 8, 13, 7, 10].map((h, i) => (
+                      <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary, borderRadius: 2 }} />
+                    ))}
+                  </View>
+                  <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
+                    0:{String(message.duration || 26).padStart(2, '0')} · 1×
+                  </Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+          ) : message.type === 'DOCUMENT' ? (
+            <TouchableOpacity onPress={() => hasMedia && Linking.openURL(absUrl(message.media_url)).catch(() => {})} activeOpacity={0.7}>
+              <View style={[styles.docRow, { backgroundColor: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight, borderRadius: 10, padding: 8, flexDirection: 'row', alignItems: 'center' }]}>
+                <View style={[styles.docIcon, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primary }]}>
+                  <Icon name="document" size={18} color="#fff" />
+                </View>
+                <View style={{ marginLeft: 10 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: isSent ? '#fff' : theme.receivedText }}>
+                    {message.content || 'Document'}
+                  </Text>
+                  {hasMedia && <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary }}>Tap to open</Text>}
+                </View>
+              </View>
+            </TouchableOpacity>
           ) : (
             <View>
               {message.reply_to ? (
@@ -542,18 +690,22 @@ const styles = StyleSheet.create({
   reactionBadge: { borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, marginTop: -6, marginHorizontal: 8, flexDirection: 'row' },
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  composerBtn: { padding: 6, borderRadius: 20 },
+  composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
   attachBtn: { alignItems: 'center', marginRight: 22 },
   attachIcon: { width: 54, height: 54, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   attachLabel: { fontSize: 12, marginTop: 6 },
   inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
   input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
-  sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  micBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  micBtnRec: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
-  recBar: { flexDirection: 'row', alignItems: 'center', padding: 14, borderTopWidth: 1 },
-  recCancel: { borderRadius: 10, padding: 8 },
+  sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
+  micBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
+  micBtnRec: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: '#E53935', shadowOpacity: 0.35, shadowRadius: 7, shadowOffset: { width: 0, height: 3 } },
+  recBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1 },
+  recCancel: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(229,57,53,0.08)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  recSend: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  recPill: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
+  recDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
+  recTime: { fontSize: 14, fontWeight: '700', marginLeft: 6, fontVariant: ['tabular-nums'] },
   replyBar: { flexDirection: 'row', alignItems: 'center', padding: 10, borderTopWidth: 1 },
   replyLine: { width: 3, height: 32, borderRadius: 2, marginRight: 10 },
   replyTitle: { fontWeight: '700', fontSize: 12 },
@@ -566,4 +718,17 @@ const styles = StyleSheet.create({
   reactionBtn: { borderRadius: 14, width: 48, height: 44, alignItems: 'center', justifyContent: 'center' },
   actionRow: { flexDirection: 'row', gap: 8, marginVertical: 3 },
   actionBtn: { flex: 1, borderRadius: 10, paddingVertical: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
+  mediaImage: { width: 210, height: 170, borderRadius: 12, marginBottom: 4 },
+  fab: { position: 'absolute', right: 16, bottom: 84, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+  fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  videoPlayWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 6, alignItems: 'center', justifyContent: 'center' },
+  videoPlay: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  voicePlay: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  docRow: {},
+  docIcon: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  mediaModal: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  mediaModalClose: { position: 'absolute', top: 48, right: 20, zIndex: 10, padding: 8 },
+  mediaModalImg: { width: '100%', height: '80%' },
+  mediaModalHint: { position: 'absolute', bottom: 40, flexDirection: 'row', alignItems: 'center' },
 });

@@ -7,18 +7,24 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { SERVER_URL, absUrl } from '../config';
+import { ensureMediaPermission } from '../services/permissions';
 
-export default function SettingsScreen({ user, token, onBack, onLogout, setUser }) {
+export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
   const { theme, mode, setMode } = useTheme();
   const [readReceipts, setReadReceipts] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [sound, setSound] = useState(true);
   const [vibration, setVibration] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [appLockPINEntry, setAppLockPINEntry] = useState('');
+  const [confirmingPIN, setConfirmingPIN] = useState(false);
 
   const profilePic = user.profilePic || '';
 
   const pickAndUpload = async () => {
+    try {
+      await ensureMediaPermission();
+    } catch (_) {}
     launchImageLibrary(
       { mediaType: 'photo', quality: 0.7, selectionLimit: 1, includeBase64: false },
       async (res) => {
@@ -56,6 +62,35 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser 
     );
   };
 
+  const handleAppLockToggle = async (enabled) => {
+    if (enabled && !appLockPIN) {
+      setConfirmingPIN(true);
+      return;
+    }
+    if (!enabled) {
+      await onAppLockChange(false, '');
+      return;
+    }
+    if (enabled && appLockPIN) {
+      await onAppLockChange(true, appLockPIN);
+    }
+  };
+
+  const handlePINConfirm = async () => {
+    if (appLockPINEntry.length !== 4) {
+      alert('PIN must be 4 digits');
+      return;
+    }
+    if (confirmingPIN) {
+      await onAppLockChange(true, appLockPINEntry);
+      setConfirmingPIN(false);
+      setAppLockPINEntry('');
+    } else {
+      setConfirmingPIN(true);
+      setAppLockPINEntry('');
+    }
+  };
+
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.background }}>
       <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
@@ -66,27 +101,40 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser 
       </View>
 
       {/* Profile card */}
-      <View style={[styles.profileCard, { backgroundColor: theme.card }]}>
-        <TouchableOpacity onPress={pickAndUpload} style={styles.avatarWrap} disabled={saving}>
-          <View style={[styles.avatarBig, { backgroundColor: theme.primary }]}>
-            {profilePic ? (
-              <Image source={{ uri: absUrl(profilePic) }} style={styles.avatarImg} />
-            ) : (
-              <Text style={styles.avatarText}>{user.displayName[0].toUpperCase()}</Text>
-            )}
+      <View style={styles.profileWrap}>
+        <View style={[styles.profileCard, { backgroundColor: theme.card }]}>
+          <TouchableOpacity onPress={pickAndUpload} style={styles.avatarWrap} disabled={saving}>
+            <View style={[styles.avatarBig, { backgroundColor: theme.primary }]}>
+              {profilePic ? (
+                <Image source={{ uri: absUrl(profilePic) }} style={styles.avatarImg} />
+              ) : (
+                <Text style={styles.avatarText}>{user.displayName[0].toUpperCase()}</Text>
+              )}
+            </View>
+            <View style={[styles.cameraBadge, { backgroundColor: theme.primaryDeep }]}>
+              <Icon name="camera" size={14} color="#fff" />
+            </View>
+          </TouchableOpacity>
+          <View style={{ alignItems: 'center', marginTop: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={[styles.profileName, { color: theme.text }]}>{user.displayName}</Text>
+              <View style={[styles.onlineDot, { backgroundColor: theme.online }]} />
+            </View>
+            <View style={styles.userHandle}>
+              <Text style={{ color: theme.online, fontSize: 13, fontWeight: '600' }}>online</Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 13 }}> · @{user.username}</Text>
+            </View>
+            <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 8, textAlign: 'center' }}>
+              {user.bio || 'Tap the camera icon above to set your profile picture'}
+            </Text>
           </View>
-          <View style={[styles.cameraBadge, { backgroundColor: theme.primaryDeep }]}>
-            <Icon name="camera" size={14} color="#fff" />
-          </View>
-        </TouchableOpacity>
-        <View style={{ alignItems: 'center', marginTop: 10 }}>
-          <Text style={[styles.profileName, { color: theme.text }]}>{user.displayName}</Text>
-          <Text style={{ color: theme.textSecondary, fontSize: 13, marginTop: 2 }}>
-            @{user.username} · online
-          </Text>
-          <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 6, textAlign: 'center' }}>
-            {user.bio || 'Tap the camera icon above to set your profile picture'}
-          </Text>
+
+          <TouchableOpacity onPress={pickAndUpload} disabled={saving} style={[styles.changePicBtn, { backgroundColor: theme.primaryLight }]}>
+            <Icon name="camera-outline" size={15} color={theme.primary} />
+            <Text style={{ color: theme.primary, fontSize: 13, fontWeight: '600', marginLeft: 6 }}>
+              {saving ? 'Uploading…' : (profilePic ? 'Change profile picture' : 'Set profile picture')}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -130,6 +178,54 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser 
           <Switch value={vibration} onValueChange={setVibration} trackColor={{ true: theme.primary }} />
         </SettingRow>
       </Section>
+
+      <Section title="App Lock" theme={theme}>
+        <SettingRow label="App Lock" icon="lock-closed-outline" theme={theme}>
+          <Switch
+            value={appLockEnabled}
+            onValueChange={handleAppLockToggle}
+            trackColor={{ true: theme.primary }}
+          />
+        </SettingRow>
+        {appLockEnabled && (
+          <SettingRow label="Change PIN" icon="create-outline" theme={theme}>
+            <TouchableOpacity onPress={() => setConfirmingPIN(true)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Icon name="key-outline" size={18} color={theme.primary} />
+              <Text style={{ color: theme.text, fontSize: 14 }}>Change PIN</Text>
+            </TouchableOpacity>
+          </SettingRow>
+        )}
+      </Section>
+
+      {confirmingPIN && (
+        <View style={{ marginHorizontal: 16, marginTop: 8, padding: 16, backgroundColor: theme.card, borderRadius: 12, borderWidth: 1, borderColor: theme.border }}>
+          <Text style={{ fontSize: 16, fontWeight: '700', color: theme.text, marginBottom: 8, textAlign: 'center' }}>
+            {confirmingPIN && appLockPIN ? 'Confirm New PIN' : 'Set New PIN'}
+          </Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 16 }}>
+            {[1, 2, 3, 4].map((i) => (
+              <View key={i} style={{ width: 14, height: 14, borderRadius: 7, borderWidth: 2, borderColor: appLockPINEntry.length >= i ? theme.primary : theme.border, backgroundColor: appLockPINEntry.length >= i ? theme.primary : 'transparent' }} />
+            ))}
+          </View>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 8 }}>
+            {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((k) => (
+              <TouchableOpacity key={k} onPress={() => {
+                if (k === '⌫') setAppLockPINEntry(l => l.slice(0, -1));
+                else if (k === '') return;
+                else if (appLockPINEntry.length < 4) setAppLockPINEntry(l => l + k);
+              }} style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: theme.inputBg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
+                <Text style={{ fontSize: 20, fontWeight: '600', color: theme.text }}>{k}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <TouchableOpacity onPress={handlePINConfirm} style={{ marginTop: 16, alignItems: 'center', paddingVertical: 10, backgroundColor: theme.primary, borderRadius: 10 }}>
+            <Text style={{ color: '#fff', fontWeight: '600', fontSize: 14 }}>{confirmingPIN && appLockPIN ? 'Confirm' : 'Set PIN'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setConfirmingPIN(false); setAppLockPINEntry(''); }} style={{ marginTop: 8, alignItems: 'center' }}>
+            <Text style={{ color: theme.textSecondary, fontSize: 13 }}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       <TouchableOpacity style={styles.logoutBtn} onPress={onLogout}>
         <Icon name="log-out-outline" size={18} color={theme.danger} />
@@ -188,6 +284,10 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   profileName: { fontSize: 19, fontWeight: '700' },
+  profileWrap: { margin: 16 },
+  changePicBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', alignSelf: 'center', marginTop: 14, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9 },
+  onlineDot: { width: 9, height: 9, borderRadius: 4.5, marginLeft: 8 },
+  userHandle: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
   sectionTitle: { paddingHorizontal: 16, paddingVertical: 8, fontSize: 13, fontWeight: '700' },
   sectionCard: { marginHorizontal: 16, borderRadius: 16, overflow: 'hidden' },
   row: {
