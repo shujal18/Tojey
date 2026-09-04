@@ -40,7 +40,7 @@ async function requestStartupPermissions() {
 }
 
 function Shell() {
-  const { theme } = useTheme();
+  const { theme, booted: themeBooted } = useTheme();
   const [session, setSession] = useState(null);
   const [booted, setBooted] = useState(false);
   const [activeChat, setActiveChat] = useState(null);
@@ -50,11 +50,6 @@ function Shell() {
   const [appLockPIN, setAppLockPIN] = useState('');
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
-  const [themeReady, setThemeReady] = useState(false);
-
-  useEffect(() => {
-    setThemeReady(true);
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -107,35 +102,34 @@ function Shell() {
     setSocket(null);
   };
 
-  if (!booted || !themeReady) {
+  if (!booted || !themeBooted) {
     return null;
   }
 
   if (showLockScreen) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: theme?.background || '#1A1A2E', justifyContent: 'center', alignItems: 'center', padding: 24 }}>
-        <View style={{ width: '100%', maxWidth: 320, backgroundColor: theme?.card || '#232342', borderRadius: 20, padding: 24, borderWidth: 1, borderColor: theme?.border || '#3A3A5E' }}>
-          <Icon name="lock-closed" size={60} color={theme?.primary || '#7C4DFF'} style={{ alignSelf: 'center', marginBottom: 16 }} />
-          <Text style={{ fontSize: 22, fontWeight: '700', color: theme?.text || '#FFFFFF', textAlign: 'center', marginBottom: 8 }}>App Lock</Text>
-          <Text style={{ fontSize: 14, color: theme?.textSecondary || '#A0A0B8', textAlign: 'center', marginBottom: 24 }}>Enter your PIN to unlock Tojey</Text>
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.background, justifyContent: 'center', alignItems: 'center', padding: 24 }}>
+        <View style={{ width: '100%', maxWidth: 320, backgroundColor: theme.card, borderRadius: 20, padding: 24, borderWidth: 1, borderColor: theme.border }}>
+          <Icon name="lock-closed" size={60} color={theme.primary} style={{ alignSelf: 'center', marginBottom: 16 }} />
+          <Text style={{ fontSize: 22, fontWeight: '700', color: theme.text, textAlign: 'center', marginBottom: 8 }}>App Lock</Text>
+          <Text style={{ fontSize: 14, color: theme.textSecondary, textAlign: 'center', marginBottom: 24 }}>Enter your PIN to unlock Tojey</Text>
           <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 24 }}>
             {[1, 2, 3, 4].map((i) => (
-              <View key={i} style={{ width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: lockInput.length >= i ? (theme?.primary || '#7C4DFF') : (theme?.border || '#3A3A5E'), backgroundColor: lockInput.length >= i ? (theme?.primary || '#7C4DFF') : 'transparent' }} />
+              <View key={i} style={{ width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: lockInput.length >= i ? theme.primary : theme.border, backgroundColor: lockInput.length >= i ? theme.primary : 'transparent' }} />
             ))}
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
-            {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((k) => (
+            {['1','2','3','4','5','6','7','8','9','0','⌫'].map((k) => (
               <TouchableOpacity key={k} onPress={() => {
                 if (k === '⌫') setLockInput(l => l.slice(0, -1));
-                else if (k === '') return;
                 else if (lockInput.length < 4) setLockInput(l => l + k);
-              }} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: theme?.card || '#232342', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme?.border || '#3A3A5E' }}>
-                <Text style={{ fontSize: 24, fontWeight: '600', color: theme?.text || '#FFFFFF' }}>{k}</Text>
+              }} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: theme.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
+                <Text style={{ fontSize: 24, fontWeight: '600', color: theme.text }}>{k}</Text>
               </TouchableOpacity>
             ))}
           </View>
           <TouchableOpacity onPress={handleForgotPIN} style={{ marginTop: 16, alignItems: 'center' }}>
-            <Text style={{ color: theme?.textSecondary || '#A0A0B8', fontSize: 13 }}>Forgot PIN? Reset (clears app lock)</Text>
+            <Text style={{ color: theme.textSecondary, fontSize: 13 }}>Forgot PIN? Reset (clears app lock)</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>

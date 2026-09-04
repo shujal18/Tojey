@@ -30,6 +30,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [pendingCount, setPendingCount] = useState(0);
   const atBottomRef = useRef(true);
 
+  const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '' };
+  const otherUserId = safeOtherUser.id;
+  const otherUserName = safeOtherUser.display_name || safeOtherUser.username || 'Unknown';
+  const otherUserAvatar = safeOtherUser.profile_pic_url;
+  const otherUserOnline = safeOtherUser.online;
+  const otherUserLastSeen = safeOtherUser.last_seen;
+
   const openMedia = (message) => {
     if (!message || !message.media_url) return;
     const uri = absUrl(message.media_url);
@@ -44,20 +51,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setText(t);
     if (socket && t.trim()) {
       if (!typingTimer.current) {
-        socket.emit('typing:start', { otherUserId: otherUser.id });
+        socket.emit('typing:start', { otherUserId });
       }
       clearTimeout(typingTimer.current);
       typingTimer.current = setTimeout(() => {
-        if (socket) socket.emit('typing:stop', { otherUserId: otherUser.id });
+        if (socket) socket.emit('typing:stop', { otherUserId });
         typingTimer.current = null;
       }, 1500);
     }
   };
 
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !otherUserId) return;
 
-    socket.emit('conversation:open', { otherUserId: otherUser.id });
+    socket.emit('conversation:open', { otherUserId });
 
     const hHistory = (msgs) => setMessages(msgs);
     const hReceive = ({ message }) => {
@@ -75,8 +82,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const hRead = ({ messageIds }) => {
       setMessages((prev) => prev.map((m) => (messageIds.includes(m.id) ? { ...m, status: 'READ' } : m)));
     };
-    const hTyping = ({ userId }) => { if (userId === otherUser.id) setTyping(true); };
-    const hTypingStop = ({ userId }) => { if (userId === otherUser.id) setTyping(false); };
+    const hTyping = ({ userId }) => { if (userId === otherUserId) setTyping(true); };
+    const hTypingStop = ({ userId }) => { if (userId === otherUserId) setTyping(false); };
     const hEdited = ({ messageId, content }) =>
       setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content, is_edited: true } : m)));
     const hDeleted = ({ messageId, mode }) =>
@@ -100,7 +107,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); };
     socket.on('conversation:cleared', hCleared);
     const hPresence = ({ userId, isOnline, lastSeen }) => {
-      if (userId === otherUser.id) setPresence({ isOnline, lastSeen });
+      if (userId === otherUserId) setPresence({ isOnline, lastSeen });
     };
     socket.on('presence:update', hPresence);
 
@@ -117,7 +124,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('conversation:cleared', hCleared);
       socket.off('presence:update', hPresence);
     };
-  }, [socket, otherUser.id, currentUser.id]);
+  }, [socket, otherUserId, currentUser.id]);
 
   function updateStatus(id, status) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
@@ -148,12 +155,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     const payload = {
-      otherUserId: otherUser.id,
+      otherUserId,
       type: 'TEXT',
       content,
       replyTo: replyingTo?.id || null,
     };
-    if (socket) socket.emit('typing:stop', { otherUserId: otherUser.id });
+    if (socket) socket.emit('typing:stop', { otherUserId });
     if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
     socket.emit('message:send', payload, (ack) => {
       if (ack?.ok) {
@@ -166,7 +173,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const sendVoice = () => {
     socket.emit('message:send', {
-      otherUserId: otherUser.id,
+      otherUserId,
       type: 'VOICE',
       content: 'Voice message',
       duration: recordTime || 8,
@@ -268,14 +275,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }
       })();
     } else {
-      socket.emit('message:send', { otherUserId: otherUser.id, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' });
+      socket.emit('message:send', { otherUserId, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' });
     }
   };
 
   const sendMedia = (asset) => {
     if (!asset || !asset.uri) return;
     socket.emit('message:send', {
-      otherUserId: otherUser.id,
+      otherUserId,
       type: 'IMAGE',
       content: '📷 Photo',
       mediaUrl: asset.uri,
@@ -283,8 +290,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   };
 
-  const isOnline = presence !== null ? presence.isOnline : !!otherUser.online;
-  const lastSeen = presence !== null ? presence.lastSeen : otherUser.last_seen;
+const isOnline = presence !== null ? presence.isOnline : !!otherUserOnline;
+const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
 
   return (
@@ -297,15 +304,15 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         <TouchableOpacity onPress={onBack} style={styles.backBtn}>
           <Icon name="chevron-back" size={28} color={theme.primary} />
         </TouchableOpacity>
-        <View style={[styles.avatarSmall, { backgroundColor: otherUser.id === 1 ? theme.primary : theme.primaryDeep }]}>
-          {otherUser.profile_pic_url ? (
-            <Image source={{ uri: absUrl(otherUser.profile_pic_url) }} style={styles.avatarImg} />
+        <View style={[styles.avatarSmall, { backgroundColor: otherUserId === 1 ? theme.primary : theme.primaryDeep }]}>
+          {otherUserAvatar ? (
+            <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarImg} />
           ) : (
-            <Text style={styles.avatarSmallText}>{otherUser.display_name[0].toUpperCase()}</Text>
+            <Text style={styles.avatarSmallText}>{otherUserName[0].toUpperCase()}</Text>
           )}
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.headerName, { color: theme.text }]}>{otherUser.display_name}</Text>
+          <Text style={[styles.headerName, { color: theme.text }]}>{otherUserName}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             {typing && <Icon name="pulse" size={12} color={theme.primary} />}
             <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
@@ -405,7 +412,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           <View style={[styles.replyLine, { backgroundColor: theme.primary }]} />
           <View style={{ flex: 1 }}>
             <Text style={[styles.replyTitle, { color: theme.primary }]}>
-              Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUser.display_name}
+              Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUserName}
             </Text>
             <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
               {replyingTo.type === 'VOICE' ? 'Voice message' : (replyingTo.content || 'Media message')}

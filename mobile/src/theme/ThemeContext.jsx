@@ -68,14 +68,15 @@ export function ThemeProvider({ children }) {
 
   const theme = mode === 'dark' ? darkTheme : lightTheme;
 
-  if (!booted) return null;
   return (
-    <ThemeContext.Provider value={{ theme, mode, setMode: changeMode }}>
+    <ThemeContext.Provider value={{ theme, mode, setMode: changeMode, booted }}>
       {children}
     </ThemeContext.Provider>
   );
 }
 
 export function useTheme() {
-  return useContext(ThemeContext);
+  const context = useContext(ThemeContext);
+  if (!context) return { theme: lightTheme, mode: 'light', setMode: () => {}, booted: false };
+  return context;
 }
