@@ -19,7 +19,14 @@ export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
           </View>
         }
         renderItem={({ item }) => (
-          <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onOpenChat(item)}>
+          <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onOpenChat({
+            id: item.id,
+            display_name: item.display_name,
+            username: item.username,
+            profile_pic_url: item.profile_pic_url,
+            online: presence[item.id]?.isOnline,
+            last_seen: presence[item.id]?.lastSeen
+          })}>
             <View style={[styles.avatar, { backgroundColor: item.id === 1 ? theme.primary : theme.primaryDeep }]}>
               {item.profile_pic_url ? (
                 <Image source={{ uri: absUrl(item.profile_pic_url) }} style={styles.avatarImg} />

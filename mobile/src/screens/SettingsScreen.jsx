@@ -23,14 +23,35 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
 
   const pickAndUpload = async () => {
     try {
-      await ensureMediaPermission();
-    } catch (_) {}
+      const hasPermission = await ensureMediaPermission();
+      if (!hasPermission) {
+        alert('Media permission is required to select a profile picture. Please enable it in Settings.');
+        return;
+      }
+    } catch (e) {
+      console.warn('Permission check failed:', e);
+    }
     launchImageLibrary(
       { mediaType: 'photo', quality: 0.7, selectionLimit: 1, includeBase64: false },
       async (res) => {
-        if (res.didCancel || res.errorCode || !res.assets || !res.assets[0]) return;
+        if (res.didCancel) {
+          console.log('User cancelled image picker');
+          return;
+        }
+        if (res.errorCode) {
+          console.error('Image picker error:', res.errorCode, res.errorMessage);
+          alert('Failed to open image picker: ' + (res.errorMessage || 'Unknown error'));
+          return;
+        }
+        if (!res.assets || !res.assets[0]) {
+          console.warn('No assets returned from image picker');
+          return;
+        }
         const asset = res.assets[0];
-        if (!asset.uri) return;
+        if (!asset.uri) {
+          console.warn('Asset has no URI');
+          return;
+        }
         try {
           setSaving(true);
           const fd = new FormData();
@@ -54,6 +75,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
             await AsyncStorage.setItem('@tojey_user', JSON.stringify(data.user));
           }
         } catch (e) {
+          console.error('Profile picture upload failed:', e);
           alert('Could not update profile picture: ' + e.message);
         } finally {
           setSaving(false);

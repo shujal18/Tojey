@@ -166,7 +166,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
       )}
 
       {tab === 'contacts' && (
-        <ContactsScreen users={filtered} presence={presence} onOpenChat={onOpenChat} theme={theme} />
+        <ContactsScreen users={filtered} presence={presence} onOpenChat={openChat} theme={theme} />
       )}
 
       {/* Clear chat confirmation */}

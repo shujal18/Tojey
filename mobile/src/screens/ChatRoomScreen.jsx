@@ -176,8 +176,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setRecordTime(0);
   };
 
-  const startRecording = () => {
-    ensureMicPermission();
+  const startRecording = async () => {
+    const ok = await ensureMicPermission();
+    if (!ok) {
+      alert('Microphone permission is required to record voice messages.');
+      return;
+    }
     setRecording(true);
     setRecordTime(0);
     recTimer.current = setInterval(() => setRecordTime((t) => t + 1), 1000);
@@ -217,29 +221,52 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const pickMedia = (kind) => {
     setShowAttach(false);
     if (kind === 'photo' || kind === 'camera' || kind === 'gallery') {
-      try {
-        const ImagePicker = require('react-native-image-picker');
-        const opts = [];
-        if (kind === 'camera') {
-          (async () => {
+      (async () => {
+        try {
+          const ImagePicker = require('react-native-image-picker');
+          if (kind === 'camera') {
             const ok = await ensureCameraPermission();
-            if (!ok) return;
+            if (!ok) {
+              alert('Camera permission is required to take photos.');
+              return;
+            }
             ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
-              if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+              if (r.didCancel) {
+                console.log('User cancelled camera');
+                return;
+              }
+              if (r.errorCode) {
+                console.error('Camera error:', r.errorCode, r.errorMessage);
+                alert('Failed to open camera: ' + (r.errorMessage || 'Unknown error'));
+                return;
+              }
+              if (r.assets && r.assets[0]) sendMedia(r.assets[0]);
             });
-          })();
-        } else {
-          (async () => {
-            await ensureMediaPermission();
+          } else {
+            const ok = await ensureMediaPermission();
+            if (!ok) {
+              alert('Media permission is required to select photos.');
+              return;
+            }
             const sel = ImagePicker.launchImageLibrary;
             sel({ mediaType: 'photo', selectionLimit: 1 }, (r) => {
-              if (!r.didCancel && r.assets && r.assets[0]) sendMedia(r.assets[0]);
+              if (r.didCancel) {
+                console.log('User cancelled image picker');
+                return;
+              }
+              if (r.errorCode) {
+                console.error('Image picker error:', r.errorCode, r.errorMessage);
+                alert('Failed to open gallery: ' + (r.errorMessage || 'Unknown error'));
+                return;
+              }
+              if (r.assets && r.assets[0]) sendMedia(r.assets[0]);
             });
-          })();
+          }
+        } catch (e) {
+          console.error('pickMedia error:', e);
+          alert('Failed to open media picker: ' + e.message);
         }
-      } catch (e) {
-        socket.emit('message:send', { otherUserId: otherUser.id, type: 'IMAGE', content: '📷 Photo', mediaUrl: '' });
-      }
+      })();
     } else {
       socket.emit('message:send', { otherUserId: otherUser.id, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' });
     }
