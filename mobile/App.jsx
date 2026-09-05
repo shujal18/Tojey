@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { SafeAreaView, StatusBar, Alert, View, Platform, PermissionsAndroid } from 'react-native';
+import { SafeAreaView, StatusBar, Alert, View, Text, TouchableOpacity, Platform, PermissionsAndroid } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { loadSession, logout } from './src/services/auth';
+import { loadSession, logout, login } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
+import { Icon } from './src/components/AppIcon';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
@@ -51,6 +52,33 @@ function Shell() {
   const [appLockPIN, setAppLockPIN] = useState('');
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
+
+  const handleLogin = async (username, password) => {
+    const res = await login(username, password);
+    if (!res.ok) return res;
+    setSession({ token: res.token, user: res.user });
+    setSocket(connect(res.token));
+    return res;
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    disconnect();
+    setSession(null);
+    setSocket(null);
+    setActiveChat(null);
+    setShowSettings(false);
+  };
+
+  const handleForgotPIN = async () => {
+    await AsyncStorage.setItem(APP_LOCK_KEY, 'false');
+    await AsyncStorage.removeItem(APP_LOCK_PIN_KEY);
+    setAppLockEnabled(false);
+    setAppLockPIN('');
+    setShowLockScreen(false);
+    setLockInput('');
+    Alert.alert('App Lock Cleared', 'Your app lock has been reset.');
+  };
 
   useEffect(() => {
     let mounted = true;
