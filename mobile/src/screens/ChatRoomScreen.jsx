@@ -1,13 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
-  KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal,
+  KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { quickReactions } from '../theme';
-import { absUrl } from '../config';
+import { absUrl, SERVER_URL } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
+import RNFetchBlob from 'rn-fetch-blob';
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
@@ -29,6 +30,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [atBottomNear, setAtBottomNear] = useState(true);
   const [pendingCount, setPendingCount] = useState(0);
   const atBottomRef = useRef(true);
+  const atBottomNearRef = useRef(true);
+  const scrolledToEndOnMount = useRef(false);
 
   // Defensive: ensure otherUser has all required properties
   const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
@@ -47,6 +50,41 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setViewingMedia({ uri, message });
     }
   };
+
+  const handleContentSizeChange = useCallback(() => {
+    if (atBottomRef.current && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
+  }, []);
+
+  const handleScroll = useCallback((e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    const h = e.nativeEvent.layoutMeasurement.height;
+    const cs = e.nativeEvent.contentSize.height;
+    const nearBottom = y + h >= cs - 50;
+    atBottomRef.current = nearBottom;
+    if (nearBottom) setPendingCount(0);
+    if (nearBottom !== atBottomNearRef.current) {
+      atBottomNearRef.current = nearBottom;
+      setAtBottomNear(nearBottom);
+    }
+  }, []);
+
+  const renderMessage = useCallback(({ item, index }) => {
+    const isSent = item.sender_id === currentUser.id;
+    const prev = index > 0 ? messages[index - 1] : null;
+    const grouped = !!prev && prev.sender_id === item.sender_id;
+    return (
+      <MessageRow
+        message={item}
+        isSent={isSent}
+        grouped={grouped}
+        theme={theme}
+        onLongPress={() => setReactionMenu(item)}
+        onOpenMedia={openMedia}
+        onRetry={retrySendMedia}
+      />
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, theme]);
 
   const onType = (t) => {
     setText(t);
@@ -67,7 +105,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
     socket.emit('conversation:open', { otherUserId });
 
-    const hHistory = (msgs) => setMessages(msgs);
+    const hHistory = (msgs) => {
+      setMessages(msgs);
+      atBottomRef.current = true;
+      atBottomNearRef.current = true;
+      setAtBottomNear(true);
+      setPendingCount(0);
+      setTimeout(() => {
+        listRef.current?.scrollToEnd({ animated: false });
+        scrolledToEndOnMount.current = true;
+      }, 80);
+    };
     const hReceive = ({ message }) => {
       // Deduplicate: check if message already exists
       setMessages((prev) => {
@@ -180,7 +228,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
     socket.emit('message:send', payload, (ack) => {
       if (ack?.ok) {
+        atBottomRef.current = true;
+        setAtBottomNear(true);
+        setPendingCount(0);
         setMessages((prev) => prev.map((m) => (m.id === tempId ? ack.message : m)));
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
       }
     });
     setText('');
@@ -272,7 +324,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
               return;
             }
             const sel = ImagePicker.launchImageLibrary;
-            sel({ mediaType: 'photo', selectionLimit: 1 }, (r) => {
+            sel({ mediaType: 'mixed', selectionLimit: 1 }, (r) => {
               if (r.didCancel) {
                 console.log('User cancelled image picker');
                 return;
@@ -297,12 +349,93 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const sendMedia = (asset) => {
     if (!asset || !asset.uri) return;
-    socket.emit('message:send', {
-      otherUserId,
-      type: 'IMAGE',
-      content: '📷 Photo',
-      mediaUrl: asset.uri,
-      thumbUrl: asset.uri,
+    const isVideo = asset.type && asset.type.startsWith('video');
+    const tempId = `tmp-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: isVideo ? 'VIDEO' : 'IMAGE',
+      content: isVideo ? '🎬 Video' : '📷 Photo',
+      media_url: asset.uri,
+      thumb_url: asset.uri,
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reactions: [],
+      _local: true,
+      _pending: true,
+      _uploading: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
+    if (atBottomRef.current) {
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+    }
+
+    const mimeType = asset.type || (isVideo ? 'video/mp4' : 'image/jpeg');
+    const fileName = asset.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
+
+    (async () => {
+      try {
+        const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+          'Content-Type': 'multipart/form-data',
+          Authorization: `Bearer ${currentUser.token || ''}`,
+        }, [
+          { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(asset.uri) },
+        ]);
+        const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
+        if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
+        const mediaUrl = upData.url;
+        const payload = {
+          otherUserId,
+          type: isVideo ? 'VIDEO' : 'IMAGE',
+          content: isVideo ? '🎬 Video' : '📷 Photo',
+          mediaUrl,
+          thumbUrl: mediaUrl,
+        };
+        socket.emit('message:send', payload, (ack) => {
+          if (ack?.ok) {
+            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          } else {
+            setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          }
+        });
+      } catch (e) {
+        console.error('sendMedia upload failed:', e);
+        setMessages((prev) => prev.map((m) =>
+          m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m
+        ));
+      }
+    })();
+  };
+
+  const retrySendMedia = (msg) => {
+    if (!msg || !msg.media_url) return;
+    const tempId = `tmp-${Date.now()}-r`;
+    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false } : m)));
+    const isVideo = msg.type === 'VIDEO';
+    RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+      'Content-Type': 'multipart/form-data',
+      Authorization: `Bearer ${currentUser.token || ''}`,
+    }, [
+      { name: 'file', filename: isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`, type: isVideo ? 'video/mp4' : 'image/jpeg', data: RNFetchBlob.wrap(msg.media_url) },
+    ]).then((uploadRes) => {
+      const upData = JSON.parse(uploadRes.data);
+      if (!upData?.url) throw new Error('Upload failed');
+      socket.emit('message:send', {
+        otherUserId,
+        type: isVideo ? 'VIDEO' : 'IMAGE',
+        content: isVideo ? '🎬 Video' : '📷 Photo',
+        mediaUrl: upData.url,
+        thumbUrl: upData.url,
+      }, (ack) => {
+        if (ack?.ok) {
+          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+        } else {
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        }
+      });
+    }).catch((e) => {
+      console.error('retry sendMedia failed:', e);
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
     });
   };
 
@@ -343,34 +476,17 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         ref={listRef}
         data={messages}
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
-        onContentSizeChange={() => { if (atBottomRef.current) listRef.current?.scrollToEnd({ animated: true }); }}
-        onScroll={(e) => {
-          const y = e.nativeEvent.contentOffset.y;
-          const h = e.nativeEvent.layoutMeasurement.height;
-          const cs = e.nativeEvent.contentSize.height;
-          const nearBottom = y + h >= cs - 50;
-          atBottomRef.current = nearBottom;
-          if (nearBottom) setPendingCount(0);
-          setAtBottomNear(nearBottom);
-        }}
-        scrollEventThrottle={120}
+        onContentSizeChange={handleContentSizeChange}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
-        renderItem={({ item, index }) => {
-          const isSent = item.sender_id === currentUser.id;
-          const prev = messages[index - 1];
-          const grouped = prev && prev.sender_id === item.sender_id;
-          return (
-            <MessageRow
-              message={item}
-              isSent={isSent}
-              grouped={grouped}
-              theme={theme}
-              onLongPress={() => setReactionMenu(item)}
-              onOpenMedia={openMedia}
-            />
-          );
-        }}
+        initialNumToRender={15}
+        maxToRenderPerBatch={10}
+        updateCellsBatchingPeriod={30}
+        windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
+        renderItem={renderMessage}
         contentContainerStyle={styles.messageList}
       />
 
@@ -603,7 +719,7 @@ function lastSeenText(ts) {
   return `Last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }
 
-function MessageRow({ message, isSent, grouped, theme, onLongPress, onOpenMedia }) {
+function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry }) {
   
   const hasMedia = !!(message.media_url || message.thumb_url);
   const statusIcon = message.status === 'READ'
@@ -628,19 +744,36 @@ function MessageRow({ message, isSent, grouped, theme, onLongPress, onOpenMedia 
               This message was deleted
             </Text>
           ) : message.type === 'IMAGE' || message.type === 'VIDEO' ? (
-            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.85}>
+            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.85} disabled={message._uploading}>
               <View>
                 <Image
                   source={{ uri: absUrl(message.thumb_url || message.media_url) }}
                   style={[styles.mediaImage, { backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
                   resizeMode="cover"
                 />
-                {message.type === 'VIDEO' && (
+                {(message.type === 'VIDEO' || message._uploading) && (
                   <View style={styles.videoPlayWrap}>
-                    <View style={[styles.videoPlay, { backgroundColor: 'rgba(0,0,0,0.45)' }]}>
-                      <Icon name="play" size={26} color="#fff" />
-                    </View>
+                    {message.type === 'VIDEO' && !message._pending && !message._uploading ? (
+                      <View style={styles.videoPlay}>
+                        <Icon name="play" size={26} color="#fff" />
+                      </View>
+                    ) : message._uploading ? (
+                      <View style={styles.videoPlay}>
+                        <ActivityIndicator color="#fff" />
+                      </View>
+                    ) : null}
                   </View>
+                )}
+                {message._uploadError && (
+                  <TouchableOpacity
+                    style={[StyleSheet.absoluteFillObject, styles.mediaError, { backgroundColor: 'rgba(0,0,0,0.35)' }]}
+                    onPress={() => (onRetry ? onRetry(message) : null)}
+                  >
+                    <Icon name="alert-circle-outline" size={26} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 12, marginTop: 4, fontWeight: '600' }}>
+                      Tap to retry
+                    </Text>
+                  </TouchableOpacity>
                 )}
               </View>
             </TouchableOpacity>
@@ -712,6 +845,8 @@ function MessageRow({ message, isSent, grouped, theme, onLongPress, onOpenMedia 
   );
 }
 
+const MessageRow = memo(MessageRowFn);
+
 function timeOf(t) {
   const d = new Date(t);
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -773,7 +908,8 @@ const styles = StyleSheet.create({
   fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   videoPlayWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 6, alignItems: 'center', justifyContent: 'center' },
-  videoPlay: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  videoPlay: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
+  mediaError: { alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginBottom: 4 },
   voicePlay: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   docRow: {},
   docIcon: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },

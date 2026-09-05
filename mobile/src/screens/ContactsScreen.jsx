@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, Image } from 'react-native';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, Image, Platform } from 'react-native';
 import { Icon } from '../components/AppIcon';
 import { absUrl } from '../config';
 
@@ -12,6 +12,10 @@ export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
       <FlatList
         data={users}
         keyExtractor={(item) => String(item.id)}
+        initialNumToRender={15}
+        maxToRenderPerBatch={10}
+        windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Icon name="people-outline" size={52} color={theme.primaryLight} />

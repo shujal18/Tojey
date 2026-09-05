@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, memo } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal,
+  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
 import { useTheme } from '../theme/ThemeContext';
@@ -135,6 +135,10 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
             <FlatList
               data={users}
               keyExtractor={(item) => String(item.id)}
+              initialNumToRender={15}
+              maxToRenderPerBatch={10}
+              windowSize={11}
+              removeClippedSubviews={Platform.OS === 'android'}
               renderItem={({ item }) => {
                 const contact = {
                   id: item.id,
@@ -166,6 +170,10 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                 ...users.filter((u) => !conversations.find((c) => c.other.id === u.id)),
               ]}
               keyExtractor={(item, idx) => `${item.other?.id || item.id}-${idx}`}
+              initialNumToRender={15}
+              maxToRenderPerBatch={10}
+              windowSize={11}
+              removeClippedSubviews={Platform.OS === 'android'}
               renderItem={({ item }) => {
                 const contact = item.other || item;
                 const normalizedContact = {
@@ -231,7 +239,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   );
 }
 
-function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview, unread }) {
+function ConversationRowFn({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview, unread }) {
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
   const lastMsg = preview && preview.content ? preview.content : (preview && preview.type ? '📎 Media' : '');
   return (
@@ -273,6 +281,8 @@ function ConversationRow({ contact, isOnline, lastSeen, onPress, onLongPress, th
     </TouchableOpacity>
   );
 }
+
+const ConversationRow = memo(ConversationRowFn);
 
 function presenceText(lastSeen) {
   if (!lastSeen) return 'Offline';
