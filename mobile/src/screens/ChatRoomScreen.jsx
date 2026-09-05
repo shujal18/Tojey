@@ -343,13 +343,13 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         ref={listRef}
         data={messages}
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
-        onContentSizeChange={() => { if (atBottom.current) listRef.current?.scrollToEnd({ animated: true }); }}
+        onContentSizeChange={() => { if (atBottomRef.current) listRef.current?.scrollToEnd({ animated: true }); }}
         onScroll={(e) => {
           const y = e.nativeEvent.contentOffset.y;
           const h = e.nativeEvent.layoutMeasurement.height;
           const cs = e.nativeEvent.contentSize.height;
           const nearBottom = y + h >= cs - 50;
-          atBottom.current = nearBottom;
+          atBottomRef.current = nearBottom;
           if (nearBottom) setPendingCount(0);
           setAtBottomNear(nearBottom);
         }}

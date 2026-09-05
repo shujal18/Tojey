@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { SafeAreaView, StatusBar, Alert, View, Text, TouchableOpacity, Platform, PermissionsAndroid } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { loadSession, logout, login } from './src/services/auth';
+import { loadSession, logout } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
 import { Icon } from './src/components/AppIcon';
 import LoginScreen from './src/screens/LoginScreen';
@@ -52,13 +52,32 @@ function Shell() {
   const [appLockPIN, setAppLockPIN] = useState('');
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
+  const [lockError, setLockError] = useState('');
 
-  const handleLogin = async (username, password) => {
-    const res = await login(username, password);
-    if (!res.ok) return res;
-    setSession({ token: res.token, user: res.user });
-    setSocket(connect(res.token));
-    return res;
+  const handleLockKey = (k) => {
+    if (k === '⌫') {
+      setLockInput(l => l.slice(0, -1));
+      setLockError('');
+      return;
+    }
+    if (lockInput.length >= 4) return;
+    const next = lockInput + k;
+    setLockInput(next);
+    setLockError('');
+    if (next.length === 4) {
+      if (next === appLockPIN) {
+        setShowLockScreen(false);
+        setLockInput('');
+      } else {
+        setLockError('Incorrect PIN. Try again.');
+        setLockInput('');
+      }
+    }
+  };
+
+  const handleLogin = (user, token) => {
+    setSession({ user, token });
+    setSocket(connect(token));
   };
 
   const handleLogout = async () => {
@@ -146,17 +165,17 @@ function Shell() {
           <Icon name="lock-closed" size={60} color={theme.primary} style={{ alignSelf: 'center', marginBottom: 16 }} />
           <Text style={{ fontSize: 22, fontWeight: '700', color: theme.text, textAlign: 'center', marginBottom: 8 }}>App Lock</Text>
           <Text style={{ fontSize: 14, color: theme.textSecondary, textAlign: 'center', marginBottom: 24 }}>Enter your PIN to unlock Tojey</Text>
-          <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 24 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 16 }}>
             {[1, 2, 3, 4].map((i) => (
               <View key={i} style={{ width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: lockInput.length >= i ? theme.primary : theme.border, backgroundColor: lockInput.length >= i ? theme.primary : 'transparent' }} />
             ))}
           </View>
+          {lockError ? (
+            <Text style={{ color: theme.danger, textAlign: 'center', fontSize: 13, marginBottom: 16 }}>{lockError}</Text>
+          ) : null}
           <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
             {['1','2','3','4','5','6','7','8','9','0','⌫'].map((k) => (
-              <TouchableOpacity key={k} onPress={() => {
-                if (k === '⌫') setLockInput(l => l.slice(0, -1));
-                else if (lockInput.length < 4) setLockInput(l => l + k);
-              }} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: theme.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
+              <TouchableOpacity key={k} onPress={() => handleLockKey(k)} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: theme.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
                 <Text style={{ fontSize: 24, fontWeight: '600', color: theme.text }}>{k}</Text>
               </TouchableOpacity>
             ))}
