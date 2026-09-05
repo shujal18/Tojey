@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
+  Platform,
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -8,6 +9,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { SERVER_URL, absUrl } from '../config';
 import { ensureMediaPermission } from '../services/permissions';
+import RNFetchBlob from 'rn-fetch-blob';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
   const { theme, mode, setMode } = useTheme();
@@ -54,15 +56,20 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         }
         try {
           setSaving(true);
-          const fd = new FormData();
-          fd.append('file', {
-            uri: asset.uri,
-            name: asset.fileName || 'profile.jpg',
-            type: asset.type || 'image/jpeg',
-          });
-          const up = await fetch(`${SERVER_URL}/api/upload`, { method: 'POST', body: fd });
-          const upData = await up.json();
+          const mimeType = asset.type || 'image/jpeg';
+          const fileName = asset.fileName || `profile_${Date.now()}.jpg`;
+          
+          // Use RNFetchBlob for reliable file upload on Android (handles content:// URIs)
+          const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'multipart/form-data',
+          }, [
+            { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(asset.uri) },
+          ]);
+          
+          const upData = JSON.parse(uploadRes.data);
           if (!upData.url) throw new Error(upData.error || 'Upload failed');
+          
           const absolute = upData.url.startsWith('http') ? upData.url : `${SERVER_URL}${upData.url}`;
           const pRes = await fetch(`${SERVER_URL}/api/profile`, {
             method: 'PUT',
@@ -73,6 +80,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
           if (data.user) {
             setUser(data.user);
             await AsyncStorage.setItem('@tojey_user', JSON.stringify(data.user));
+            alert('Profile picture updated successfully!');
           }
         } catch (e) {
           console.error('Profile picture upload failed:', e);
@@ -230,7 +238,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
             ))}
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 8 }}>
-            {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((k) => (
+            {['1','2','3','4','5','6','7','8','9','0','⌫'].map((k) => (
               <TouchableOpacity key={k} onPress={() => {
                 if (k === '⌫') setAppLockPINEntry(l => l.slice(0, -1));
                 else if (k === '') return;

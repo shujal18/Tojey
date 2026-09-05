@@ -43,6 +43,7 @@ function Shell() {
   const { theme, booted: themeBooted } = useTheme();
   const [session, setSession] = useState(null);
   const [booted, setBooted] = useState(false);
+  const [initError, setInitError] = useState(null);
   const [activeChat, setActiveChat] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [socket, setSocket] = useState(null);
@@ -52,58 +53,62 @@ function Shell() {
   const [lockInput, setLockInput] = useState('');
 
   useEffect(() => {
+    let mounted = true;
     (async () => {
-      await requestStartupPermissions();
-      const s = await loadSession();
-      setSession(s);
-      if (s) {
-        setSocket(connect(s.token));
+      try {
+        await requestStartupPermissions();
+        const s = await loadSession();
+        if (!mounted) return;
+        setSession(s);
+        if (s) {
+          setSocket(connect(s.token));
+        }
+        const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
+        const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
+        setAppLockEnabled(lockEnabled === 'true');
+        setAppLockPIN(pin || '');
+        if (lockEnabled === 'true' && pin) {
+          setShowLockScreen(true);
+        }
+      } catch (e) {
+        console.error('App initialization failed:', e);
+        if (mounted) setInitError(e.message);
+      } finally {
+        if (mounted) setBooted(true);
       }
-      const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
-      const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
-      setAppLockEnabled(lockEnabled === 'true');
-      setAppLockPIN(pin || '');
-      if (lockEnabled === 'true' && pin) {
-        setShowLockScreen(true);
-      }
-      setBooted(true);
     })();
+    return () => { mounted = false; };
   }, []);
 
-  const handleLockSubmit = () => {
-    if (lockInput === appLockPIN) {
-      setShowLockScreen(false);
-      setLockInput('');
-    } else {
-      Alert.alert('Incorrect PIN', 'Please try again.');
-      setLockInput('');
-    }
-  };
-
-  const handleForgotPIN = async () => {
-    await AsyncStorage.removeItem(APP_LOCK_KEY);
-    await AsyncStorage.removeItem(APP_LOCK_PIN_KEY);
-    setAppLockEnabled(false);
-    setAppLockPIN('');
-    setShowLockScreen(false);
-  };
-
-  const handleLogin = (user, token) => {
-    setSession({ user, token });
-    setSocket(connect(token));
-  };
-
-  const handleLogout = async () => {
-    disconnect();
-    await logout();
-    setSession(null);
-    setActiveChat(null);
-    setShowSettings(false);
-    setSocket(null);
-  };
-
+  // Show loading screen during initialization
   if (!booted || !themeBooted) {
-    return null;
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: TojeyColors.primary, justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ alignItems: 'center' }}>
+          <View style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }}>
+            <Icon name="chatbubbles" size={40} color={TojeyColors.primary} />
+          </View>
+          <Text style={{ color: '#fff', fontSize: 24, fontWeight: '700' }}>Tojey</Text>
+          <Text style={{ color: 'rgba(255,255,255,0.8)', fontSize: 14, marginTop: 8 }}>Loading...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // Show error state if initialization failed
+  if (initError) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.background, justifyContent: 'center', alignItems: 'center', padding: 24 }}>
+        <View style={{ alignItems: 'center', padding: 24 }}>
+          <Icon name="alert-circle" size={60} color={theme.danger} style={{ marginBottom: 16 }} />
+          <Text style={{ fontSize: 18, fontWeight: '700', color: theme.text, textAlign: 'center', marginBottom: 8 }}>Failed to Initialize</Text>
+          <Text style={{ color: theme.textSecondary, textAlign: 'center', marginBottom: 24 }}>{initError}</Text>
+          <TouchableOpacity onPress={() => { setInitError(null); setBooted(false); }} style={{ backgroundColor: theme.primary, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 10 }}>
+            <Text style={{ color: '#fff', fontWeight: '600', fontSize: 16 }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
   }
 
   if (showLockScreen) {

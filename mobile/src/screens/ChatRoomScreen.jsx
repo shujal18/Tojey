@@ -30,12 +30,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [pendingCount, setPendingCount] = useState(0);
   const atBottomRef = useRef(true);
 
-  const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '' };
+  // Defensive: ensure otherUser has all required properties
+  const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
   const otherUserId = safeOtherUser.id;
   const otherUserName = safeOtherUser.display_name || safeOtherUser.username || 'Unknown';
-  const otherUserAvatar = safeOtherUser.profile_pic_url;
-  const otherUserOnline = safeOtherUser.online;
-  const otherUserLastSeen = safeOtherUser.last_seen;
+  const otherUserAvatar = safeOtherUser.profile_pic_url || '';
+  const otherUserOnline = safeOtherUser.online ?? false;
+  const otherUserLastSeen = safeOtherUser.last_seen ?? null;
 
   const openMedia = (message) => {
     if (!message || !message.media_url) return;
@@ -62,13 +63,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   };
 
   useEffect(() => {
-    if (!socket || !otherUserId) return;
+    if (!socket || !otherUserId || !currentUser?.id) return;
 
     socket.emit('conversation:open', { otherUserId });
 
     const hHistory = (msgs) => setMessages(msgs);
     const hReceive = ({ message }) => {
-      setMessages((prev) => [...prev, { ...message, _local: message.sender_id === currentUser.id }]);
+      // Deduplicate: check if message already exists
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === message.id)) return prev;
+        return [...prev, { ...message, _local: message.sender_id === currentUser.id }];
+      });
       if (message.sender_id !== currentUser.id) {
         if (!atBottomRef.current) {
           setPendingCount((n) => n + 1);
@@ -111,6 +116,15 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     socket.on('presence:update', hPresence);
 
+    // Re-emit conversation:open on socket reconnect to ensure message sync
+    const onReconnect = () => {
+      if (socket && otherUserId) {
+        socket.emit('conversation:open', { otherUserId });
+      }
+    };
+    socket.on('connect', onReconnect);
+    socket.io?.on('reconnect', onReconnect);
+
     return () => {
       socket.off('messages:history', hHistory);
       socket.off('message:receive', hReceive);
@@ -123,6 +137,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('message:reaction', hReaction);
       socket.off('conversation:cleared', hCleared);
       socket.off('presence:update', hPresence);
+      socket.off('connect', onReconnect);
+      socket.io?.off('reconnect', onReconnect);
     };
   }, [socket, otherUserId, currentUser.id]);
 
@@ -290,8 +306,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   };
 
-const isOnline = presence !== null ? presence.isOnline : !!otherUserOnline;
-const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
+const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
+  const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
 
   return (

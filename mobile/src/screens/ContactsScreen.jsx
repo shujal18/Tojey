@@ -18,35 +18,39 @@ export default function ContactsScreen({ users, presence, onOpenChat, theme }) {
             <Text style={[styles.emptyText, { color: theme.textSecondary }]}>No contacts found</Text>
           </View>
         }
-        renderItem={({ item }) => (
-          <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onOpenChat({
+        renderItem={({ item }) => {
+          const contact = {
             id: item.id,
-            display_name: item.display_name,
             username: item.username,
-            profile_pic_url: item.profile_pic_url,
-            online: presence[item.id]?.isOnline,
-            last_seen: presence[item.id]?.lastSeen
-          })}>
-            <View style={[styles.avatar, { backgroundColor: item.id === 1 ? theme.primary : theme.primaryDeep }]}>
-              {item.profile_pic_url ? (
-                <Image source={{ uri: absUrl(item.profile_pic_url) }} style={styles.avatarImg} />
-              ) : (
-                <Text style={styles.avatarText}>{item.display_name[0].toUpperCase()}</Text>
-              )}
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.name, { color: theme.text }]}>{item.display_name}</Text>
-              <View style={styles.statusRow}>
-                <Icon name={presence[item.id]?.isOnline ? 'radio-button-on' : 'radio-button-off'} size={12}
-                  color={presence[item.id]?.isOnline ? theme.online : theme.textSecondary} />
-                <Text style={[styles.status, { color: theme.textSecondary }]}>
-                  {presence[item.id]?.isOnline ? 'Online' : presenceText(presence[item.id]?.lastSeen)}
-                </Text>
+            display_name: item.display_name,
+            profile_pic_url: item.profile_pic_url || '',
+            online: presence[item.id]?.isOnline ?? false,
+            last_seen: presence[item.id]?.lastSeen ?? null,
+            bio: item.bio || '',
+          };
+          return (
+            <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onOpenChat(contact)}>
+              <View style={[styles.avatar, { backgroundColor: item.id === 1 ? theme.primary : theme.primaryDeep }]}>
+                {item.profile_pic_url ? (
+                  <Image source={{ uri: absUrl(item.profile_pic_url) }} style={styles.avatarImg} />
+                ) : (
+                  <Text style={styles.avatarText}>{item.display_name[0].toUpperCase()}</Text>
+                )}
               </View>
-            </View>
-            <Icon name="chevron-forward" size={18} color={theme.textSecondary} />
-          </TouchableOpacity>
-        )}
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.name, { color: theme.text }]}>{item.display_name}</Text>
+                <View style={styles.statusRow}>
+                  <Icon name={presence[item.id]?.isOnline ? 'radio-button-on' : 'radio-button-off'} size={12}
+                    color={presence[item.id]?.isOnline ? theme.online : theme.textSecondary} />
+                  <Text style={[styles.status, { color: theme.textSecondary }]}>
+                    {presence[item.id]?.isOnline ? 'Online' : presenceText(presence[item.id]?.lastSeen)}
+                  </Text>
+                </View>
+              </View>
+              <Icon name="chevron-forward" size={18} color={theme.textSecondary} />
+            </TouchableOpacity>
+          );
+        }}
         contentContainerStyle={{ paddingVertical: 8 }}
       />
     </View>

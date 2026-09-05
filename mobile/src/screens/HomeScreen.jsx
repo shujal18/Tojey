@@ -87,7 +87,17 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
 
   const openChat = (contact) => {
     setUnread((u) => { const n = { ...u }; delete n[contact.id]; return n; });
-    onOpenChat(contact);
+    // Ensure contact has all required properties for ChatRoomScreen
+    const normalizedContact = {
+      id: contact.id,
+      username: contact.username,
+      display_name: contact.display_name,
+      profile_pic_url: contact.profile_pic_url || '',
+      online: contact.online ?? contact.is_online ?? false,
+      last_seen: contact.last_seen ?? contact.lastSeen ?? null,
+      bio: contact.bio || '',
+    };
+    onOpenChat(normalizedContact);
   };
 
   const filtered = users.filter(
@@ -125,17 +135,28 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
             <FlatList
               data={users}
               keyExtractor={(item) => String(item.id)}
-              renderItem={({ item }) => (
-                <ConversationRow
-                  contact={item}
-                  isOnline={presence[item.id]?.isOnline}
-                  lastSeen={presence[item.id]?.lastSeen}
-                  unread={unread[item.id]}
-                  theme={theme}
-                  onPress={() => openChat({ ...item, online: presence[item.id]?.isOnline, last_seen: presence[item.id]?.lastSeen })}
-                  onLongPress={() => setClearTarget(item)}
-                />
-              )}
+              renderItem={({ item }) => {
+                const contact = {
+                  id: item.id,
+                  username: item.username,
+                  display_name: item.display_name,
+                  profile_pic_url: item.profile_pic_url || '',
+                  online: presence[item.id]?.isOnline ?? item.is_online ?? false,
+                  last_seen: presence[item.id]?.lastSeen ?? item.last_seen ?? null,
+                  bio: item.bio || '',
+                };
+                return (
+                  <ConversationRow
+                    contact={contact}
+                    isOnline={contact.online}
+                    lastSeen={contact.last_seen}
+                    unread={unread[item.id]}
+                    theme={theme}
+                    onPress={() => openChat(contact)}
+                    onLongPress={() => setClearTarget(contact)}
+                  />
+                );
+              }}
               contentContainerStyle={styles.list}
             />
           ) : conversations.length > 0 ? (
@@ -145,18 +166,30 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                 ...users.filter((u) => !conversations.find((c) => c.other.id === u.id)),
               ]}
               keyExtractor={(item, idx) => `${item.other?.id || item.id}-${idx}`}
-              renderItem={({ item }) => (
-                <ConversationRow
-                  contact={item.other || item}
-                  preview={item.lastMsg}
-                  isOnline={presence[(item.other || item).id]?.isOnline}
-                  lastSeen={presence[(item.other || item).id]?.lastSeen}
-                  unread={unread[(item.other || item).id]}
-                  theme={theme}
-                  onPress={() => openChat({ ...(item.other || item), online: presence[(item.other || item).id]?.isOnline, last_seen: presence[(item.other || item).id]?.lastSeen })}
-                  onLongPress={() => setClearTarget(item.other || item)}
-                />
-              )}
+              renderItem={({ item }) => {
+                const contact = item.other || item;
+                const normalizedContact = {
+                  id: contact.id,
+                  username: contact.username,
+                  display_name: contact.display_name,
+                  profile_pic_url: contact.profile_pic_url || '',
+                  online: presence[contact.id]?.isOnline ?? contact.online ?? contact.is_online ?? false,
+                  last_seen: presence[contact.id]?.lastSeen ?? contact.last_seen ?? contact.lastSeen ?? null,
+                  bio: contact.bio || '',
+                };
+                return (
+                  <ConversationRow
+                    contact={normalizedContact}
+                    preview={item.lastMsg}
+                    isOnline={normalizedContact.online}
+                    lastSeen={normalizedContact.last_seen}
+                    unread={unread[normalizedContact.id]}
+                    theme={theme}
+                    onPress={() => openChat(normalizedContact)}
+                    onLongPress={() => setClearTarget(normalizedContact)}
+                  />
+                );
+              }}
               contentContainerStyle={styles.list}
             />
           ) : (

@@ -439,24 +439,24 @@ async function getOtherId(msg, myId) {
 }
 
 async function getOrCreateConversation(userId, otherUserId) {
+  // Always order user IDs consistently to prevent duplicate conversations
+  const [user1, user2] = userId < otherUserId ? [userId, otherUserId] : [otherUserId, userId];
+
   const existing = await pool.query(
-    `SELECT * FROM conversations
-     WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
-    [userId, otherUserId]
+    `SELECT * FROM conversations WHERE user1_id = $1 AND user2_id = $2`,
+    [user1, user2]
   );
   if (existing.rows.length > 0) return existing.rows[0];
 
   const result = await pool.query(
-    `INSERT INTO conversations (user1_id, user2_id) VALUES ($1, $2)
-     ON CONFLICT DO NOTHING RETURNING *`,
-    [userId, otherUserId]
+    `INSERT INTO conversations (user1_id, user2_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING *`,
+    [user1, user2]
   );
 
   if (result.rows.length > 0) return result.rows[0];
   return (await pool.query(
-    `SELECT * FROM conversations
-     WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
-    [userId, otherUserId]
+    `SELECT * FROM conversations WHERE user1_id = $1 AND user2_id = $2`,
+    [user1, user2]
   )).rows[0];
 }
 
