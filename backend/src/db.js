@@ -108,6 +108,21 @@ CREATE TABLE IF NOT EXISTS device_tokens (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  sender_id INTEGER NOT NULL REFERENCES users(id),
+  receiver_id INTEGER NOT NULL REFERENCES users(id),
+  conversation_id INTEGER REFERENCES conversations(id),
+  message TEXT NOT NULL,
+  type VARCHAR(20) DEFAULT 'NOTIFICATION',
+  delivery_method VARCHAR(10) NOT NULL DEFAULT 'socket',
+  status VARCHAR(20) NOT NULL DEFAULT 'sent',
+  idempotency_key TEXT UNIQUE,
+  fcm_message_id TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  delivered_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS read_receipts (
   id SERIAL PRIMARY KEY,
   message_id INTEGER NOT NULL REFERENCES messages(id),
@@ -141,10 +156,18 @@ CREATE TABLE IF NOT EXISTS stored_media (
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_receiver ON notifications(receiver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_conversation ON notifications(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_sender ON notifications(sender_id);
 `;
 
 const MIGRATIONS = `
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT;
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 `;
 
 async function initDB() {
@@ -152,6 +175,11 @@ async function initDB() {
   try {
     await client.query(SCHEMA);
     await client.query(MIGRATIONS);
+    // Clear stale online flags from a previous process. Runs before the server listens,
+    // so no real sockets are active; users will be re-marked online on reconnect.
+    await client.query(
+      'UPDATE user_presence SET is_online = FALSE, typing_to = NULL, socket_id = NULL WHERE is_online = TRUE'
+    );
     console.log('✓ Database initialized');
     await seedUsers(client);
   } finally {

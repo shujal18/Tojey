@@ -1,15 +1,15 @@
 import React, { useEffect, useState, memo } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform,
+  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform, ActivityIndicator,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
 import { loadUsers, saveUsers, loadConversations, saveConversations, clearConversationCache } from '../services/cache';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
-import { absUrl } from '../config';
+import { absUrl, SERVER_URL } from '../config';
 import ContactsScreen from './ContactsScreen';
 
-export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
+export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   const [users, setUsers] = useState([]);
@@ -18,6 +18,11 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   const [unread, setUnread] = useState({});
   const [query, setQuery] = useState('');
   const [clearTarget, setClearTarget] = useState(null);
+  const [actionTarget, setActionTarget] = useState(null);
+  const [notifTarget, setNotifTarget] = useState(null);
+  const [notifMsg, setNotifMsg] = useState('');
+  const [notifSending, setNotifSending] = useState(false);
+  const [notifResult, setNotifResult] = useState(null);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -138,6 +143,48 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
     onOpenChat(normalizedContact);
   };
 
+  const sendNotification = async () => {
+    const msg = notifMsg.trim();
+    if (!notifTarget) return;
+    if (!msg) {
+      setNotifResult({ error: 'Write a message first' });
+      return;
+    }
+    setNotifSending(true);
+    setNotifResult(null);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/notifications/send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token || ''}`,
+        },
+        body: JSON.stringify({ receiverId: notifTarget.id, message: msg }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setNotifResult({ error: data.error || 'Failed to send' });
+        return;
+      }
+      if (data.status === 'failed') {
+        setNotifResult({ error: data.note || 'Delivery failed (offline user has no device token)' });
+        return;
+      }
+      const via = data.deliveryMethod === 'socket' ? 'live connection' : 'push notification';
+      setNotifResult({ ok: true, text: `Sent via ${via}` });
+      setTimeout(() => {
+        setNotifTarget(null);
+        setNotifMsg('');
+        setNotifResult(null);
+      }, 1600);
+    } catch (e) {
+      console.error('sendNotification failed:', e);
+      setNotifResult({ error: 'Cannot reach server' });
+    } finally {
+      setNotifSending(false);
+    }
+  };
+
   const filtered = users.filter(
     (u) => !query || u.display_name.toLowerCase().includes(query.toLowerCase())
   );
@@ -195,7 +242,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                     unread={unread[item.id]}
                     theme={theme}
                     onPress={() => openChat(contact)}
-                    onLongPress={() => setClearTarget(contact)}
+                    onLongPress={() => setActionTarget(contact)}
                   />
                 );
               }}
@@ -232,7 +279,7 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
                     unread={unread[normalizedContact.id]}
                     theme={theme}
                     onPress={() => openChat(normalizedContact)}
-                    onLongPress={() => setClearTarget(normalizedContact)}
+                    onLongPress={() => setActionTarget(normalizedContact)}
                   />
                 );
               }}
@@ -247,6 +294,75 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
       {tab === 'contacts' && (
         <ContactsScreen users={filtered} presence={presence} onOpenChat={openChat} theme={theme} />
       )}
+
+      {/* Long-press actions: send notification / clear messages */}
+      <Modal transparent visible={!!actionTarget} animationType="fade" onRequestClose={() => setActionTarget(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>{actionTarget?.display_name}</Text>
+            <TouchableOpacity
+              style={[styles.actionOption, { backgroundColor: theme.primaryLight, marginTop: 16 }]}
+              onPress={() => {
+                setNotifTarget(actionTarget);
+                setNotifMsg('Nice days');
+                setNotifResult(null);
+                setActionTarget(null);
+              }}
+            >
+              <Icon name="notifications-outline" size={18} color={theme.primary} />
+              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: 15 }}>Send Notification</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionOption, { backgroundColor: theme.inputBg, marginTop: 10 }]}
+              onPress={() => {
+                setClearTarget(actionTarget);
+                setActionTarget(null);
+              }}
+            >
+              <Icon name="trash-outline" size={18} color={theme.danger} />
+              <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 12, fontSize: 15 }}>Clear Messages</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setActionTarget(null)}
+              style={{ alignSelf: 'center', marginTop: 16, paddingHorizontal: 18, paddingVertical: 8 }}
+            >
+              <Text style={{ color: theme.textSecondary, fontWeight: '600', fontSize: 14 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Send notification composer */}
+      <Modal transparent visible={!!notifTarget} animationType="slide" onRequestClose={() => setNotifTarget(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>Send Notification</Text>
+            <Text style={[styles.modalSub, { color: theme.textSecondary }]}>To {notifTarget?.display_name}</Text>
+            <TextInput
+              value={notifMsg}
+              onChangeText={(t) => { setNotifMsg(t); setNotifResult(null); }}
+              placeholder="Notification message…"
+              placeholderTextColor={theme.textSecondary}
+              maxLength={200}
+              multiline
+              style={[styles.notifInput, { backgroundColor: theme.inputBg, color: theme.text }]}
+            />
+            {notifResult && (
+              <Text style={{ color: notifResult.error ? theme.danger : theme.online, fontSize: 13, marginTop: 10 }}>
+                {notifResult.error || notifResult.text}
+              </Text>
+            )}
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={() => setNotifTarget(null)} style={[styles.modalBtn, { backgroundColor: theme.inputBg }]}>
+                <Text style={{ color: theme.text, fontWeight: '600' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={sendNotification} disabled={notifSending} style={[styles.modalBtn, { backgroundColor: theme.primary }]}>
+                {notifSending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ color: '#fff', fontWeight: '600' }}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Clear chat confirmation */}
       <Modal transparent visible={!!clearTarget} animationType="fade" onRequestClose={() => setClearTarget(null)}>
@@ -414,6 +530,8 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', padding: 24 },
   modalCard: { borderRadius: 16, padding: 22, width: '100%', maxWidth: 340 },
   modalTitle: { fontSize: 17, fontWeight: '700' },
+  actionOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 13 },
+  notifInput: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, marginTop: 14, minHeight: 48, maxHeight: 120, textAlignVertical: 'top' },
   modalSub: { fontSize: 13, marginTop: 8, lineHeight: 19 },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
   modalBtn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10 },

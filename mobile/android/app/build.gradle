@@ -3,6 +3,17 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
 /**
+ * Firebase Cloud Messaging.
+ *
+ * google-services.json comes from the user's Firebase project and must NOT be committed
+ * (it is not itself a secret, but it is project-specific). Apply the plugin only when the
+ * file is present so the build still works without Firebase configured.
+ */
+if (file('google-services.json').exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}
+
+/**
  * React Native Gradle Plugin (RN 0.73)
  */
 react {

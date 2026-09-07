@@ -10,6 +10,8 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.1.0",
     "@react-native-clipboard/clipboard": "^1.14.0",
+    "@react-native-firebase/app": "^19.3.0",
+    "@react-native-firebase/messaging": "^19.3.0",
     "react": "18.2.0",
     "react-native": "0.73.11",
     "react-native-document-picker": "^9.3.1",

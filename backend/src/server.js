@@ -5,6 +5,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
+const { sendPush, deactivateTokens } = require('./fcm');
 const path = require('path');
 const { upload } = require('./media');
 
@@ -102,6 +103,172 @@ app.get('/uploads/:filename', async (req, res) => {
   }
 });
 
+// Register (or refresh) an FCM push token for the authenticated user.
+// A user may own several tokens (one per device). Conflict is on the token itself so a
+// refreshed token replaces the old registration instead of creating duplicates.
+app.post('/api/devices/token', authMiddleware, async (req, res) => {
+  try {
+    const user = (await pool.query('SELECT id FROM users WHERE username = $1', [req.user.username])).rows[0];
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { token, platform, deviceId } = req.body || {};
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ error: 'token is required' });
+    }
+
+    await pool.query(
+      `INSERT INTO device_tokens (user_id, fcm_token, platform, device_id, last_seen_at, updated_at, is_active)
+       VALUES ($1, $2, $3, $4, NOW(), NOW(), TRUE)
+       ON CONFLICT (fcm_token) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
+         platform = COALESCE(EXCLUDED.platform, device_tokens.platform),
+         device_id = COALESCE(EXCLUDED.device_id, device_tokens.device_id),
+         last_seen_at = NOW(),
+         updated_at = NOW(),
+         is_active = TRUE`,
+      [user.id, token.trim(), platform || 'android', deviceId || null]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('devices:token error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Send a notification from the authenticated user to receiverId.
+// The sender is taken from the JWT, never from the request body.
+// Routing decision happens here, server-side:
+//   receiver has an active Socket.IO connection  -> deliver over sockets, NO FCM
+//   receiver has no active socket                -> deliver via FCM push
+app.post('/api/notifications/send', authMiddleware, async (req, res) => {
+  try {
+    const sender = (await pool.query(
+      'SELECT id, username, display_name, profile_pic_url FROM users WHERE username = $1',
+      [req.user.username]
+    )).rows[0];
+    if (!sender) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { receiverId, message, conversationId, idempotencyKey } = req.body || {};
+
+    if (!/^[1-9]\d*$/.test(String(receiverId))) {
+      return res.status(400).json({ error: 'receiverId is required' });
+    }
+    if (String(receiverId) === String(sender.id)) {
+      return res.status(400).json({ error: 'Cannot send a notification to yourself' });
+    }
+
+    const body = (typeof message === 'string' ? message.trim() : '');
+    if (!body) return res.status(400).json({ error: 'message is required' });
+    if (body.length > 500) return res.status(400).json({ error: 'message is too long' });
+
+    const receiver = (await pool.query(
+      'SELECT id, username, display_name FROM users WHERE id = $1',
+      [receiverId]
+    )).rows[0];
+    if (!receiver) return res.status(404).json({ error: 'Receiver not found' });
+
+    // Idempotency: a repeated request with the same key returns the stored result
+    // without delivering again.
+    let existingNotif = null;
+    if (idempotencyKey) {
+      existingNotif = (await pool.query(
+        'SELECT * FROM notifications WHERE idempotency_key = $1',
+        [idempotencyKey]
+      )).rows[0];
+      if (existingNotif) {
+        return res.json({ ok: true, duplicate: true, notification: existingNotif, deliveryMethod: existingNotif.delivery_method, status: existingNotif.status });
+      }
+    }
+
+    let convo = null;
+    if (conversationId) {
+      convo = (await pool.query('SELECT * FROM conversations WHERE id = $1', [conversationId])).rows[0];
+      if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+      const involvesSender = convo.user1_id === sender.id || convo.user2_id === sender.id;
+      const involvesReceiver = convo.user1_id === receiver.id || convo.user2_id === receiver.id;
+      if (!involvesSender || !involvesReceiver) {
+        return res.status(403).json({ error: 'Conversation does not involve both users' });
+      }
+    } else {
+      convo = await getOrCreateConversation(sender.id, receiver.id);
+    }
+
+    const online = userSockets(receiver.id).size > 0;
+    const deliveryMethod = online ? 'socket' : 'fcm';
+
+    const insert = await pool.query(
+      `INSERT INTO notifications (sender_id, receiver_id, conversation_id, message, type, delivery_method, status, idempotency_key, created_at, delivered_at)
+       VALUES ($1, $2, $3, $4, 'NOTIFICATION', $5, 'sent', $6, NOW(), NOW())
+       RETURNING *`,
+      [sender.id, receiver.id, convo.id, body, deliveryMethod, idempotencyKey || null]
+    );
+    const notif = insert.rows[0];
+
+    if (online) {
+      // Deliver to every active socket of the receiver. FCM is intentionally NOT used.
+      io.to(`user:${receiver.id}`).emit('notification:receive', {
+        notification: notif,
+        conversationId: convo.id,
+        sender: { userId: sender.id, username: sender.username, displayName: sender.display_name, profilePic: sender.profile_pic_url || '' },
+      });
+      return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
+    }
+
+    // Offline: send via FCM to every registered device token of the receiver.
+    const tokensRes = await pool.query(
+      `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      [receiver.id]
+    );
+    const tokens = tokensRes.rows.map((r) => r.fcm_token);
+
+    if (!tokens.length) {
+      const updated = (await pool.query(
+        `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
+        [notif.id]
+      )).rows[0];
+      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token' });
+    }
+
+    const push = await sendPush({
+      tokens,
+      notification: { title: `${sender.display_name || sender.username} • Tojey`, body },
+      data: {
+        type: 'tojey_notification',
+        notificationId: String(notif.id),
+        id: String(notif.id),
+        senderId: String(sender.id),
+        senderUsername: sender.username,
+        senderName: sender.display_name || sender.username,
+        receiverId: String(receiver.id),
+        conversationId: String(convo.id),
+        body,
+      },
+    });
+
+    if (push.invalidTokens.length) {
+      await deactivateTokens(push.invalidTokens);
+    }
+
+    const status = push.success ? 'sent' : 'failed';
+    const updated = (await pool.query(
+      `UPDATE notifications SET status = $1, delivered_at = $2, fcm_message_id = $3 WHERE id = $4 RETURNING *`,
+      [status, push.success ? new Date() : null, push.messageId || null, notif.id]
+    )).rows[0];
+
+    return res.json({
+      ok: true,
+      notification: updated,
+      deliveryMethod: 'fcm',
+      status: updated.status,
+      note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
+    });
+  } catch (e) {
+    console.error('notifications:send error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/profile', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -139,7 +306,28 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
   }
 });
 
-const socketUserMap = {};
+// Server-side online tracking: userId -> Set<socketId>.
+// A user may have several live sockets (multiple devices/tabs). Presence in this map is the
+// ONLY source of truth used to decide Socket.IO vs FCM routing. DB user_presence is a mirror
+// for the REST /api/users listing. NOTE: this is in-memory and single-instance (see render.yaml).
+const socketUserMap = new Map();
+
+function userSockets(userId) {
+  return socketUserMap.get(userId) || new Set();
+}
+
+function addSocket(userId, socketId) {
+  if (!socketUserMap.has(userId)) socketUserMap.set(userId, new Set());
+  socketUserMap.get(userId).add(socketId);
+}
+
+function removeSocket(userId, socketId) {
+  const set = socketUserMap.get(userId);
+  if (!set) return false;
+  set.delete(socketId);
+  if (set.size === 0) socketUserMap.delete(userId);
+  return set.size === 0;
+}
 
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
@@ -161,12 +349,18 @@ io.on('connection', async (socket) => {
     }
     dbUser = { userId: dbUser.id, username: dbUser.username, displayName: dbUser.display_name };
 
-    socketUserMap[dbUser.userId] = socket.id;
+    // Track every live socket for this user (multi-device / multi-tab support).
+    addSocket(dbUser.userId, socket.id);
 
     await pool.query(
       `INSERT INTO user_presence (user_id, is_online, last_seen, socket_id)
        VALUES ($1, TRUE, NOW(), $2)
-       ON CONFLICT (user_id) DO UPDATE SET is_online = TRUE, last_seen = NOW(), socket_id = $2`,
+       ON CONFLICT (user_id) DO UPDATE SET
+         is_online = TRUE, last_seen = NOW(),
+         socket_id = CASE
+           WHEN user_presence.socket_id IS NULL THEN $2
+           ELSE user_presence.socket_id
+         END`,
       [dbUser.userId, socket.id]
     );
 
@@ -227,7 +421,7 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        const deliverTo = socketUserMap[otherUserId];
+        const deliverTo = userSockets(otherUserId).size > 0;
         if (deliverTo) {
           setTimeout(() => {
             io.to(`user:${dbUser.userId}`).emit('message:delivered', {
@@ -418,13 +612,29 @@ io.on('connection', async (socket) => {
     });
 
     socket.on('disconnect', async () => {
-      delete socketUserMap[dbUser.userId];
-      await pool.query(
-        `UPDATE user_presence SET is_online = FALSE, last_seen = NOW(), typing_to = NULL WHERE user_id = $1`,
-        [dbUser.userId]
-      );
-      const p = (await pool.query('SELECT last_seen FROM user_presence WHERE user_id = $1', [dbUser.userId])).rows[0];
-      io.emit('presence:update', { userId: dbUser.userId, isOnline: false, lastSeen: p ? p.last_seen : new Date().toISOString() });
+      const wasTracked = userSockets(dbUser.userId).has(socket.id);
+      const nowOffline = removeSocket(dbUser.userId, socket.id);
+
+      // A socket that never completed setup may still fire disconnect - ignore it.
+      if (!wasTracked) return;
+
+      try {
+        if (nowOffline) {
+          // No remaining sockets for this user -> offline.
+          await pool.query(
+            `UPDATE user_presence SET is_online = FALSE, last_seen = NOW(), typing_to = NULL, socket_id = NULL
+             WHERE user_id = $1`,
+            [dbUser.userId]
+          );
+          const p = (await pool.query('SELECT last_seen FROM user_presence WHERE user_id = $1', [dbUser.userId])).rows[0];
+          io.emit('presence:update', { userId: dbUser.userId, isOnline: false, lastSeen: p ? p.last_seen : new Date().toISOString() });
+        } else {
+          // User still has other active sockets - stay online.
+          await pool.query('UPDATE user_presence SET last_seen = NOW() WHERE user_id = $1', [dbUser.userId]);
+        }
+      } catch (e) {
+        console.error('presence update on disconnect failed', e.message);
+      }
     });
   } catch (e) {
     console.error('connection setup error', e);

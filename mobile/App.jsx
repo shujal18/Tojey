@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { loadSession, logout } from './src/services/auth';
+import { loadSession, logout, fetchUsers } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
+import { loadUsers } from './src/services/cache';
 import { Icon } from './src/components/AppIcon';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
@@ -11,6 +12,9 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import { ensureMediaPermission, ensureCameraPermission, ensureMicPermission } from './src/services/permissions';
+import {
+  startPush, stopPush, onForegroundMessage, checkInitialNotification, onNotificationOpened,
+} from './src/services/notifications';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
 const APP_LOCK_PIN_KEY = '@tojey_app_lock_pin';
@@ -55,6 +59,43 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
+  const [notifBanner, setNotifBanner] = useState(null);
+  const pushStarted = useRef(false);
+
+  // Reference kept fresh so notification listeners (registered once) can always navigate.
+  const openFromNotifRef = useRef(null);
+
+  const openFromNotif = useCallback(async (nd) => {
+    if (!nd || !nd.senderId) return;
+    const ownId = session && session.user ? session.user.id : null;
+    // Never open a conversation for a different account on this device.
+    if (ownId && nd.receiverId && nd.receiverId !== ownId) return;
+    if (activeChat && activeChat.id === nd.senderId) {
+      setNotifBanner(null);
+      return;
+    }
+    let contact = null;
+    if (ownId) {
+      const cached = await loadUsers(ownId);
+      contact = cached.find((u) => u.id === nd.senderId) || null;
+    }
+    if (!contact) {
+      const all = await fetchUsers();
+      contact = all.find((u) => u.id === nd.senderId) || null;
+    }
+    if (!contact) return;
+    setActiveChat({
+      id: contact.id,
+      username: contact.username,
+      display_name: contact.display_name || contact.displayName || 'User',
+      profile_pic_url: contact.profile_pic_url || '',
+      online: contact.online ?? contact.is_online ?? false,
+      last_seen: contact.last_seen ?? contact.lastSeen ?? null,
+      bio: contact.bio || '',
+    });
+    setNotifBanner(null);
+  }, [session, activeChat]);
+  openFromNotifRef.current = openFromNotif;
 
   const handleLockKey = (k) => {
     if (k === '⌫') {
@@ -80,14 +121,20 @@ function Shell() {
   const handleLogin = (user, token) => {
     setSession({ user, token });
     setSocket(connect(token));
+    if (!pushStarted.current) {
+      pushStarted.current = true;
+      startPush(token).catch(() => {});
+    }
   };
 
   const handleLogout = async () => {
     await logout();
     disconnect();
+    stopPush();
     setSession(null);
     setSocket(null);
     setActiveChat(null);
+    setNotifBanner(null);
     setShowSettings(false);
   };
 
@@ -103,6 +150,10 @@ function Shell() {
         setSession(s);
         if (s) {
           setSocket(connect(s.token));
+          if (!pushStarted.current) {
+            pushStarted.current = true;
+            startPush(s.token).catch(() => {});
+          }
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
@@ -119,6 +170,45 @@ function Shell() {
       }
     })();
     return () => { mounted = false; };
+  }, []);
+
+  // Online delivery over the socket (no FCM when connected) + foreground push -> in-app banner.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onNotif = (d) => {
+      if (!d || !d.sender) return;
+      setNotifBanner({
+        senderId: d.sender.userId,
+        senderUsername: d.sender.username,
+        senderName: d.sender.displayName,
+        receiverId: session && session.user ? session.user.id : null,
+        conversationId: d.conversationId,
+        message: (d.notification && d.notification.message) || '',
+        title: d.sender.displayName || 'Tojey',
+      });
+    };
+    socket.on('notification:receive', onNotif);
+    const unsubFg = onForegroundMessage((p) => {
+      if (!session) return;
+      setNotifBanner(p);
+    });
+    return () => {
+      socket.off('notification:receive', onNotif);
+      if (unsubFg) unsubFg();
+    };
+  }, [socket, session]);
+
+  // Notification taps: cold start and while running/backgrounded -> open that conversation.
+  useEffect(() => {
+    const unsubOpened = onNotificationOpened((p) => {
+      if (openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    checkInitialNotification().then((p) => {
+      if (p && openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    return () => {
+      if (unsubOpened) unsubOpened();
+    };
   }, []);
 
   // Android hardware back: chat → chats, settings → home, else exit
@@ -206,8 +296,9 @@ function Shell() {
     );
   }
 
+  let content;
   if (showSettings) {
-    return (
+    content = (
       <>
         <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
         <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
@@ -229,10 +320,8 @@ function Shell() {
         </SafeAreaView>
       </>
     );
-  }
-
-  if (activeChat) {
-    return (
+  } else if (activeChat) {
+    content = (
       <>
         <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primaryDeep} />
         <SafeAreaView style={{ flex: 1 }}>
@@ -245,22 +334,38 @@ function Shell() {
         </SafeAreaView>
       </>
     );
+  } else {
+    content = (
+      <>
+        <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
+          <HomeScreen
+            socket={socket}
+            user={session.user}
+            token={session.token}
+            setUser={(u) => setSession({ ...session, user: u })}
+            onLogout={handleLogout}
+            onOpenChat={setActiveChat}
+            onOpenSettings={() => setShowSettings(true)}
+            activeChatId={activeChat?.id}
+          />
+        </SafeAreaView>
+      </>
+    );
   }
 
   return (
     <>
-      <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
-      <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
-        <HomeScreen
-          socket={socket}
-          user={session.user}
-          setUser={(u) => setSession({ ...session, user: u })}
-          onLogout={handleLogout}
-          onOpenChat={setActiveChat}
-          onOpenSettings={() => setShowSettings(true)}
-          activeChatId={activeChat?.id}
+      {content}
+      {notifBanner && (
+        <NotifBanner
+          theme={theme}
+          title={notifBanner.title || 'Tojey'}
+          message={notifBanner.message}
+          onView={() => openFromNotif(notifBanner)}
+          onClose={() => setNotifBanner(null)}
         />
-      </SafeAreaView>
+      )}
     </>
   );
 }
@@ -274,6 +379,40 @@ export default function App() {
     </ThemeProvider>
   );
 }
+
+function NotifBanner({ theme, title, message, onView, onClose }) {
+  return (
+    <View style={styles.notifBannerWrap} pointerEvents="box-none">
+      <View style={[styles.notifBanner, { backgroundColor: theme.card, borderColor: theme.border }]}>
+        <View style={{ paddingLeft: 6 }}>
+          <Icon name="notifications" size={18} color={theme.primary} style={{ marginRight: 8 }} />
+        </View>
+        <TouchableOpacity style={{ flex: 1 }} onPress={onView}>
+          <Text numberOfLines={1} style={{ color: theme.text, fontWeight: '700', fontSize: 14 }}>{title}</Text>
+          {!!message && (
+            <Text numberOfLines={2} style={{ color: theme.textSecondary, fontSize: 13, marginTop: 2 }}>
+              {message}
+            </Text>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onClose} style={{ padding: 6 }} accessibilityLabel="Dismiss notification">
+          <Icon name="close" size={16} color={theme.textSecondary} />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+const styles = {
+  notifBannerWrap: {
+    position: 'absolute', top: 8, left: 12, right: 12, zIndex: 100,
+  },
+  notifBanner: {
+    flexDirection: 'row', alignItems: 'center', borderRadius: 14, paddingVertical: 8,
+    paddingRight: 8, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 }, elevation: 6, gap: 8,
+  },
+};
 
 class RootErrorBoundary extends React.Component {
   constructor(props) {
