@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator,
+  Animated, PanResponder,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -9,8 +10,10 @@ import { quickReactions } from '../theme';
 import { absUrl, SERVER_URL } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
+import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
 import { loadMessages, saveMessages, clearConversationCache } from '../services/cache';
+import MediaViewer from '../components/MediaViewer';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -27,7 +30,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const listRef = useRef(null);
   const recTimer = useRef(null);
   const typingTimer = useRef(null);
-  const [viewingMedia, setViewingMedia] = useState(null);
+  const [mediaViewer, setMediaViewer] = useState(null);
   const [atBottomNear, setAtBottomNear] = useState(true);
   const [pendingCount, setPendingCount] = useState(0);
   const atBottomRef = useRef(true);
@@ -42,15 +45,34 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const otherUserOnline = safeOtherUser.online ?? false;
   const otherUserLastSeen = safeOtherUser.last_seen ?? null;
 
+  const mediaItems = useMemo(
+    () => messages.filter((m) =>
+      (m.type === 'IMAGE' || m.type === 'VIDEO') &&
+      m.media_url &&
+      !m._uploading &&
+      !m._pending &&
+      (m.media_url.startsWith('/uploads/') || m.media_url.startsWith('http'))
+    ),
+    [messages]
+  );
+
   const openMedia = useCallback((message) => {
     if (!message || !message.media_url) return;
-    const uri = absUrl(message.media_url);
-    if (message.type === 'VIDEO' || message.type === 'VOICE') {
-      Linking.openURL(uri).catch(() => {});
+    if (message.type === 'IMAGE' || message.type === 'VIDEO') {
+      const idx = mediaItems.findIndex((m) => m.id === message.id);
+      if (idx >= 0) {
+        setMediaViewer({ items: mediaItems, index: idx });
+        return;
+      }
+      Linking.openURL(absUrl(message.media_url)).catch(() => {});
+    } else if (message.type === 'VOICE') {
+      Linking.openURL(absUrl(message.media_url)).catch(() => {});
+    } else if (message.type === 'FILE' || message.type === 'DOCUMENT') {
+      downloadAndOpen(message);
     } else {
-      setViewingMedia({ uri, message });
+      Linking.openURL(absUrl(message.media_url)).catch(() => {});
     }
-  }, []);
+  }, [mediaItems]);
 
   const handleContentSizeChange = useCallback(() => {
     if (atBottomRef.current && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
@@ -71,6 +93,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const handleLongPress = useCallback((msg) => setReactionMenu(msg), []);
 
+  const toggleLike = useCallback((msg) => {
+    if (!msg) return;
+    const mine = (msg.reactions || []).find((r) => r.user_id === currentUser.id);
+    reactTo(msg.id, mine && mine.reaction === '❤️' ? '' : '❤️');
+  }, [currentUser.id]);
+
   const renderMessage = useCallback(({ item, index }) => {
     const isSent = item.sender_id === currentUser.id;
     const prev = index > 0 ? messages[index - 1] : null;
@@ -84,10 +112,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         onLongPress={handleLongPress}
         onOpenMedia={openMedia}
         onRetry={retrySendMedia}
+        onReply={setReplyingTo}
+        onDoubleTap={toggleLike}
+        replyPreviewOf={(id) => {
+          const ref = messages.find((m) => m.id === id);
+          return ref ? replyPreview(ref) : '…';
+        }}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike]);
 
   const onType = (t) => {
     setText(t);
@@ -185,6 +219,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }
     };
     socket.on('connect', onReconnect);
+    socket.io?.off('reconnect', onReconnect);
     socket.io?.on('reconnect', onReconnect);
 
     return () => {
@@ -326,21 +361,83 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setReactionMenu(null);
   };
 
+  const deleteMessage = (message, mode) => {
+    if (mode === 'everyone') {
+      socket.emit('message:delete', { messageId: message.id, mode: 'everyone' });
+    } else {
+      socket.emit('message:delete', { messageId: message.id, mode: 'me' });
+      setMessages((prev) => prev.filter((m) => m.id !== message.id));
+    }
+  };
+
   const doAction = (action, message) => {
     setReactionMenu(null);
     if (action === 'reply') { setReplyingTo(message); }
     else if (action === 'edit') { setEditing(message); setText(message.content || ''); }
-    else if (action === 'deleteMe') {
-      socket.emit('message:delete', { messageId: message.id, mode: 'me' });
-      setMessages((prev) => prev.filter((m) => m.id !== message.id));
-    } else if (action === 'deleteAll') {
-      socket.emit('message:delete', { messageId: message.id, mode: 'everyone' });
+    else if (action === 'deleteMe') { deleteMessage(message, 'me'); }
+    else if (action === 'deleteAll') { deleteMessage(message, 'everyone'); }
+  };
+
+  const sendFile = (asset) => {
+    if (!asset || !asset.uri) return;
+    const fileName = asset.name || 'file';
+    const fileSize = asset.size || 0;
+    const mimeType = asset.type || 'application/octet-stream';
+    const tempId = `tmp-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: 'FILE',
+      content: fileName,
+      file_name: fileName,
+      media_size: fileSize,
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reactions: [],
+      _local: true,
+      _pending: true,
+      _uploading: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
+    if (atBottomRef.current) {
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
     }
+    (async () => {
+      try {
+        const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+          'Content-Type': 'multipart/form-data',
+          Authorization: `Bearer ${currentUser.token || ''}`,
+        }, [
+          { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(asset.uri) },
+        ]);
+        const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
+        if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
+        socket.emit('message:send', {
+          otherUserId,
+          type: 'FILE',
+          content: fileName,
+          fileName,
+          mediaSize: fileSize,
+          mediaUrl: upData.url,
+        }, (ack) => {
+          if (ack?.ok) {
+            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          } else {
+            setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          }
+        });
+      } catch (e) {
+        console.error('sendFile upload failed:', e);
+        setMessages((prev) => prev.map((m) =>
+          m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m
+        ));
+      }
+    })();
   };
 
   const pickMedia = (kind) => {
     setShowAttach(false);
-    if (kind === 'photo' || kind === 'camera' || kind === 'gallery') {
+    if (kind === 'photo' || kind === 'camera') {
       (async () => {
         try {
           const ImagePicker = require('react-native-image-picker');
@@ -351,12 +448,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
               return;
             }
             ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
-              if (r.didCancel) {
-                console.log('User cancelled camera');
-                return;
-              }
+              if (r.didCancel) return;
               if (r.errorCode) {
-                console.error('Camera error:', r.errorCode, r.errorMessage);
                 alert('Failed to open camera: ' + (r.errorMessage || 'Unknown error'));
                 return;
               }
@@ -368,14 +461,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
               alert('Media permission is required to select photos.');
               return;
             }
-            const sel = ImagePicker.launchImageLibrary;
-            sel({ mediaType: 'mixed', selectionLimit: 1 }, (r) => {
-              if (r.didCancel) {
-                console.log('User cancelled image picker');
-                return;
-              }
+            ImagePicker.launchImageLibrary({ mediaType: 'mixed', selectionLimit: 1 }, (r) => {
+              if (r.didCancel) return;
               if (r.errorCode) {
-                console.error('Image picker error:', r.errorCode, r.errorMessage);
                 alert('Failed to open gallery: ' + (r.errorMessage || 'Unknown error'));
                 return;
               }
@@ -387,31 +475,25 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           alert('Failed to open media picker: ' + e.message);
         }
       })();
-    } else {
-      const tempId = `tmp-${Date.now()}`;
-      const localMsg = {
-        id: tempId,
-        sender_id: currentUser.id,
-        type: 'DOCUMENT',
-        content: '📄 Document',
-        media_url: '',
-        thumb_url: '',
-        created_at: new Date().toISOString(),
-        status: 'SENT',
-        reactions: [],
-        _local: true,
-      };
-      setMessages((prev) => [...prev, localMsg]);
-      if (atBottomRef.current) {
-        setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
-      }
-      socket.emit('message:send', { otherUserId, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' }, (ack) => {
-        if (ack?.ok) {
-          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-        } else {
-          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    } else if (kind === 'files') {
+      (async () => {
+        try {
+          const res = await DocumentPicker.pick({
+            type: [DocTypes.allFiles],
+            copyTo: 'cachesDirectory',
+          });
+          if (res && res[0]) {
+            const asset = res[0];
+            const uri = asset.uri;
+            const localUri = asset.fileCopyUri || asset.uri;
+            sendFile({ uri: localUri, name: asset.name, size: asset.size, type: asset.type });
+          }
+        } catch (e) {
+          if (DocumentPicker.isCancel(e)) return;
+          console.error('DocumentPicker error:', e);
+          alert('Failed to pick file: ' + (e.message || 'Unknown error'));
         }
-      });
+      })();
     }
   };
 
@@ -477,23 +559,32 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const retrySendMedia = useCallback((msg) => {
     if (!msg || !msg.media_url) return;
+    const isFile = msg.type === 'FILE' || msg.type === 'DOCUMENT';
+    const isVideo = msg.type === 'VIDEO';
     const tempId = `tmp-${Date.now()}-r`;
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false } : m)));
-    const isVideo = msg.type === 'VIDEO';
+    const mimeType = isFile
+      ? (mimeFor(msg) || 'application/octet-stream')
+      : isVideo ? 'video/mp4' : 'image/jpeg';
+    const fileName = isFile
+      ? (msg.file_name || msg.content || `file_${Date.now()}`)
+      : isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`;
     RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
       'Content-Type': 'multipart/form-data',
       Authorization: `Bearer ${currentUser.token || ''}`,
     }, [
-      { name: 'file', filename: isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`, type: isVideo ? 'video/mp4' : 'image/jpeg', data: RNFetchBlob.wrap(msg.media_url) },
+      { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(msg.media_url) },
     ]).then((uploadRes) => {
       const upData = JSON.parse(uploadRes.data);
       if (!upData?.url) throw new Error('Upload failed');
       socket.emit('message:send', {
         otherUserId,
-        type: isVideo ? 'VIDEO' : 'IMAGE',
-        content: isVideo ? '🎬 Video' : '📷 Photo',
+        type: msg.type,
+        content: isFile ? fileName : (isVideo ? '🎬 Video' : '📷 Photo'),
+        fileName: isFile ? fileName : '',
+        mediaSize: isFile ? (msg.media_size || 0) : 0,
         mediaUrl: upData.url,
-        thumbUrl: upData.url,
+        thumbUrl: isFile ? '' : upData.url,
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
@@ -506,6 +597,35 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
     });
   }, [otherUserId, socket, currentUser.token]);
+
+  const downloadAndOpen = useCallback(async (message) => {
+    if (!message || !message.media_url) return;
+    const mime = mimeFor(message);
+    const name = message.file_name || fileNameFromUrl(message.media_url) || 'tojey_file';
+    try {
+      const { dirs } = RNFetchBlob.fs;
+      const target = `${dirs.DownloadDir}/${name}`;
+      const res = await RNFetchBlob.config({
+        fileCache: false,
+        path: target,
+        addAndroidDownloads: {
+          useDownloadManager: true,
+          notification: true,
+          path: target,
+          description: `Tojey file: ${name}`,
+          mime,
+        },
+      }).fetch('GET', absUrl(message.media_url));
+      if (Platform.OS === 'android') {
+        RNFetchBlob.android.actionViewIntent(res.path(), mime);
+      } else {
+        Linking.openURL(absUrl(message.media_url)).catch(() => {});
+      }
+    } catch (e) {
+      console.error('downloadAndOpen failed:', e);
+      alert('Could not download file: ' + (e.message || 'Unknown error'));
+    }
+  }, []);
 
 const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
@@ -614,7 +734,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUserName}
             </Text>
             <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
-              {replyingTo.type === 'VOICE' ? 'Voice message' : (replyingTo.content || 'Media message')}
+              {replyPreview(replyingTo)}
             </Text>
           </View>
           <TouchableOpacity onPress={() => setReplyingTo(null)}>
@@ -665,13 +785,12 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </View>
       )}
 
-      {/* Attach options */}
+      {/* Attach options: Photo · Camera · Files */}
       {showAttach && !recording && (
         <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
           <AttachBtn label="Photo" icon="image-outline" color={theme.primary} onPress={() => pickMedia('photo')} theme={theme} />
           <AttachBtn label="Camera" icon="camera-outline" color={theme.primaryDeep} onPress={() => pickMedia('camera')} theme={theme} />
-          <AttachBtn label="Gallery" icon="images-outline" color={theme.primary} onPress={() => pickMedia('gallery')} theme={theme} />
-          <AttachBtn label="Document" icon="document-outline" color={theme.primaryDeep} onPress={() => pickMedia('document')} theme={theme} />
+          <AttachBtn label="Files" icon="folder-open-outline" color={theme.primary} onPress={() => pickMedia('files')} theme={theme} />
         </View>
       )}
 
@@ -720,31 +839,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         )}
       </View>
 
-      {viewingMedia && (
-        <Modal
-          visible
-          transparent
-          animationType="fade"
-          onRequestClose={() => setViewingMedia(null)}
-        >
-          <View style={[styles.mediaModal, { backgroundColor: 'rgba(0,0,0,0.95)' }]}>
-            <TouchableOpacity style={styles.mediaModalClose} onPress={() => setViewingMedia(null)}>
-              <Icon name="close" size={26} color="#fff" />
-            </TouchableOpacity>
-            <Image
-              source={{ uri: viewingMedia.uri }}
-              style={styles.mediaModalImg}
-              resizeMode="contain"
-            />
-            <View style={styles.mediaModalHint}>
-              <Icon name="download" size={14} color="rgba(255,255,255,0.7)" />
-              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginLeft: 6 }}>
-                Saved in your messages
-                {viewingMedia.message && viewingMedia.message.duration ? ` · ${viewingMedia.message.duration}s` : ''}
-              </Text>
-            </View>
-          </View>
-        </Modal>
+      {mediaViewer && (
+        <MediaViewer
+          items={mediaViewer.items}
+          startIndex={mediaViewer.index}
+          headerText={otherUserName}
+          currentUserId={currentUser.id}
+          theme={theme}
+          onClose={() => setMediaViewer(null)}
+          onReact={reactTo}
+          onReply={(item) => setReplyingTo(item)}
+          onDelete={(item, mode) => deleteMessage(item, mode)}
+        />
       )}
     </KeyboardAvoidingView>
   );
@@ -786,129 +892,243 @@ function lastSeenText(ts) {
   return `Last seen ${d.getDate()}/${d.getMonth() + 1}`;
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry }) {
-  
+function replyPreview(m) {
+  if (!m) return '';
+  if (m.is_deleted_for_everyone) return 'This message was deleted';
+  if (m.type === 'IMAGE') return '📷 Photo';
+  if (m.type === 'VIDEO') return '🎬 Video';
+  if (m.type === 'VOICE') return 'Voice message';
+  if (m.type === 'FILE' || m.type === 'DOCUMENT') return '📄 ' + (m.content || 'File');
+  return m.content || 'Message';
+}
+
+function mimeFor(m) {
+  if (m.type === 'VIDEO') return 'video/mp4';
+  if (m.type === 'IMAGE') return 'image/jpeg';
+  const n = (m.content || m.file_name || '').toLowerCase();
+  if (n.endsWith('.pdf')) return 'application/pdf';
+  if (n.endsWith('.zip')) return 'application/zip';
+  if (n.endsWith('.mp3')) return 'audio/mpeg';
+  if (n.endsWith('.txt')) return 'text/plain';
+  if (n.endsWith('.doc') || n.endsWith('.docx')) return 'application/msword';
+  if (n.endsWith('.xls') || n.endsWith('.xlsx')) return 'application/vnd.ms-excel';
+  if (n.endsWith('.ppt') || n.endsWith('.pptx')) return 'application/vnd.ms-powerpoint';
+  return 'application/octet-stream';
+}
+
+function fileNameFromUrl(url) {
+  if (!url) return null;
+  const parts = url.split('/');
+  const last = parts[parts.length - 1];
+  return last || null;
+}
+
+function formatBytes(b) {
+  if (!b || b <= 0) return '';
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf }) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateRef = useRef(0);
+  const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
+  const replied = useRef(false);
+
+  const panResponder = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (_, g) =>
+      Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5 && Math.abs(g.dx) < 200,
+    onPanResponderMove: (_, g) => {
+      let v = swipeDirection === 1 ? Math.max(0, g.dx) : Math.min(0, g.dx);
+      translateX.setValue(Math.max(-110, Math.min(110, v)));
+    },
+    onPanResponderRelease: (_, g) => {
+      const trigger = swipeDirection === 1 ? g.dx > 70 : g.dx < -70;
+      if (trigger) {
+        replied.current = true;
+        Animated.spring(translateX, { toValue: swipeDirection * 110, useNativeDriver: true, bounciness: 0, speed: 30 }).start(() => {
+          onReply(message);
+          replied.current = false;
+          Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+        });
+      } else {
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true, bounciness: 0, speed: 30 }).start();
+      }
+    },
+    onPanResponderTerminate: () => {
+      Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+    },
+  })).current;
+
   const hasMedia = !!(message.media_url || message.thumb_url);
   const statusIcon = message.status === 'READ'
     ? 'checkmark-done' : message.status === 'DELIVERED'
       ? 'checkmark-done' : 'checkmark';
   const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
 
+  // Double-tap ↔ single-tap detection (WhatsApp style)
+  const lastTap = useRef(0);
+  const singleTimer = useRef(null);
+  const handlePress = () => {
+    const now = Date.now();
+    if (now - lastTap.current < 300) {
+      clearTimeout(singleTimer.current);
+      lastTap.current = 0;
+      onDoubleTap(message);
+      return;
+    }
+    lastTap.current = now;
+    clearTimeout(singleTimer.current);
+    singleTimer.current = setTimeout(() => {
+      tapAction(message);
+    }, 290);
+  };
+
+  const tapAction = (m) => {
+    if (m._uploadError && onRetry) {
+      onRetry(m);
+      return;
+    }
+    if (m.type === 'IMAGE' || m.type === 'VIDEO' || m.type === 'FILE' || m.type === 'DOCUMENT' || m.type === 'VOICE') {
+      onOpenMedia(m);
+    }
+  };
+
+  const replyRevealStyle = isSent ? styles.revealRight : styles.revealLeft;
+
   return (
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
-      <View style={{ maxWidth: '78%' }}>
-        <TouchableOpacity
-          style={[
-            styles.bubble,
-            isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble }],
-            grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
-          ]}
-          onLongPress={() => onLongPress(message)}
-          delayLongPress={350}
-        >
-          {message.is_deleted_for_everyone ? (
-            <Text style={{ fontStyle: 'italic', opacity: 0.7, color: isSent ? '#fff' : theme.textSecondary }}>
-              This message was deleted
-            </Text>
-          ) : message.type === 'IMAGE' || message.type === 'VIDEO' ? (
-            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.85} disabled={message._uploading}>
-              <View>
-                <Image
-                  source={{ uri: absUrl(message.thumb_url || message.media_url) }}
-                  style={[styles.mediaImage, { backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
-                  resizeMode="cover"
-                />
-                {(message.type === 'VIDEO' || message._uploading) && (
-                  <View style={styles.videoPlayWrap}>
-                    {message.type === 'VIDEO' && !message._pending && !message._uploading ? (
-                      <View style={styles.videoPlay}>
-                        <Icon name="play" size={26} color="#fff" />
+      <View style={{ maxWidth: '80%', position: 'relative' }}>
+        {/* Reply affordance revealed behind the bubble during a swipe (WhatsApp-style) */}
+        <View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)' }]}>
+          <Icon name="arrow-back" size={14} color="#fff" />
+        </View>
+        <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
+            <TouchableOpacity
+              style={[
+                styles.bubble,
+                isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble }],
+                grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
+              ]}
+              onPress={handlePress}
+              onLongPress={() => { clearTimeout(singleTimer.current); onLongPress(message); }}
+              delayLongPress={350}
+            >
+              {message.is_deleted_for_everyone ? (
+                <Text style={{ fontStyle: 'italic', opacity: 0.7, color: isSent ? '#fff' : theme.textSecondary }}>
+                  This message was deleted
+                </Text>
+              ) : message.type === 'IMAGE' || message.type === 'VIDEO' ? (
+                <View>
+                  <Image
+                    source={{ uri: absUrl(message.thumb_url || message.media_url) }}
+                    style={[styles.mediaImage, { backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
+                    resizeMode="cover"
+                  />
+                  {(message.type === 'VIDEO' || message._uploading) && (
+                    <View style={styles.videoPlayWrap}>
+                      {message.type === 'VIDEO' && !message._pending && !message._uploading ? (
+                        <View style={styles.videoPlay}>
+                          <Icon name="play" size={26} color="#fff" />
+                        </View>
+                      ) : message._uploading ? (
+                        <View style={styles.videoPlay}>
+                          <ActivityIndicator color="#fff" />
+                        </View>
+                      ) : null}
+                    </View>
+                  )}
+                  {message._uploadError && (
+                    <TouchableOpacity
+                      style={[StyleSheet.absoluteFillObject, styles.mediaError, { backgroundColor: 'rgba(0,0,0,0.35)' }]}
+                      onPress={() => (onRetry ? onRetry(message) : null)}
+                    >
+                      <Icon name="alert-circle-outline" size={26} color="#fff" />
+                      <Text style={{ color: '#fff', fontSize: 12, marginTop: 4, fontWeight: '600' }}>
+                        Tap to retry
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ) : message.type === 'VOICE' ? (
+                <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.7} style={{ minWidth: 180 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
+                      <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 10 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                        {[5, 9, 13, 7, 15, 11, 8, 13, 7, 10].map((h, i) => (
+                          <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary, borderRadius: 2 }} />
+                        ))}
                       </View>
-                    ) : message._uploading ? (
-                      <View style={styles.videoPlay}>
-                        <ActivityIndicator color="#fff" />
-                      </View>
-                    ) : null}
+                      <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
+                        0:{String(message.duration || 26).padStart(2, '0')} · 1×
+                      </Text>
+                    </View>
                   </View>
-                )}
-                {message._uploadError && (
-                  <TouchableOpacity
-                    style={[StyleSheet.absoluteFillObject, styles.mediaError, { backgroundColor: 'rgba(0,0,0,0.35)' }]}
-                    onPress={() => (onRetry ? onRetry(message) : null)}
-                  >
-                    <Icon name="alert-circle-outline" size={26} color="#fff" />
-                    <Text style={{ color: '#fff', fontSize: 12, marginTop: 4, fontWeight: '600' }}>
-                      Tap to retry
+                </TouchableOpacity>
+              ) : message.type === 'FILE' || message.type === 'DOCUMENT' ? (
+                <View style={[styles.docRow, { backgroundColor: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight, borderRadius: 10, padding: 8, flexDirection: 'row', alignItems: 'center', minWidth: 200 }]}>
+                  <View style={[styles.docIcon, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primary }]}>
+                    <Icon name="document" size={18} color="#fff" />
+                  </View>
+                  <View style={{ marginLeft: 10, flex: 1 }}>
+                    <Text numberOfLines={1} style={{ fontSize: 13, fontWeight: '600', color: isSent ? '#fff' : theme.receivedText, maxWidth: 150 }}>
+                      {(message.file_name || message.content || 'Document')}
                     </Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            </TouchableOpacity>
-          ) : message.type === 'VOICE' ? (
-            <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.7} style={{ minWidth: 180 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
-                  <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
-                </View>
-                <View style={{ flex: 1, marginLeft: 10 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-                    {[5, 9, 13, 7, 15, 11, 8, 13, 7, 10].map((h, i) => (
-                      <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary, borderRadius: 2 }} />
-                    ))}
+                    <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary, marginTop: 2 }}>
+                      {formatBytes(message.media_size || 0) || 'File'}
+                      {message._uploading ? ' · uploading…' : ''}
+                    </Text>
+                    {message._uploadError && (
+                      <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 2 }}>
+                        Upload failed · tap to retry
+                      </Text>
+                    )}
                   </View>
-                  <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
-                    0:{String(message.duration || 26).padStart(2, '0')} · 1×
-                  </Text>
                 </View>
-              </View>
-            </TouchableOpacity>
-          ) : message.type === 'DOCUMENT' ? (
-            <TouchableOpacity onPress={() => hasMedia && Linking.openURL(absUrl(message.media_url)).catch(() => {})} activeOpacity={0.7}>
-              <View style={[styles.docRow, { backgroundColor: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight, borderRadius: 10, padding: 8, flexDirection: 'row', alignItems: 'center' }]}>
-                <View style={[styles.docIcon, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primary }]}>
-                  <Icon name="document" size={18} color="#fff" />
+              ) : (
+                <View>
+                  {message.reply_to ? (
+                    <View style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight }]}>
+                      <Text style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : theme.primary }}>Reply</Text>
+                      <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>
+                        {replyPreviewOf ? replyPreviewOf(message.reply_to) : '…'}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <Text style={{ fontSize: 15, color: isSent ? '#fff' : theme.receivedText }}>{message.content}</Text>
                 </View>
-                <View style={{ marginLeft: 10 }}>
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: isSent ? '#fff' : theme.receivedText }}>
-                    {message.content || 'Document'}
-                  </Text>
-                  {hasMedia && <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary }}>Tap to open</Text>}
-                </View>
-              </View>
-            </TouchableOpacity>
-          ) : (
-            <View>
-              {message.reply_to ? (
-                <View style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight }]}>
-                  <Text style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : theme.primary }}>Reply</Text>
-                  <Text numberOfLines={1} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>preview…</Text>
-                </View>
-              ) : null}
-              <Text style={{ fontSize: 15, color: isSent ? '#fff' : theme.receivedText }}>{message.content}</Text>
-            </View>
-          )}
+              )}
 
-          {!message.is_deleted_for_everyone && (
-            <View style={styles.msgMeta}>
-              {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
-              {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
-              <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
-                {message.created_at ? timeOf(message.created_at) : ''}
-              </Text>
-              {isSent && <Icon name={statusIcon} size={13} color={statusColor} />}
-            </View>
-          )}
-        </TouchableOpacity>
+              {!message.is_deleted_for_everyone && (
+                <View style={styles.msgMeta}>
+                  {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
+                  {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
+                  <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
+                    {message.created_at ? timeOf(message.created_at) : ''}
+                  </Text>
+                  {isSent && <Icon name={statusIcon} size={13} color={statusColor} />}
+                </View>
+              )}
+            </TouchableOpacity>
+          </Animated.View>
+        </View>
 
         {message.reactions && message.reactions.length > 0 && (
-          <View style={[styles.reactionBadge, { backgroundColor: theme.primaryLight }, isSent ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
+          <TouchableOpacity
+            onPress={() => onLongPress(message)}
+            style={[styles.reactionBadge, { backgroundColor: theme.primaryLight }, isSent ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}
+          >
             {message.reactions.map((r, i) => (
               <Text key={i} style={{ fontSize: 11 }}>{r.reaction}</Text>
             ))}
-          </View>
+          </TouchableOpacity>
         )}
       </View>
-    </View>
   );
 }
 
@@ -933,7 +1153,7 @@ const styles = StyleSheet.create({
   headerStatus: { fontSize: 12, marginLeft: 4 },
   messageList: { padding: 14, paddingBottom: 20 },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
-  bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14 },
+  bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#F0EDF8' },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
@@ -978,10 +1198,8 @@ const styles = StyleSheet.create({
   videoPlay: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
   mediaError: { alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginBottom: 4 },
   voicePlay: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  docRow: {},
   docIcon: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  mediaModal: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  mediaModalClose: { position: 'absolute', top: 48, right: 20, zIndex: 10, padding: 8 },
-  mediaModalImg: { width: '100%', height: '80%' },
-  mediaModalHint: { position: 'absolute', bottom: 40, flexDirection: 'row', alignItems: 'center' },
+  swipeReveal: { position: 'absolute', top: 6, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', zIndex: 0 },
+  revealLeft: { left: 2 },
+  revealRight: { right: 2 },
 });

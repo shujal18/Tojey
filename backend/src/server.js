@@ -202,7 +202,7 @@ io.on('connection', async (socket) => {
 
     socket.on('message:send', async (data, callback = () => {}) => {
       try {
-        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '' } = data;
+        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0 } = data;
 
         if (!otherUserId) return callback({ error: 'otherUserId required' });
 
@@ -210,11 +210,11 @@ io.on('connection', async (socket) => {
         const result = await pool.query(
           `INSERT INTO messages
             (conversation_id, sender_id, reply_to, type, content, media_url, thumb_url,
-             duration, waveform, transcript, status, is_view_once, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SENT', $11, NOW())
+             duration, waveform, transcript, status, is_view_once, created_at, file_name, media_size)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SENT', $11, NOW(), $12, $13)
            RETURNING *`,
           [convo.id, dbUser.userId, replyTo, type, content, mediaUrl || null, thumbUrl || null,
-           duration || 0, waveform || '', transcript || '', isViewOnce || false]
+           duration || 0, waveform || '', transcript || '', isViewOnce || false, fileName || '', fileSize || mediaSize || 0]
         );
 
         const message = result.rows[0];
@@ -346,7 +346,7 @@ io.on('connection', async (socket) => {
                   CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END AS other_id,
                   u.display_name, u.username, u.profile_pic_url,
                   p.is_online, p.last_seen,
-                  m.id AS message_id, m.type, m.content, m.created_at, m.sender_id
+                  m.id AS message_id, m.type, m.content, m.created_at, m.sender_id, m.file_name, m.media_size
            FROM conversations c
            JOIN users u ON u.id = CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END
            LEFT JOIN user_presence p ON p.user_id = u.id
@@ -369,7 +369,7 @@ io.on('connection', async (socket) => {
             last_seen: r.last_seen,
           },
           lastMessage: r.message_id
-            ? { id: r.message_id, type: r.type, content: r.content, created_at: r.created_at, sender_id: r.sender_id }
+            ? { id: r.message_id, type: r.type, content: r.content, created_at: r.created_at, sender_id: r.sender_id, file_name: r.file_name, media_size: r.media_size }
             : null,
         }));
         socket.emit('conversation:list', list);

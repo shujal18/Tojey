@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
   duration INTEGER,
   waveform TEXT,
   transcript TEXT,
+  file_name TEXT,
   status VARCHAR(20) DEFAULT 'SENT',
   is_view_once BOOLEAN DEFAULT FALSE,
   is_edited BOOLEAN DEFAULT FALSE,
@@ -142,10 +143,15 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);
 `;
 
+const MIGRATIONS = `
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT;
+`;
+
 async function initDB() {
   const client = await pool.connect();
   try {
     await client.query(SCHEMA);
+    await client.query(MIGRATIONS);
     console.log('✓ Database initialized');
     await seedUsers(client);
   } finally {
