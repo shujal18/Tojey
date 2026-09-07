@@ -13,11 +13,12 @@ import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
-function ZoomableImage({ uri, style }) {
+function ZoomableImage({ uri, style, onExternal }) {
   const scale = useRef(new Animated.Value(1)).current;
   const translateX = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(0)).current;
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
 
   const lastScale = useRef(1);
   const pinchStart = useRef(null);
@@ -108,17 +109,31 @@ function ZoomableImage({ uri, style }) {
       }}
     >
       <Animated.View style={[styles.zoomWrap, { transform: [{ translateX }, { translateY }, { scale }] }]}>
-        {loading && (
+        {loading && !failed && (
           <View style={styles.imgLoading}>
             <ActivityIndicator color="#fff" />
           </View>
         )}
-        <Image
-          source={{ uri }}
-          style={[styles.zoomImg, { width: SCREEN_W }]}
-          resizeMode="contain"
-          onLoad={() => setLoading(false)}
-        />
+        {failed ? (
+          <View style={styles.imgError}>
+            <Icon name="alert-circle-outline" size={40} color="#fff" />
+            <Text style={{ color: '#fff', marginTop: 10, fontSize: 13 }}>Could not load this image</Text>
+            {onExternal && (
+              <TouchableOpacity onPress={onExternal} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
+                <Icon name="open-outline" size={18} color="#fff" />
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open externally</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        ) : (
+          <Image
+            source={{ uri }}
+            style={[styles.zoomImg, { width: SCREEN_W }]}
+            resizeMode="contain"
+            onLoad={() => setLoading(false)}
+            onError={() => { setLoading(false); setFailed(true); }}
+          />
+        )}
       </Animated.View>
     </View>
   );
@@ -126,6 +141,12 @@ function ZoomableImage({ uri, style }) {
 
 function dist(a, b) {
   return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
+}
+
+function sanitizeFileName(name) {
+  if (!name || typeof name !== 'string') return null;
+  const base = name.split(/[?#]/)[0];
+  return (base.replace(/[^\w.\- ]+/g, '_') || null).slice(0, 120);
 }
 
 class VideoBoundary extends React.Component {
@@ -155,7 +176,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});
   const [videoLoading, setVideoLoading] = useState({});
-  const [playingId, setPlayingId] = useState(null);
+  const [activeVideoId, setActiveVideoId] = useState(null);
   const [saving, setSaving] = useState(false);
   const listRef = useRef(null);
   const item = items[index] || null;
@@ -192,27 +213,42 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     setDrawMode(false);
   }, [startIndex]);
 
-  // Pause the previous video when swiping to another item
+  // Pause & unmount any active video when the user swipes to a different item
   useEffect(() => {
-    setPlayingId((cur) => {
-      const visible = items[index];
-      return cur && visible && cur === visible.id ? cur : null;
-    });
+    const visible = items[index];
+    const visId = visible ? visible.id : null;
+    setActiveVideoId((cur) => (cur && visId && cur === visId ? cur : null));
   }, [index, items]);
 
   const playExternal = useCallback(async (m, fallbackMime) => {
     if (!m || !m.media_url) return;
     try {
       const url = absUrl(m.media_url);
-      const base = m.file_name || `tojey_video_${m.id}.mp4`;
+      const base = sanitizeFileName(m.file_name) || `tojey_video_${m.id}.mp4`;
       const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : `${base}.mp4`;
       const { dirs } = RNFetchBlob.fs;
       const target = `${dirs.CacheDir}/${name}`;
-      const res = await RNFetchBlob.config({ fileCache: false, path: target }).fetch('GET', url);
-      await RNFetchBlob.android.actionViewIntent(res.path(), fallbackMime || 'video/mp4');
+      await RNFetchBlob.config({ fileCache: false, path: target }).fetch('GET', url);
+      await RNFetchBlob.android.actionViewIntent(target, fallbackMime || 'video/mp4');
     } catch (e) {
       console.error('playExternal failed', e);
       Alert.alert('Could not play video', e.message || 'No video app found');
+    }
+  }, []);
+
+  const openExternalImage = useCallback(async (m) => {
+    if (!m || !m.media_url) return;
+    try {
+      const url = absUrl(m.media_url);
+      const base = sanitizeFileName(m.file_name) || `tojey_photo_${m.id}.png`;
+      const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : `${base}.png`;
+      const { dirs } = RNFetchBlob.fs;
+      const target = `${dirs.CacheDir}/${name}`;
+      await RNFetchBlob.config({ fileCache: false, path: target }).fetch('GET', url);
+      await RNFetchBlob.android.actionViewIntent(target, 'image/*');
+    } catch (e) {
+      console.error('openExternalImage failed', e);
+      Alert.alert('Could not open image', e.message || 'No image app found');
     }
   }, []);
 
@@ -223,7 +259,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       const url = absUrl(item.media_url);
       const isVideo = item.type === 'VIDEO';
       const ext = isVideo ? '.mp4' : '.jpg';
-      const base = item.file_name || ('tojey_media_' + item.id);
+      const base = sanitizeFileName(item.file_name) || ('tojey_media_' + item.id);
       const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : base + ext;
       const { dirs } = RNFetchBlob.fs;
       const dlPath = `${dirs.DownloadDir}/${name}`;
@@ -270,6 +306,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     const isVideo = m.type === 'VIDEO';
     if (isVideo) {
       const failed = videoErrors[m.id];
+      const active = activeVideoId === m.id;
       const loading = videoLoading[m.id] && !failed;
       return (
         <View style={styles.slide}>
@@ -280,6 +317,21 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <TouchableOpacity onPress={() => playExternal(m, 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
                 <Icon name="open-outline" size={18} color="#fff" />
                 <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+              </TouchableOpacity>
+            </View>
+          ) : !active ? (
+            <View style={styles.vidPosterWrap}>
+              {m.thumb_url ? (
+                <Image source={{ uri: absUrl(m.thumb_url) }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+              ) : (
+                <Icon name="videocam-outline" size={56} color="rgba(255,255,255,0.4)" />
+              )}
+              <TouchableOpacity
+                style={styles.vidPlayBig}
+                onPress={() => setActiveVideoId(m.id)}
+                accessibilityLabel="Play video"
+              >
+                <Icon name="play" size={30} color="#fff" />
               </TouchableOpacity>
             </View>
           ) : (
@@ -305,12 +357,10 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                 repeat={false}
                 playInBackground={false}
                 playWhenInactive={false}
-                paused={playingId !== m.id}
+                paused={false}
                 bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
-                onPlay={() => setPlayingId(m.id)}
-                onPause={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
-                onEnd={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
-                onError={() => setVideoErrors((prev) => ({ ...prev, [m.id]: true }))}
+                onEnd={() => setActiveVideoId(null)}
+                onError={() => { setVideoErrors((prev) => ({ ...prev, [m.id]: true })); setActiveVideoId(null); }}
                 onLoad={() => { setVideoErrors((prev) => ({ ...prev, [m.id]: false })); setVideoLoading((prev) => ({ ...prev, [m.id]: false })); }}
                 onLoadStart={() => setVideoLoading((prev) => ({ ...prev, [m.id]: true }))}
               />
@@ -327,8 +377,8 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     if (drawMode && m.id === item?.id) {
       return <DrawableImage uri={uri} drawRef={drawRef} strokes={strokes} curPoints={curPoints} color={color} brush={brush} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} lastPtRef={lastPtRef} setCurPoints={setCurPoints} setStrokes={setStrokes} />;
     }
-    return <ZoomableImage uri={uri} />;
-  }, [videoErrors, videoLoading, playingId, drawMode, item, strokes, curPoints, color, brush, playExternal]);
+    return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
+  }, [videoErrors, videoLoading, activeVideoId, drawMode, item, strokes, curPoints, color, brush, playExternal, onExternalImage]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems && viewableItems.length) {
@@ -473,6 +523,9 @@ const styles = StyleSheet.create({
   video: { width: SCREEN_W, height: SCREEN_H - 180 },
   vidError: { alignItems: 'center', justifyContent: 'center' },
   vidFallback: { flexDirection: 'row', alignItems: 'center', marginTop: 16, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
+  vidPosterWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', width: SCREEN_W },
+  vidPlayBig: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)', borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)' },
+  imgError: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   vidLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 3 },
   zoomWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   zoomImg: { height: '100%' },

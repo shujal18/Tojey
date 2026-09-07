@@ -726,7 +726,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const downloadAndOpen = useCallback(async (message) => {
     if (!message || !message.media_url) return;
     const mime = mimeFor(message);
-    const name = message.file_name || fileNameFromUrl(message.media_url) || 'tojey_file';
+    let name = sanitizeFileName(message.file_name) || sanitizeFileName(fileNameFromUrl(message.media_url)) || `tojey_file_${Date.now()}`;
+    if (!/\.[a-zA-Z0-9]{2,5}$/.test(name) && mime !== 'application/octet-stream') {
+      name = `${name}.${extForMime(mime)}`;
+    }
     try {
       const { dirs } = RNFetchBlob.fs;
       const target = `${dirs.DownloadDir}/${name}`;
@@ -1080,7 +1083,27 @@ function fileNameFromUrl(url) {
   if (!url) return null;
   const parts = url.split('/');
   const last = parts[parts.length - 1];
-  return last || null;
+  return last ? last.split(/[?#]/)[0] : null;
+}
+
+function sanitizeFileName(name) {
+  if (!name || typeof name !== 'string') return null;
+  const base = name.split(/[?#]/)[0];
+  return (base.replace(/[^\w.\- ]+/g, '_') || null).slice(0, 120);
+}
+
+function extForMime(mime) {
+  if (!mime) return 'bin';
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime === 'application/zip') return 'zip';
+  if (mime.startsWith('text/')) return 'txt';
+  if (mime.includes('word') || mime.includes('msword')) return 'doc';
+  if (mime.includes('excel') || mime.includes('sheet')) return 'xls';
+  if (mime.includes('powerpoint')) return 'ppt';
+  if (mime.startsWith('image/')) return 'img';
+  return 'bin';
 }
 
 function formatBytes(b) {
@@ -1345,6 +1368,7 @@ function UploadOverlay({ progress, onCancel }) {
 
 function timeOf(t) {
   const d = new Date(t);
+  if (isNaN(d.getTime())) return '';
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 

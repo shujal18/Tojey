@@ -22,6 +22,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const [displayUri, setDisplayUri] = useState(uri || '');
   const [sending, setSending] = useState(false);
   const [videoErr, setVideoErr] = useState(false);
+  const [videoOn, setVideoOn] = useState(false);
+  const [imgErr, setImgErr] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [applyGeom, setApplyGeom] = useState(null);
 
@@ -60,6 +62,9 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     setDisplayUri(uri || '');
     resetTools();
     setCaption('');
+    setVideoErr(false);
+    setVideoOn(false);
+    setImgErr(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uri]);
 
@@ -319,17 +324,31 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               <Text style={{ color: theme.textSecondary, marginTop: 10 }}>This video could not be previewed here.</Text>
               <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 4 }}>You can still send it.</Text>
             </View>
+          ) : !videoOn ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="videocam-outline" size={52} color={theme.textSecondary} />
+              <TouchableOpacity
+                onPress={() => setVideoOn(true)}
+                style={[styles.videoPreviewBtn, { backgroundColor: theme.primary }]}
+                accessibilityLabel="Preview video"
+              >
+                <Icon name="play" size={22} color="#fff" />
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14, marginLeft: 8 }}>Tap to preview</Text>
+              </TouchableOpacity>
+            </View>
           ) : (
-            <Video
-              source={{ uri }}
-              style={[StyleSheet.absoluteFill, { width: box?.w || SCREEN_W, height: box?.h || SCREEN_H - 220 }]}
-              resizeMode="contain"
-              controls
-              repeat={false}
-              paused={false}
-              bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
-              onError={() => setVideoErr(true)}
-            />
+            <View style={styles.body}>
+              <Video
+                source={{ uri }}
+                style={[StyleSheet.absoluteFill, { width: box?.w || SCREEN_W, height: box?.h || SCREEN_H - 220 }]}
+                resizeMode="contain"
+                controls
+                repeat={false}
+                paused={false}
+                bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
+                onError={() => setVideoErr(true)}
+              />
+            </View>
           )}
         </View>
       );
@@ -337,8 +356,16 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     return (
       <View style={styles.body}>
         <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
-          <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" />
+          <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" onError={() => setImgErr(true)} />
         </View>
+        {imgErr && (
+          <View style={{ position: 'absolute', bottom: 18, alignSelf: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: theme.inputBg, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}>
+              <Icon name="alert-circle-outline" size={16} color={theme.danger} />
+              <Text style={{ color: theme.danger, fontSize: 12, fontWeight: '600', marginLeft: 6 }}>Could not preview this image — you can still send it</Text>
+            </View>
+          </View>
+        )}
       </View>
     );
   };
@@ -438,4 +465,5 @@ const styles = StyleSheet.create({
   dimSide: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.55)' },
   processingDim: { backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   processingPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 24 },
+  videoPreviewBtn: { flexDirection: 'row', alignItems: 'center', borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12, marginTop: 16 },
 });
