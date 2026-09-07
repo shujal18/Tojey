@@ -4,12 +4,16 @@ import {
   Dimensions, Image, ActivityIndicator, Alert, Animated, PanResponder,
 } from 'react-native';
 import Video from 'react-native-video';
+import { captureRef } from 'react-native-view-shot';
 import { Icon } from './AppIcon';
 import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
+const DRAW_COLORS = ['#FFFFFF', '#FF5252', '#2196F3', '#4CAF50', '#FFC107', '#000000'];
+const DRAW_SIZES = [3, 6, 12];
 
 function ZoomableImage({ uri, style }) {
   const scale = useRef(new Animated.Value(1)).current;
@@ -126,18 +130,54 @@ function dist(a, b) {
   return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
-export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete }) {
+export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing }) {
   const [index, setIndex] = useState(startIndex);
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});
+  const [playingId, setPlayingId] = useState(null);
   const [saving, setSaving] = useState(false);
   const listRef = useRef(null);
   const item = items[index] || null;
   const canShare = !!item && !!item.media_url;
 
+  const [drawMode, setDrawMode] = useState(false);
+  const [strokes, setStrokes] = useState([]);
+  const [curPoints, setCurPoints] = useState(null);
+  const [color, setColor] = useState(DRAW_COLORS[4]);
+  const [brush, setBrush] = useState(DRAW_SIZES[1]);
+  const [drawingBusy, setDrawingBusy] = useState(false);
+  const drawRef = useRef(null);
+
+  const colorRef = useRef(color);
+  const brushRef = useRef(brush);
+  const drawModeRef = useRef(drawMode);
+  const lastPtRef = useRef(null);
+  useEffect(() => { colorRef.current = color; }, [color]);
+  useEffect(() => { brushRef.current = brush; }, [brush]);
+  useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
+
+  // Reset drawing state when switching media or leaving draw mode
+  useEffect(() => {
+    setStrokes([]);
+    setCurPoints(null);
+    setDrawMode(false);
+    lastPtRef.current = null;
+  }, [items, index]);
+
   useEffect(() => {
     setIndex(startIndex);
+    setStrokes([]);
+    setCurPoints(null);
+    setDrawMode(false);
   }, [startIndex]);
+
+  // Pause the previous video when swiping to another item
+  useEffect(() => {
+    setPlayingId((cur) => {
+      const visible = items[index];
+      return cur && visible && cur === visible.id ? cur : null;
+    });
+  }, [index, items]);
 
   const download = useCallback(async () => {
     if (!item || saving) return;
@@ -146,7 +186,8 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       const url = absUrl(item.media_url);
       const isVideo = item.type === 'VIDEO';
       const ext = isVideo ? '.mp4' : '.jpg';
-      const name = (item.file_name || ('tojey_media_' + item.id)) + ext;
+      const base = item.file_name || ('tojey_media_' + item.id);
+      const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : base + ext;
       const { dirs } = RNFetchBlob.fs;
       const dlPath = `${dirs.DownloadDir}/${name}`;
       const res = await RNFetchBlob.config({
@@ -169,6 +210,24 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     }
   }, [item, saving]);
 
+  const sendDrawing = useCallback(async () => {
+    if (!onSendDrawing || drawingBusy) return;
+    setDrawingBusy(true);
+    try {
+      const uri = await captureRef(drawRef, {
+        format: 'png',
+        quality: 1,
+        result: 'tmpfile',
+      });
+      onSendDrawing(uri, () => onClose());
+    } catch (e) {
+      console.error('capture drawing failed', e);
+      Alert.alert('Draw failed', e.message || 'Could not create the drawing');
+    } finally {
+      setDrawingBusy(false);
+    }
+  }, [onSendDrawing, drawingBusy, onClose]);
+
   const renderItem = useCallback(({ item: m }) => {
     const uri = absUrl(m.media_url);
     const isVideo = m.type === 'VIDEO';
@@ -182,12 +241,17 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
             </View>
           ) : (
             <Video
+              key={m.id}
               source={{ uri }}
               style={styles.video}
               resizeMode="contain"
               controls
               repeat={false}
-              paused={true}
+              playInBackground={false}
+              paused={playingId !== m.id}
+              onPlay={() => setPlayingId(m.id)}
+              onPause={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
+              onEnd={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
               onError={() => setVideoErrors((prev) => ({ ...prev, [m.id]: true }))}
               onLoad={() => setVideoErrors((prev) => ({ ...prev, [m.id]: false }))}
             />
@@ -195,8 +259,11 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
         </View>
       );
     }
+    if (drawMode && m.id === item?.id) {
+      return <DrawableImage uri={uri} drawRef={drawRef} strokes={strokes} curPoints={curPoints} color={color} brush={brush} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} lastPtRef={lastPtRef} setCurPoints={setCurPoints} setStrokes={setStrokes} />;
+    }
     return <ZoomableImage uri={uri} />;
-  }, [videoErrors]);
+  }, [videoErrors, playingId, drawMode, item, strokes, curPoints, color, brush]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems && viewableItems.length) {
@@ -209,15 +276,48 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     setShowMenu(false);
   };
 
+  const isOwn = !!item && item.sender_id === currentUserId;
+
   const actionMenu = [
     { key: 'reply', label: 'Reply', icon: 'return-down-back-outline', onPress: () => { if (onReply && item) onReply(item); setShowMenu(false); } },
-    { key: 'react', label: 'React', icon: 'heart-outline', onPress: () => setShowMenu(false) },
     { key: 'download', label: 'Download', icon: 'download-outline', onPress: () => { setShowMenu(false); download(); } },
-    { key: 'delete', label: 'Delete for me', icon: 'trash-outline', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'me'); setShowMenu(false); } },
+    ...(isOwn ? [{ key: 'delete', label: 'Delete for me', icon: 'trash-outline', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'me'); setShowMenu(false); } }] : []),
+    ...(isOwn ? [{ key: 'deleteAll', label: 'Delete for everyone', icon: 'trash', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'everyone'); setShowMenu(false); } }] : []),
   ];
-  if (item && item.sender_id === currentUserId) {
-    actionMenu.push({ key: 'deleteAll', label: 'Delete for everyone', icon: 'trash', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'everyone'); setShowMenu(false); } });
-  }
+
+  const isImage = !!item && item.type === 'IMAGE';
+
+  const drawToolbar = (
+    <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
+      <View style={styles.drawRow}>
+        <TouchableOpacity onPress={() => setStrokes((s) => s.slice(0, -1))} style={styles.drawToolBtn} accessibilityLabel="Undo">
+          <Icon name="arrow-undo" size={20} color={theme.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => { setStrokes([]); }} style={styles.drawToolBtn} accessibilityLabel="Clear drawing">
+          <Icon name="trash-outline" size={20} color={theme.danger} />
+        </TouchableOpacity>
+        <View style={styles.colorRow}>
+          {DRAW_COLORS.map((c) => (
+            <TouchableOpacity
+              key={c}
+              onPress={() => setColor(c)}
+              style={[styles.colorSwatch, { backgroundColor: c }, color === c && styles.colorSwatchActive]}
+            />
+          ))}
+        </View>
+        <View style={styles.sizeRow}>
+          {DRAW_SIZES.map((s) => (
+            <TouchableOpacity key={s} onPress={() => setBrush(s)} style={[styles.sizeDot, brush === s && styles.sizeDotActive]}>
+              <View style={{ width: s + 4, height: s + 4, borderRadius: (s + 4) / 2, backgroundColor: brush === s ? theme.primary : theme.textSecondary }} />
+            </TouchableOpacity>
+          ))}
+        </View>
+        <TouchableOpacity onPress={sendDrawing} disabled={drawingBusy} style={[styles.sendDrawBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Send drawing">
+          {drawingBusy ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="send" size={17} color="#fff" />}
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -235,9 +335,21 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               </Text>
             )}
           </View>
-          <TouchableOpacity onPress={() => setShowMenu(true)} style={styles.topBtn} accessibilityLabel="More actions">
-            <Icon name="ellipsis-horizontal" size={24} color="#fff" />
-          </TouchableOpacity>
+          {isImage && !drawMode && (
+            <TouchableOpacity onPress={() => setDrawMode(true)} style={styles.topBtn} accessibilityLabel="Draw on photo">
+              <Icon name="color-wand" size={23} color="#fff" />
+            </TouchableOpacity>
+          )}
+          {drawMode && (
+            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); setCurPoints(null); }} style={styles.topBtn} accessibilityLabel="Close drawing">
+              <Icon name="close" size={24} color="#fff" />
+            </TouchableOpacity>
+          )}
+          {!drawMode && (
+            <TouchableOpacity onPress={() => setShowMenu(true)} style={styles.topBtn} accessibilityLabel="More actions">
+              <Icon name="ellipsis-horizontal" size={24} color="#fff" />
+            </TouchableOpacity>
+          )}
         </View>
 
         <FlatList
@@ -246,6 +358,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           keyExtractor={(m, idx) => String(m.id || idx)}
           horizontal
           pagingEnabled
+          scrollEnabled={!drawMode}
           showsHorizontalScrollIndicator={false}
           onViewableItemsChanged={onViewableItemsChanged}
           viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
@@ -255,23 +368,25 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           style={{ flex: 1 }}
         />
 
-        {canShare && (
-          <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
-            <View style={styles.bottomTitleBar}>
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Icon name="images-outline" size={14} color={theme.textSecondary} />
-                <Text style={[styles.bottomText, { color: theme.textSecondary }]}>
-                  Tap video to play · Two fingers to zoom
-                </Text>
+        {drawMode ? drawToolbar : (
+          canShare && (
+            <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
+              <View style={styles.bottomTitleBar}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Icon name="images-outline" size={14} color={theme.textSecondary} />
+                  <Text style={[styles.bottomText, { color: theme.textSecondary }]}>
+                    {item.type === 'VIDEO' ? 'Tap video to play' : 'Two fingers to zoom · tap ✨ to draw'}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={download} disabled={saving} style={[styles.dlBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Download media">
+                  {saving ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="download" size={16} color="#fff" />}
+                </TouchableOpacity>
               </View>
-              <TouchableOpacity onPress={download} disabled={saving} style={[styles.dlBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Download media">
-                {saving ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="download" size={16} color="#fff" />}
-              </TouchableOpacity>
             </View>
-          </View>
+          )
         )}
 
-        {showMenu && (
+        {showMenu && !drawMode && (
           <View style={styles.menuOverlay}>
             <TouchableOpacity style={styles.menuBackdrop} onPress={() => setShowMenu(false)} />
             <View style={[styles.menu, { backgroundColor: theme.card }]}>
@@ -299,6 +414,119 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   );
 }
 
+const DRAW_W = SCREEN_W;
+const DRAW_H = SCREEN_H - 180;
+
+function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, drawModeRef, colorRef, brushRef, lastPtRef, setCurPoints, setStrokes }) {
+  const [loading, setLoading] = useState(true);
+  const [size, setSize] = useState(null);
+  const pointsRef = useRef([]);
+  const lastFlushRef = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    Image.getSize(uri, (w, h) => {
+      if (!active || !w || !h) return;
+      const scale = Math.min(DRAW_W / w, DRAW_H / h);
+      setSize({ w: Math.round(w * scale), h: Math.round(h * scale) });
+    }, () => {
+      if (active) setSize({ w: DRAW_W, h: DRAW_H });
+    });
+    return () => { active = false; };
+  }, [uri]);
+
+  const flush = () => setCurPoints([...pointsRef.current]);
+
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => !!drawModeRef.current,
+    onMoveShouldSetPanResponder: () => !!drawModeRef.current,
+    onPanResponderGrant: (e) => {
+      pointsRef.current = [{ x: e.nativeEvent.locationX, y: e.nativeEvent.locationY }];
+      lastFlushRef.current = 0;
+      flush();
+    },
+    onPanResponderMove: (e) => {
+      const p = { x: e.nativeEvent.locationX, y: e.nativeEvent.locationY };
+      const pts = pointsRef.current;
+      const last = pts[pts.length - 1];
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 3) return;
+      pointsRef.current = [...pts, p];
+      const now = Date.now();
+      if (now - lastFlushRef.current >= 33) {
+        lastFlushRef.current = now;
+        flush();
+      }
+    },
+    onPanResponderRelease: () => {
+      const pts = pointsRef.current;
+      if (pts.length) {
+        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
+      }
+      pointsRef.current = [];
+      setCurPoints(null);
+      lastPtRef.current = null;
+    },
+    onPanResponderTerminate: () => {
+      const pts = pointsRef.current;
+      if (pts.length) {
+        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
+      }
+      pointsRef.current = [];
+      setCurPoints(null);
+      lastPtRef.current = null;
+    },
+  })).current;
+
+  const lines = [];
+  const pushLines = (stroke) => {
+    if (!stroke || !stroke.points || stroke.points.length < 2) return;
+    for (let i = 1; i < stroke.points.length; i++) {
+      const p1 = stroke.points[i - 1];
+      const p2 = stroke.points[i];
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1) continue;
+      const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
+      lines.push(
+        <View
+          key={`${i}-${p1.x}-${p1.y}`}
+          style={{
+            position: 'absolute',
+            width: stroke.size,
+            height: len,
+            left: (p1.x + p2.x) / 2 - stroke.size / 2,
+            top: (p1.y + p2.y) / 2 - len / 2,
+            backgroundColor: stroke.color,
+            borderRadius: stroke.size / 2,
+            transform: [{ rotate: `${angle}deg` }],
+          }}
+        />
+      );
+    }
+  };
+  strokes.forEach((s) => pushLines(s));
+  pushLines({ color, size: brush, points: curPoints || [] });
+
+  const dims = size || { w: DRAW_W, h: DRAW_H };
+
+  return (
+    <View style={styles.slide}>
+      <View collapsable={false} ref={drawRef} style={{ width: dims.w, height: dims.h }}>
+        {loading && (
+          <View style={styles.imgLoading}>
+            <ActivityIndicator color="#fff" />
+          </View>
+        )}
+        <Image source={{ uri }} style={{ width: dims.w, height: dims.h }} resizeMode="stretch" onLoad={() => setLoading(false)} />
+        <View style={StyleSheet.absoluteFill} {...pan.panHandlers}>
+          {lines}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   topBar: {
@@ -317,6 +545,15 @@ const styles = StyleSheet.create({
   bottomTitleBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   bottomText: { fontSize: 12, marginLeft: 5 },
   dlBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  drawRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  drawToolBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
+  colorRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  colorSwatch: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: 'rgba(0,0,0,0.15)' },
+  colorSwatchActive: { borderWidth: 3, borderColor: '#6C3CE9' },
+  sizeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sizeDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
+  sizeDotActive: { backgroundColor: 'rgba(108,60,233,0.15)' },
+  sendDrawBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   menu: { position: 'absolute', right: 12, top: 90, width: SCREEN_W - 60, borderRadius: 16, padding: 14, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },

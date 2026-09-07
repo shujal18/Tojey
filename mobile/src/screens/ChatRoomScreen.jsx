@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
-  KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator,
+  KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
   Animated, PanResponder,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
@@ -68,6 +68,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     } else if (message.type === 'VOICE') {
       Linking.openURL(absUrl(message.media_url)).catch(() => {});
     } else if (message.type === 'FILE' || message.type === 'DOCUMENT') {
+      const name = message.file_name || message.content || '';
+      if (/\.(mp4|mov|mkv|webm|3gp|m4v|avi|wmv)(\?|#|$)/i.test(name)) {
+        setMediaViewer({ items: [{ id: message.id, type: 'VIDEO', media_url: message.media_url, file_name: name, content: name, sender_id: message.sender_id }], index: 0 });
+        return;
+      }
       downloadAndOpen(message);
     } else {
       Linking.openURL(absUrl(message.media_url)).catch(() => {});
@@ -94,10 +99,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const handleLongPress = useCallback((msg) => setReactionMenu(msg), []);
 
   const toggleLike = useCallback((msg) => {
-    if (!msg) return;
+    if (!msg || typeof msg.id !== 'number') return;
     const mine = (msg.reactions || []).find((r) => r.user_id === currentUser.id);
     reactTo(msg.id, mine && mine.reaction === '❤️' ? '' : '❤️');
   }, [currentUser.id]);
+
+  const replyIndex = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  const replyPreviewOf = useCallback((id) => {
+    const ref = replyIndex.get(id);
+    return ref ? replyPreview(ref) : '…';
+  }, [replyIndex]);
 
   const renderMessage = useCallback(({ item, index }) => {
     const isSent = item.sender_id === currentUser.id;
@@ -114,14 +125,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         onRetry={retrySendMedia}
         onReply={setReplyingTo}
         onDoubleTap={toggleLike}
-        replyPreviewOf={(id) => {
-          const ref = messages.find((m) => m.id === id);
-          return ref ? replyPreview(ref) : '…';
-        }}
+        replyPreviewOf={replyPreviewOf}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf]);
 
   const onType = (t) => {
     setText(t);
@@ -598,6 +606,53 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   }, [otherUserId, socket, currentUser.token]);
 
+  const uploadDrawing = useCallback(async (filePath, onDone) => {
+    if (!filePath) return;
+    const tempId = `tmp-draw-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: 'IMAGE',
+      content: '🖌️ Drawing',
+      media_url: filePath,
+      thumb_url: filePath,
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reactions: [],
+      _local: true,
+      _pending: true,
+      _uploading: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
+    try {
+      const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+        'Content-Type': 'multipart/form-data',
+        Authorization: `Bearer ${currentUser.token || ''}`,
+      }, [
+        { name: 'file', filename: `drawing_${Date.now()}.png`, type: 'image/png', data: RNFetchBlob.wrap(filePath) },
+      ]);
+      const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
+      if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
+      socket.emit('message:send', {
+        otherUserId,
+        type: 'IMAGE',
+        content: '🖌️ Drawing',
+        mediaUrl: upData.url,
+        thumbUrl: upData.url,
+      }, (ack) => {
+        if (ack?.ok) {
+          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          if (onDone) onDone();
+        } else {
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        }
+      });
+    } catch (e) {
+      console.error('uploadDrawing failed:', e);
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
+    }
+  }, [otherUserId, socket, currentUser.token]);
+
   const downloadAndOpen = useCallback(async (message) => {
     if (!message || !message.media_url) return;
     const mime = mimeFor(message);
@@ -617,7 +672,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         },
       }).fetch('GET', absUrl(message.media_url));
       if (Platform.OS === 'android') {
-        RNFetchBlob.android.actionViewIntent(res.path(), mime);
+        if (mime === 'application/octet-stream') {
+          Alert.alert('Saved', `Downloaded to Download/${name}\nOpen it from your Files app.`);
+        } else {
+          try {
+            await RNFetchBlob.android.actionViewIntent(res.path(), mime);
+          } catch (e) {
+            console.error('actionViewIntent failed, no handler for mime', mime, e);
+            Alert.alert('Saved', `Downloaded to Download/${name}.\nNo app found to preview it here — open it from your Files app.`);
+          }
+        }
       } else {
         Linking.openURL(absUrl(message.media_url)).catch(() => {});
       }
@@ -714,8 +778,8 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <ActionBtn label="Like" icon="heart-outline" onPress={() => reactTo(reactionMenu.id, '❤️')} theme={theme} />
             </View>
             <View style={styles.actionRow}>
-              <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id} />
-              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { if (reactionMenu.content) Clipboard.setString(reactionMenu.content); }} theme={theme} />
+              <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id && reactionMenu.type === 'TEXT'} />
+              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { if (reactionMenu.content) Clipboard.setString(reactionMenu.content); }} theme={theme} visible={reactionMenu.type === 'TEXT' && !!reactionMenu.content} />
             </View>
             <View style={styles.actionRow}>
               <ActionBtn label="Delete for me" icon="trash-outline" onPress={() => doAction('deleteMe', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
@@ -850,6 +914,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           onReact={reactTo}
           onReply={(item) => setReplyingTo(item)}
           onDelete={(item, mode) => deleteMessage(item, mode)}
+          onSendDrawing={uploadDrawing}
         />
       )}
     </KeyboardAvoidingView>
@@ -907,12 +972,25 @@ function mimeFor(m) {
   if (m.type === 'IMAGE') return 'image/jpeg';
   const n = (m.content || m.file_name || '').toLowerCase();
   if (n.endsWith('.pdf')) return 'application/pdf';
-  if (n.endsWith('.zip')) return 'application/zip';
+  if (n.endsWith('.zip') || n.endsWith('.rar') || n.endsWith('.7z')) return 'application/zip';
   if (n.endsWith('.mp3')) return 'audio/mpeg';
+  if (n.endsWith('.wav')) return 'audio/wav';
+  if (n.endsWith('.m4a')) return 'audio/mp4';
+  if (n.endsWith('.ogg')) return 'audio/ogg';
+  if (n.endsWith('.mp4') || n.endsWith('.m4v')) return 'video/mp4';
+  if (n.endsWith('.mov')) return 'video/quicktime';
+  if (n.endsWith('.webm')) return 'video/webm';
+  if (n.endsWith('.3gp')) return 'video/3gpp';
+  if (n.endsWith('.mkv')) return 'video/x-matroska';
+  if (n.endsWith('.avi')) return 'video/x-msvideo';
   if (n.endsWith('.txt')) return 'text/plain';
   if (n.endsWith('.doc') || n.endsWith('.docx')) return 'application/msword';
   if (n.endsWith('.xls') || n.endsWith('.xlsx')) return 'application/vnd.ms-excel';
   if (n.endsWith('.ppt') || n.endsWith('.pptx')) return 'application/vnd.ms-powerpoint';
+  if (n.endsWith('.png')) return 'image/png';
+  if (n.endsWith('.gif')) return 'image/gif';
+  if (n.endsWith('.webp')) return 'image/webp';
+  if (n.endsWith('.jpg') || n.endsWith('.jpeg')) return 'image/jpeg';
   return 'application/octet-stream';
 }
 
@@ -1116,18 +1194,22 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
               )}
             </TouchableOpacity>
           </Animated.View>
-        </View>
 
         {message.reactions && message.reactions.length > 0 && (
           <TouchableOpacity
             onPress={() => onLongPress(message)}
-            style={[styles.reactionBadge, { backgroundColor: theme.primaryLight }, isSent ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}
+            style={[
+              styles.reactionBadge,
+              { backgroundColor: theme.primaryLight },
+              isSent ? { right: -8 } : { left: -8 },
+            ]}
           >
             {message.reactions.map((r, i) => (
               <Text key={i} style={{ fontSize: 11 }}>{r.reaction}</Text>
             ))}
           </TouchableOpacity>
         )}
+        </View>
       </View>
   );
 }
@@ -1159,7 +1241,7 @@ const styles = StyleSheet.create({
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
-  reactionBadge: { borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, marginTop: -6, marginHorizontal: 8, flexDirection: 'row' },
+  reactionBadge: { position: 'absolute', bottom: -8, borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, flexDirection: 'row', zIndex: 5, elevation: 3 },
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
