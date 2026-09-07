@@ -9,11 +9,9 @@ import { Icon } from './AppIcon';
 import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
+import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-
-const DRAW_COLORS = ['#FFFFFF', '#FF5252', '#2196F3', '#4CAF50', '#FFC107', '#000000'];
-const DRAW_SIZES = [3, 6, 12];
 
 function ZoomableImage({ uri, style }) {
   const scale = useRef(new Animated.Value(1)).current;
@@ -130,10 +128,33 @@ function dist(a, b) {
   return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
+class VideoBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error) {
+    console.error('Video render failed:', error);
+  }
+  componentDidUpdate(prevProps) {
+    if (prevProps.source !== this.props.source && this.state.failed) {
+      this.setState({ failed: false });
+    }
+  }
+  render() {
+    if (this.state.failed) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
 export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing }) {
   const [index, setIndex] = useState(startIndex);
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});
+  const [videoLoading, setVideoLoading] = useState({});
   const [playingId, setPlayingId] = useState(null);
   const [saving, setSaving] = useState(false);
   const listRef = useRef(null);
@@ -178,6 +199,22 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       return cur && visible && cur === visible.id ? cur : null;
     });
   }, [index, items]);
+
+  const playExternal = useCallback(async (m, fallbackMime) => {
+    if (!m || !m.media_url) return;
+    try {
+      const url = absUrl(m.media_url);
+      const base = m.file_name || `tojey_video_${m.id}.mp4`;
+      const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : `${base}.mp4`;
+      const { dirs } = RNFetchBlob.fs;
+      const target = `${dirs.CacheDir}/${name}`;
+      const res = await RNFetchBlob.config({ fileCache: false, path: target }).fetch('GET', url);
+      await RNFetchBlob.android.actionViewIntent(res.path(), fallbackMime || 'video/mp4');
+    } catch (e) {
+      console.error('playExternal failed', e);
+      Alert.alert('Could not play video', e.message || 'No video app found');
+    }
+  }, []);
 
   const download = useCallback(async () => {
     if (!item || saving) return;
@@ -232,29 +269,57 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     const uri = absUrl(m.media_url);
     const isVideo = m.type === 'VIDEO';
     if (isVideo) {
+      const failed = videoErrors[m.id];
+      const loading = videoLoading[m.id] && !failed;
       return (
         <View style={styles.slide}>
-          {videoErrors[m.id] ? (
+          {failed ? (
             <View style={styles.vidError}>
               <Icon name="alert-circle-outline" size={44} color="#fff" />
               <Text style={{ color: '#fff', marginTop: 10, fontSize: 14 }}>Video unavailable</Text>
+              <TouchableOpacity onPress={() => playExternal(m, 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
+                <Icon name="open-outline" size={18} color="#fff" />
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+              </TouchableOpacity>
             </View>
           ) : (
-            <Video
+            <VideoBoundary
               key={m.id}
-              source={{ uri }}
-              style={styles.video}
-              resizeMode="contain"
-              controls
-              repeat={false}
-              playInBackground={false}
-              paused={playingId !== m.id}
-              onPlay={() => setPlayingId(m.id)}
-              onPause={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
-              onEnd={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
-              onError={() => setVideoErrors((prev) => ({ ...prev, [m.id]: true }))}
-              onLoad={() => setVideoErrors((prev) => ({ ...prev, [m.id]: false }))}
-            />
+              source={uri}
+              fallback={
+                <View style={styles.vidError}>
+                  <Icon name="alert-circle-outline" size={44} color="#fff" />
+                  <Text style={{ color: '#fff', marginTop: 10, fontSize: 14 }}>Video could not load here</Text>
+                  <TouchableOpacity onPress={() => playExternal(m, 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
+                    <Icon name="open-outline" size={18} color="#fff" />
+                    <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+                  </TouchableOpacity>
+                </View>
+              }
+            >
+              <Video
+                source={{ uri }}
+                style={styles.video}
+                resizeMode="contain"
+                controls
+                repeat={false}
+                playInBackground={false}
+                playWhenInactive={false}
+                paused={playingId !== m.id}
+                bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
+                onPlay={() => setPlayingId(m.id)}
+                onPause={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
+                onEnd={() => setPlayingId((cur) => (cur === m.id ? null : cur))}
+                onError={() => setVideoErrors((prev) => ({ ...prev, [m.id]: true }))}
+                onLoad={() => { setVideoErrors((prev) => ({ ...prev, [m.id]: false })); setVideoLoading((prev) => ({ ...prev, [m.id]: false })); }}
+                onLoadStart={() => setVideoLoading((prev) => ({ ...prev, [m.id]: true }))}
+              />
+            </VideoBoundary>
+          )}
+          {loading && (
+            <View style={styles.vidLoading}>
+              <ActivityIndicator color="#fff" size="large" />
+            </View>
           )}
         </View>
       );
@@ -263,7 +328,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       return <DrawableImage uri={uri} drawRef={drawRef} strokes={strokes} curPoints={curPoints} color={color} brush={brush} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} lastPtRef={lastPtRef} setCurPoints={setCurPoints} setStrokes={setStrokes} />;
     }
     return <ZoomableImage uri={uri} />;
-  }, [videoErrors, playingId, drawMode, item, strokes, curPoints, color, brush]);
+  }, [videoErrors, videoLoading, playingId, drawMode, item, strokes, curPoints, color, brush, playExternal]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems && viewableItems.length) {
@@ -288,35 +353,17 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   const isImage = !!item && item.type === 'IMAGE';
 
   const drawToolbar = (
-    <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
-      <View style={styles.drawRow}>
-        <TouchableOpacity onPress={() => setStrokes((s) => s.slice(0, -1))} style={styles.drawToolBtn} accessibilityLabel="Undo">
-          <Icon name="arrow-undo" size={20} color={theme.primary} />
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => { setStrokes([]); }} style={styles.drawToolBtn} accessibilityLabel="Clear drawing">
-          <Icon name="trash-outline" size={20} color={theme.danger} />
-        </TouchableOpacity>
-        <View style={styles.colorRow}>
-          {DRAW_COLORS.map((c) => (
-            <TouchableOpacity
-              key={c}
-              onPress={() => setColor(c)}
-              style={[styles.colorSwatch, { backgroundColor: c }, color === c && styles.colorSwatchActive]}
-            />
-          ))}
-        </View>
-        <View style={styles.sizeRow}>
-          {DRAW_SIZES.map((s) => (
-            <TouchableOpacity key={s} onPress={() => setBrush(s)} style={[styles.sizeDot, brush === s && styles.sizeDotActive]}>
-              <View style={{ width: s + 4, height: s + 4, borderRadius: (s + 4) / 2, backgroundColor: brush === s ? theme.primary : theme.textSecondary }} />
-            </TouchableOpacity>
-          ))}
-        </View>
-        <TouchableOpacity onPress={sendDrawing} disabled={drawingBusy} style={[styles.sendDrawBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Send drawing">
-          {drawingBusy ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="send" size={17} color="#fff" />}
-        </TouchableOpacity>
-      </View>
-    </View>
+    <DrawingToolbar
+      theme={theme}
+      color={color}
+      brush={brush}
+      setColor={setColor}
+      setBrush={setBrush}
+      onUndo={() => setStrokes((s) => s.slice(0, -1))}
+      onClear={() => setStrokes([])}
+      onDone={sendDrawing}
+      busy={drawingBusy}
+    />
   );
 
   return (
@@ -398,7 +445,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                   </TouchableOpacity>
                 ))}
               </View>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
                 {actionMenu.map((a) => (
                   <TouchableOpacity key={a.key} onPress={a.onPress} style={[styles.menuItem, { backgroundColor: theme.primaryLight }]}>
                     <Icon name={a.icon} size={16} color={a.danger ? theme.danger : theme.primary} />
@@ -414,119 +461,6 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   );
 }
 
-const DRAW_W = SCREEN_W;
-const DRAW_H = SCREEN_H - 180;
-
-function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, drawModeRef, colorRef, brushRef, lastPtRef, setCurPoints, setStrokes }) {
-  const [loading, setLoading] = useState(true);
-  const [size, setSize] = useState(null);
-  const pointsRef = useRef([]);
-  const lastFlushRef = useRef(0);
-
-  useEffect(() => {
-    let active = true;
-    Image.getSize(uri, (w, h) => {
-      if (!active || !w || !h) return;
-      const scale = Math.min(DRAW_W / w, DRAW_H / h);
-      setSize({ w: Math.round(w * scale), h: Math.round(h * scale) });
-    }, () => {
-      if (active) setSize({ w: DRAW_W, h: DRAW_H });
-    });
-    return () => { active = false; };
-  }, [uri]);
-
-  const flush = () => setCurPoints([...pointsRef.current]);
-
-  const pan = useRef(PanResponder.create({
-    onStartShouldSetPanResponder: () => !!drawModeRef.current,
-    onMoveShouldSetPanResponder: () => !!drawModeRef.current,
-    onPanResponderGrant: (e) => {
-      pointsRef.current = [{ x: e.nativeEvent.locationX, y: e.nativeEvent.locationY }];
-      lastFlushRef.current = 0;
-      flush();
-    },
-    onPanResponderMove: (e) => {
-      const p = { x: e.nativeEvent.locationX, y: e.nativeEvent.locationY };
-      const pts = pointsRef.current;
-      const last = pts[pts.length - 1];
-      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 3) return;
-      pointsRef.current = [...pts, p];
-      const now = Date.now();
-      if (now - lastFlushRef.current >= 33) {
-        lastFlushRef.current = now;
-        flush();
-      }
-    },
-    onPanResponderRelease: () => {
-      const pts = pointsRef.current;
-      if (pts.length) {
-        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
-      }
-      pointsRef.current = [];
-      setCurPoints(null);
-      lastPtRef.current = null;
-    },
-    onPanResponderTerminate: () => {
-      const pts = pointsRef.current;
-      if (pts.length) {
-        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
-      }
-      pointsRef.current = [];
-      setCurPoints(null);
-      lastPtRef.current = null;
-    },
-  })).current;
-
-  const lines = [];
-  const pushLines = (stroke) => {
-    if (!stroke || !stroke.points || stroke.points.length < 2) return;
-    for (let i = 1; i < stroke.points.length; i++) {
-      const p1 = stroke.points[i - 1];
-      const p2 = stroke.points[i];
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 1) continue;
-      const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
-      lines.push(
-        <View
-          key={`${i}-${p1.x}-${p1.y}`}
-          style={{
-            position: 'absolute',
-            width: stroke.size,
-            height: len,
-            left: (p1.x + p2.x) / 2 - stroke.size / 2,
-            top: (p1.y + p2.y) / 2 - len / 2,
-            backgroundColor: stroke.color,
-            borderRadius: stroke.size / 2,
-            transform: [{ rotate: `${angle}deg` }],
-          }}
-        />
-      );
-    }
-  };
-  strokes.forEach((s) => pushLines(s));
-  pushLines({ color, size: brush, points: curPoints || [] });
-
-  const dims = size || { w: DRAW_W, h: DRAW_H };
-
-  return (
-    <View style={styles.slide}>
-      <View collapsable={false} ref={drawRef} style={{ width: dims.w, height: dims.h }}>
-        {loading && (
-          <View style={styles.imgLoading}>
-            <ActivityIndicator color="#fff" />
-          </View>
-        )}
-        <Image source={{ uri }} style={{ width: dims.w, height: dims.h }} resizeMode="stretch" onLoad={() => setLoading(false)} />
-        <View style={StyleSheet.absoluteFill} {...pan.panHandlers}>
-          {lines}
-        </View>
-      </View>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1 },
   topBar: {
@@ -538,6 +472,8 @@ const styles = StyleSheet.create({
   slide: { width: SCREEN_W, height: '100%', alignItems: 'center', justifyContent: 'center' },
   video: { width: SCREEN_W, height: SCREEN_H - 180 },
   vidError: { alignItems: 'center', justifyContent: 'center' },
+  vidFallback: { flexDirection: 'row', alignItems: 'center', marginTop: 16, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
+  vidLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 3 },
   zoomWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   zoomImg: { height: '100%' },
   imgLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
@@ -545,20 +481,11 @@ const styles = StyleSheet.create({
   bottomTitleBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   bottomText: { fontSize: 12, marginLeft: 5 },
   dlBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  drawRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  drawToolBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
-  colorRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  colorSwatch: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: 'rgba(0,0,0,0.15)' },
-  colorSwatchActive: { borderWidth: 3, borderColor: '#6C3CE9' },
-  sizeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  sizeDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
-  sizeDotActive: { backgroundColor: 'rgba(108,60,233,0.15)' },
-  sendDrawBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   menu: { position: 'absolute', right: 12, top: 90, width: SCREEN_W - 60, borderRadius: 16, padding: 14, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
   menuTitle: { fontSize: 13, fontWeight: '700', marginBottom: 8 },
-  reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 10 },
+  reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 14 },
   reactionBtn: { borderRadius: 14, width: 44, height: 40, alignItems: 'center', justifyContent: 'center' },
   menuItem: { flexDirection: 'row', alignItems: 'center', borderRadius: 9, paddingVertical: 9, paddingHorizontal: 12 },
 });

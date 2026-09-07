@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from '
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
-  Animated, PanResponder,
+  Animated, PanResponder, Dimensions,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -14,6 +14,9 @@ import DocumentPicker, { types as DocTypes } from 'react-native-document-picker'
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
 import { loadMessages, saveMessages, clearConversationCache } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
+import MediaPreview from '../components/MediaPreview';
+
+const { width: APP_W } = Dimensions.get('window');
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -31,11 +34,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const recTimer = useRef(null);
   const typingTimer = useRef(null);
   const [mediaViewer, setMediaViewer] = useState(null);
+  const [previewAsset, setPreviewAsset] = useState(null);
   const [atBottomNear, setAtBottomNear] = useState(true);
   const [pendingCount, setPendingCount] = useState(0);
   const atBottomRef = useRef(true);
   const atBottomNearRef = useRef(true);
   const scrolledToEndOnMount = useRef(false);
+  const uploadTasks = useRef(new Map());
 
   // Defensive: ensure otherUser has all required properties
   const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
@@ -126,10 +131,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         onReply={setReplyingTo}
         onDoubleTap={toggleLike}
         replyPreviewOf={replyPreviewOf}
+        suggestEdit={isSent && item.type === 'TEXT' && !!item.content && !item._pending}
+        onEditRow={(m) => doAction('edit', m)}
+        onCancelUpload={cancelUpload}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload]);
 
   const onType = (t) => {
     setText(t);
@@ -256,6 +264,48 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   function updateStatus(id, status) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
   }
+
+  const setUploadProgress = useCallback((tempId, p) => {
+    setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploadProgress: p } : m)));
+  }, []);
+
+  const uploadAsset = useCallback(({ uri, name, type }, onProgress) => {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const task = RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
+        'Content-Type': 'multipart/form-data',
+        Authorization: `Bearer ${currentUser.token || ''}`,
+      }, [
+        { name: 'file', filename: name, type, data: RNFetchBlob.wrap(uri) },
+      ]).uploadProgress({ interval: 120 }, (sent, total) => {
+        if (done || total <= 0) return;
+        if (onProgress) onProgress(Math.min(1, sent / total));
+      }).then((res) => {
+        if (done) return;
+        done = true;
+        let d = null;
+        try { d = res.data ? JSON.parse(res.data) : null; } catch (err) { d = null; }
+        if (!d || !d.url) reject(new Error((d && d.error) || 'Upload failed'));
+        else resolve(d);
+      }).catch((err) => {
+        if (done) return;
+        done = true;
+        reject(err);
+      });
+      uploadTasks.current.set(name, task);
+    });
+  }, [currentUser.token]);
+
+  const cancelUpload = useCallback((msg) => {
+    if (!msg) return;
+    const key = msg._uploadKey;
+    if (key) {
+      const t = uploadTasks.current.get(key);
+      try { if (t && t.cancel) t.cancel(); } catch (e) { console.error('cancel err', e); }
+      uploadTasks.current.delete(key);
+    }
+    setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+  }, []);
 
   const sendText = () => {
     const content = text.trim();
@@ -388,7 +438,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   const sendFile = (asset) => {
     if (!asset || !asset.uri) return;
-    const fileName = asset.name || 'file';
+    const fileName = asset.name || `file_${Date.now()}`;
     const fileSize = asset.size || 0;
     const mimeType = asset.type || 'application/octet-stream';
     const tempId = `tmp-${Date.now()}`;
@@ -405,21 +455,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _local: true,
       _pending: true,
       _uploading: true,
+      _uploadKey: fileName,
+      _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
     }
-    (async () => {
-      try {
-        const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
-          'Content-Type': 'multipart/form-data',
-          Authorization: `Bearer ${currentUser.token || ''}`,
-        }, [
-          { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(asset.uri) },
-        ]);
-        const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
-        if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
+    uploadAsset({ uri: asset.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
+      .then((upData) => {
+        uploadTasks.current.delete(fileName);
         socket.emit('message:send', {
           otherUserId,
           type: 'FILE',
@@ -434,13 +479,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
         });
-      } catch (e) {
+      })
+      .catch((e) => {
+        uploadTasks.current.delete(fileName);
         console.error('sendFile upload failed:', e);
         setMessages((prev) => prev.map((m) =>
           m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m
         ));
-      }
-    })();
+      });
   };
 
   const pickMedia = (kind) => {
@@ -461,7 +507,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
                 alert('Failed to open camera: ' + (r.errorMessage || 'Unknown error'));
                 return;
               }
-              if (r.assets && r.assets[0]) sendMedia(r.assets[0]);
+              if (r.assets && r.assets.length) openEditor(r.assets[0]);
             });
           } else {
             const ok = await ensureMediaPermission();
@@ -475,7 +521,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
                 alert('Failed to open gallery: ' + (r.errorMessage || 'Unknown error'));
                 return;
               }
-              if (r.assets && r.assets[0]) sendMedia(r.assets[0]);
+              if (r.assets && r.assets.length) openEditor(r.assets[0]);
             });
           }
         } catch (e) {
@@ -492,9 +538,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           });
           if (res && res[0]) {
             const asset = res[0];
-            const uri = asset.uri;
-            const localUri = asset.fileCopyUri || asset.uri;
-            sendFile({ uri: localUri, name: asset.name, size: asset.size, type: asset.type });
+            const uri = asset.fileCopyUri || asset.uri;
+            sendFile({ uri, name: asset.name, size: asset.size, type: asset.type || 'application/octet-stream' });
           }
         } catch (e) {
           if (DocumentPicker.isCancel(e)) return;
@@ -505,49 +550,78 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
+  const openEditor = (asset) => {
+    if (!asset || !asset.uri) return;
+    const isVideo = !!(asset.type && asset.type.toLowerCase().startsWith('video'));
+    setPreviewAsset({
+      uri: asset.uri,
+      type: isVideo ? 'VIDEO' : 'IMAGE',
+      fileName: asset.fileName || (isVideo ? 'video' : 'photo'),
+      mimeType: asset.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+    });
+  };
+
+  const handlePreviewSend = (out) => {
+    if (!out || !out.uri) return;
+    const isVideo = previewAsset ? previewAsset.type === 'VIDEO' : false;
+    sendMediaAsset({
+      uri: out.uri,
+      isVideo,
+      mimeType: out.mimeType,
+      fileName: out.fileName,
+      caption: out.caption,
+    });
+    setPreviewAsset(null);
+  };
+
   const sendMedia = (asset) => {
     if (!asset || !asset.uri) return;
-    const isVideo = asset.type && asset.type.startsWith('video');
+    const isVideo = !!(asset.type && asset.type.toLowerCase().startsWith('video'));
+    sendMediaAsset({
+      uri: asset.uri,
+      isVideo,
+      mimeType: asset.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+      fileName: asset.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`),
+      caption: '',
+    });
+  };
+
+  const sendMediaAsset = (opts) => {
+    if (!opts || !opts.uri) return;
+    const isVideo = !!opts.isVideo;
     const tempId = `tmp-${Date.now()}`;
+    const content = opts.caption && opts.caption.length ? opts.caption : (isVideo ? '🎬 Video' : '📷 Photo');
+    const mimeType = opts.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
+    const fileName = opts.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
     const localMsg = {
       id: tempId,
       sender_id: currentUser.id,
       type: isVideo ? 'VIDEO' : 'IMAGE',
-      content: isVideo ? '🎬 Video' : '📷 Photo',
-      media_url: asset.uri,
-      thumb_url: asset.uri,
+      content,
+      media_url: opts.uri,
+      thumb_url: opts.uri,
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
       _local: true,
       _pending: true,
       _uploading: true,
+      _uploadKey: fileName,
+      _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
     }
-
-    const mimeType = asset.type || (isVideo ? 'video/mp4' : 'image/jpeg');
-    const fileName = asset.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
-
-    (async () => {
-      try {
-        const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
-          'Content-Type': 'multipart/form-data',
-          Authorization: `Bearer ${currentUser.token || ''}`,
-        }, [
-          { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(asset.uri) },
-        ]);
-        const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
-        if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
-        const mediaUrl = upData.url;
+    uploadAsset({ uri: opts.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
+      .then((upData) => {
+        uploadTasks.current.delete(fileName);
         const payload = {
           otherUserId,
           type: isVideo ? 'VIDEO' : 'IMAGE',
-          content: isVideo ? '🎬 Video' : '📷 Photo',
-          mediaUrl,
-          thumbUrl: mediaUrl,
+          content,
+          mediaUrl: upData.url,
+          thumbUrl: upData.url,
         };
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
@@ -556,13 +630,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
         });
-      } catch (e) {
+      })
+      .catch((e) => {
+        uploadTasks.current.delete(fileName);
         console.error('sendMedia upload failed:', e);
         setMessages((prev) => prev.map((m) =>
           m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m
         ));
-      }
-    })();
+      });
   };
 
   const retrySendMedia = useCallback((msg) => {
@@ -570,45 +645,43 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const isFile = msg.type === 'FILE' || msg.type === 'DOCUMENT';
     const isVideo = msg.type === 'VIDEO';
     const tempId = `tmp-${Date.now()}-r`;
-    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false } : m)));
-    const mimeType = isFile
-      ? (mimeFor(msg) || 'application/octet-stream')
-      : isVideo ? 'video/mp4' : 'image/jpeg';
     const fileName = isFile
       ? (msg.file_name || msg.content || `file_${Date.now()}`)
       : isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`;
-    RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
-      'Content-Type': 'multipart/form-data',
-      Authorization: `Bearer ${currentUser.token || ''}`,
-    }, [
-      { name: 'file', filename: fileName, type: mimeType, data: RNFetchBlob.wrap(msg.media_url) },
-    ]).then((uploadRes) => {
-      const upData = JSON.parse(uploadRes.data);
-      if (!upData?.url) throw new Error('Upload failed');
-      socket.emit('message:send', {
-        otherUserId,
-        type: msg.type,
-        content: isFile ? fileName : (isVideo ? '🎬 Video' : '📷 Photo'),
-        fileName: isFile ? fileName : '',
-        mediaSize: isFile ? (msg.media_size || 0) : 0,
-        mediaUrl: upData.url,
-        thumbUrl: isFile ? '' : upData.url,
-      }, (ack) => {
-        if (ack?.ok) {
-          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-        } else {
-          setMessages((prev) => prev.filter((m) => m.id !== tempId));
-        }
+    const mimeType = isFile
+      ? (mimeFor(msg) || 'application/octet-stream')
+      : isVideo ? 'video/mp4' : 'image/jpeg';
+    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
+    uploadAsset({ uri: msg.media_url, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
+      .then((upData) => {
+        uploadTasks.current.delete(fileName);
+        socket.emit('message:send', {
+          otherUserId,
+          type: msg.type,
+          content: isFile ? fileName : (isVideo ? '🎬 Video' : '📷 Photo'),
+          fileName: isFile ? fileName : '',
+          mediaSize: isFile ? (msg.media_size || 0) : 0,
+          mediaUrl: upData.url,
+          thumbUrl: isFile ? '' : upData.url,
+        }, (ack) => {
+          if (ack?.ok) {
+            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          } else {
+            setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          }
+        });
+      })
+      .catch((e) => {
+        uploadTasks.current.delete(fileName);
+        console.error('retry sendMedia failed:', e);
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
       });
-    }).catch((e) => {
-      console.error('retry sendMedia failed:', e);
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
-    });
-  }, [otherUserId, socket, currentUser.token]);
+  }, [otherUserId, socket, currentUser.token, uploadAsset, setUploadProgress]);
 
   const uploadDrawing = useCallback(async (filePath, onDone) => {
     if (!filePath) return;
     const tempId = `tmp-draw-${Date.now()}`;
+    const fileName = `drawing_${Date.now()}.png`;
     const localMsg = {
       id: tempId,
       sender_id: currentUser.id,
@@ -622,17 +695,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _local: true,
       _pending: true,
       _uploading: true,
+      _uploadKey: fileName,
+      _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
     try {
-      const uploadRes = await RNFetchBlob.fetch('POST', `${SERVER_URL}/api/upload`, {
-        'Content-Type': 'multipart/form-data',
-        Authorization: `Bearer ${currentUser.token || ''}`,
-      }, [
-        { name: 'file', filename: `drawing_${Date.now()}.png`, type: 'image/png', data: RNFetchBlob.wrap(filePath) },
-      ]);
-      const upData = uploadRes.data ? JSON.parse(uploadRes.data) : null;
-      if (!upData || !upData.url) throw new Error(upData?.error || 'Upload failed');
+      const upData = await uploadAsset({ uri: filePath, name: fileName, type: 'image/png' }, (p) => setUploadProgress(tempId, p));
+      uploadTasks.current.delete(fileName);
       socket.emit('message:send', {
         otherUserId,
         type: 'IMAGE',
@@ -648,10 +717,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }
       });
     } catch (e) {
+      uploadTasks.current.delete(fileName);
       console.error('uploadDrawing failed:', e);
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
     }
-  }, [otherUserId, socket, currentUser.token]);
+  }, [otherUserId, socket, currentUser.token, uploadAsset, setUploadProgress]);
 
   const downloadAndOpen = useCallback(async (message) => {
     if (!message || !message.media_url) return;
@@ -917,6 +987,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           onSendDrawing={uploadDrawing}
         />
       )}
+
+      {previewAsset && (
+        <MediaPreview
+          uri={previewAsset.uri}
+          type={previewAsset.type}
+          fileName={previewAsset.fileName}
+          mimeType={previewAsset.mimeType}
+          theme={theme}
+          onCancel={() => setPreviewAsset(null)}
+          onSend={handlePreviewSend}
+        />
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -1009,11 +1091,13 @@ function formatBytes(b) {
   return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf }) {
+function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
   const replied = useRef(false);
+
+  const swipeAction = (m) => (suggestEdit && onEditRow ? onEditRow(m) : onReply(m));
 
   const panResponder = useRef(PanResponder.create({
     onMoveShouldSetPanResponder: (_, g) =>
@@ -1027,7 +1111,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
       if (trigger) {
         replied.current = true;
         Animated.spring(translateX, { toValue: swipeDirection * 110, useNativeDriver: true, bounciness: 0, speed: 30 }).start(() => {
-          onReply(message);
+          swipeAction(message);
           replied.current = false;
           Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
         });
@@ -1079,9 +1163,9 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
   return (
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
-        {/* Reply affordance revealed behind the bubble during a swipe (WhatsApp-style) */}
+        {/* Swipe affordance revealed behind the bubble (reply, or edit for your own text) */}
         <View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)' }]}>
-          <Icon name="arrow-back" size={14} color="#fff" />
+          <Icon name={suggestEdit ? 'create-outline' : 'arrow-back'} size={14} color="#fff" />
         </View>
         <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
             <TouchableOpacity
@@ -1112,9 +1196,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                           <Icon name="play" size={26} color="#fff" />
                         </View>
                       ) : message._uploading ? (
-                        <View style={styles.videoPlay}>
-                          <ActivityIndicator color="#fff" />
-                        </View>
+                        <UploadOverlay progress={message._uploadProgress} onCancel={onCancelUpload ? () => onCancelUpload(message) : null} />
                       ) : null}
                     </View>
                   )}
@@ -1159,8 +1241,20 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                     </Text>
                     <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary, marginTop: 2 }}>
                       {formatBytes(message.media_size || 0) || 'File'}
-                      {message._uploading ? ' · uploading…' : ''}
                     </Text>
+                    {message._uploading ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                        <ArcProgress size={30} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
+                        <Text style={{ fontSize: 10, marginLeft: 6, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
+                          {Math.round((message._uploadProgress || 0) * 100)}%
+                        </Text>
+                        {onCancelUpload && (
+                          <TouchableOpacity onPress={() => onCancelUpload(message)} style={{ marginLeft: 8, padding: 3 }} accessibilityLabel="Cancel upload">
+                            <Icon name="close" size={14} color={isSent ? '#fff' : theme.textSecondary} />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    ) : null}
                     {message._uploadError && (
                       <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 2 }}>
                         Upload failed · tap to retry
@@ -1216,6 +1310,39 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
 
 const MessageRow = memo(MessageRowFn);
 
+function ArcProgress({ size = 56, thickness = 4, progress, color = '#fff', track = 'rgba(255,255,255,0.3)' }) {
+  const p = Math.min(Math.max(progress || 0, 0), 1);
+  const deg = p * 360 - 90;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ position: 'absolute', width: size, height: size, borderRadius: size / 2, borderWidth: thickness, borderColor: track }} />
+      <View
+        style={{
+          position: 'absolute', width: size, height: size, borderRadius: size / 2,
+          borderWidth: thickness,
+          borderColor: color, borderTopColor: 'transparent', borderLeftColor: 'transparent',
+          transform: [{ rotate: `${deg}deg` }],
+        }}
+      />
+      <Text style={{ color: '#fff', fontSize: Math.max(10, Math.round(size * 0.22)), fontWeight: '700' }}>{Math.round(p * 100)}</Text>
+    </View>
+  );
+}
+
+function UploadOverlay({ progress, onCancel }) {
+  return (
+    <View style={styles.uploadOverlay}>
+      <ArcProgress size={54} thickness={4} progress={progress} />
+      <View style={{ height: 4 }} />
+      {onCancel && (
+        <TouchableOpacity onPress={onCancel} style={styles.uploadCancel} accessibilityLabel="Cancel upload">
+          <Icon name="close" size={14} color="#fff" />
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
 function timeOf(t) {
   const d = new Date(t);
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -1246,8 +1373,8 @@ const styles = StyleSheet.create({
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
-  attachBtn: { alignItems: 'center', marginRight: 22 },
-  attachIcon: { width: 54, height: 54, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  attachBtn: { alignItems: 'center', marginRight: 20 },
+  attachIcon: { width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   attachLabel: { fontSize: 12, marginTop: 6 },
   inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
   input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
@@ -1270,9 +1397,11 @@ const styles = StyleSheet.create({
   menuTitle: { fontSize: 13, fontWeight: '700' },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },
   reactionBtn: { borderRadius: 14, width: 48, height: 44, alignItems: 'center', justifyContent: 'center' },
-  actionRow: { flexDirection: 'row', gap: 8, marginVertical: 3 },
-  actionBtn: { flex: 1, borderRadius: 10, paddingVertical: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
-  mediaImage: { width: 210, height: 170, borderRadius: 12, marginBottom: 4 },
+  actionRow: { flexDirection: 'row', gap: 10, marginVertical: 6 },
+  actionBtn: { flex: 1, borderRadius: 10, paddingVertical: 12, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
+  mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
+  uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
+  uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
   fab: { position: 'absolute', right: 16, bottom: 84, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
   fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },

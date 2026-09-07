@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { SafeAreaView, StatusBar, Alert, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { loadSession, logout } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
@@ -42,6 +42,8 @@ async function requestStartupPermissions() {
 
 function Shell() {
   const { theme, booted: themeBooted } = useTheme();
+  const { width: winW } = useWindowDimensions();
+  const keySize = winW < 360 ? 60 : winW < 410 ? 66 : 72;
   const [session, setSession] = useState(null);
   const [booted, setBooted] = useState(false);
   const [initError, setInitError] = useState(null);
@@ -89,15 +91,7 @@ function Shell() {
     setShowSettings(false);
   };
 
-  const handleForgotPIN = async () => {
-    await AsyncStorage.setItem(APP_LOCK_KEY, 'false');
-    await AsyncStorage.removeItem(APP_LOCK_PIN_KEY);
-    setAppLockEnabled(false);
-    setAppLockPIN('');
-    setShowLockScreen(false);
-    setLockInput('');
-    Alert.alert('App Lock Cleared', 'Your app lock has been reset.');
-  };
+  
 
   useEffect(() => {
     let mounted = true;
@@ -191,14 +185,11 @@ function Shell() {
           ) : null}
           <View style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
             {['1','2','3','4','5','6','7','8','9','0','⌫'].map((k) => (
-              <TouchableOpacity key={k} onPress={() => handleLockKey(k)} style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: theme.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
-                <Text style={{ fontSize: 24, fontWeight: '600', color: theme.text }}>{k}</Text>
+              <TouchableOpacity key={k} onPress={() => handleLockKey(k)} style={{ width: keySize, height: keySize, borderRadius: keySize / 2, backgroundColor: theme.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: theme.border }}>
+                <Text style={{ fontSize: 22, fontWeight: '600', color: theme.text }}>{k}</Text>
               </TouchableOpacity>
             ))}
           </View>
-          <TouchableOpacity onPress={handleForgotPIN} style={{ marginTop: 16, alignItems: 'center' }}>
-            <Text style={{ color: theme.textSecondary, fontSize: 13 }}>Forgot PIN? Reset (clears app lock)</Text>
-          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -277,7 +268,38 @@ function Shell() {
 export default function App() {
   return (
     <ThemeProvider>
-      <Shell />
+      <RootErrorBoundary>
+        <Shell />
+      </RootErrorBoundary>
     </ThemeProvider>
   );
+}
+
+class RootErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error('Root crash:', error, info);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#6C3CE9', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+        <View style={{ alignItems: 'center' }}>
+          <Text style={{ color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 }}>Something went wrong</Text>
+          <TouchableOpacity
+            onPress={() => this.setState({ error: null })}
+            style={{ backgroundColor: '#fff', paddingHorizontal: 26, paddingVertical: 12, borderRadius: 10, marginTop: 8 }}
+          >
+            <Text style={{ color: '#6C3CE9', fontWeight: '700', fontSize: 15 }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 }
