@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { SafeAreaView, StatusBar, Alert, View, Text, TouchableOpacity, Platform, PermissionsAndroid } from 'react-native';
+import { SafeAreaView, StatusBar, Alert, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { loadSession, logout } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
@@ -126,6 +126,22 @@ function Shell() {
     })();
     return () => { mounted = false; };
   }, []);
+
+  // Android hardware back: chat → chats, settings → home, else exit
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (activeChat) {
+        setActiveChat(null);
+        return true;
+      }
+      if (showSettings) {
+        setShowSettings(false);
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [activeChat, showSettings]);
 
   // Show loading screen during initialization
   if (!booted || !themeBooted) {

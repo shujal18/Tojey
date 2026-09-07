@@ -3,6 +3,7 @@ import {
   View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
+import { loadUsers, saveUsers, loadConversations, saveConversations, clearConversationCache } from '../services/cache';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { absUrl } from '../config';
@@ -19,18 +20,44 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
   const [clearTarget, setClearTarget] = useState(null);
 
   useEffect(() => {
+    if (!user?.id) return;
+    let mounted = true;
+
+    // Seed UI with cached data first (works offline / while Render wakes up)
+    (async () => {
+      const [cachedUsers, cachedConvs] = await Promise.all([
+        loadUsers(user.id),
+        loadConversations(user.id),
+      ]);
+      if (!mounted) return;
+      if (cachedUsers.length) setUsers(cachedUsers.filter((u) => u.id !== user.id));
+      if (cachedConvs.length) {
+        const normalized = cachedConvs.map((c) => ({
+          ...c,
+          lastMsg: c.lastMsg ? { ...c.lastMsg, time: new Date(c.lastMsg.time || 0) } : null,
+        }));
+        setConversations(normalized);
+      }
+    })();
+
     fetchUsers().then((data) => {
-      setUsers(data.filter((u) => u.id !== user.id));
+      if (data && data.length) {
+        const others = data.filter((u) => u.id !== user.id);
+        setUsers(others);
+        saveUsers(user.id, others);
+      }
     });
 
     if (socket) {
       const refreshList = () => socket.emit('conversation:list');
       const hList = (list) => {
-        setConversations(list.map((c) => ({
+        const mapped = list.map((c) => ({
           conversationId: c.conversationId,
           other: c.other,
           lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
-        })));
+        }));
+        setConversations(mapped);
+        saveConversations(user.id, mapped);
         setPresence((prev) => {
           const next = { ...prev };
           list.forEach((c) => {
@@ -47,40 +74,51 @@ export default function HomeScreen({ socket, user, setUser, onLogout, onOpenChat
         refreshList();
       });
       socket.on('message:receive', ({ message, sender, conversationId }) => {
+        const senderPic = sender.profilePic || '';
         setConversations((prev) => {
           const mine = prev.filter((c) => c.other.id !== sender.userId);
-          return [
+          const next = [
             {
               conversationId,
-              other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: sender.profilePic || '' },
+              other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: senderPic },
               lastMsg: { content: message.content || '📎 Media', type: message.type, time: new Date(message.created_at) },
             },
             ...mine,
           ];
+          saveConversations(user.id, next);
+          return next;
         });
         if (sender.userId !== activeChatId) {
           setUnread((u) => ({ ...u, [sender.userId]: (u[sender.userId] || 0) + 1 }));
         }
       });
       socket.on('conversation:cleared', ({ conversationId }) => {
-        setConversations((prev) => prev.map((c) =>
-          c.conversationId === conversationId ? { ...c, lastMsg: null } : c
-        ));
+        setConversations((prev) => {
+          const next = prev.map((c) =>
+            c.conversationId === conversationId ? { ...c, lastMsg: null } : c
+          );
+          saveConversations(user.id, next);
+          return next;
+        });
       });
 
       refreshList();
+      socket.on('connect', refreshList);
 
       return () => {
         socket.off('conversation:list', hList);
         socket.off('presence:update');
         socket.off('message:receive');
         socket.off('conversation:cleared');
+        socket.off('connect', refreshList);
       };
     }
+    return () => { mounted = false; };
   }, [socket, user.id]);
 
   const clearChat = (contact) => {
     if (socket) socket.emit('conversation:clear', { otherUserId: contact.id });
+    clearConversationCache(user.id, contact.id);
     setConversations((prev) => prev.map((c) => (c.other.id === contact.id ? { ...c, lastMsg: null } : c)) || []);
     setClearTarget(null);
   };

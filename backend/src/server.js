@@ -153,7 +153,7 @@ io.on('connection', async (socket) => {
   const username = socket.user.username;
 
   try {
-    let dbUser = (await pool.query('SELECT id, username, display_name FROM users WHERE username = $1', [username])).rows[0];
+    let dbUser = (await pool.query('SELECT id, username, display_name, profile_pic_url FROM users WHERE username = $1', [username])).rows[0];
     if (!dbUser) {
       socket.emit('error', { message: 'User not found' });
       socket.disconnect();
@@ -219,10 +219,11 @@ io.on('connection', async (socket) => {
 
         const message = result.rows[0];
         message.reactions = [];
+        const dbProfilePic = dbUser.profile_pic_url || '';
 
         socket.to(`user:${otherUserId}`).emit('message:receive', {
           message,
-          sender: { userId: dbUser.userId, displayName: dbUser.displayName },
+          sender: { userId: dbUser.userId, displayName: dbUser.displayName, profilePic: dbProfilePic },
           conversationId: convo.id,
         });
 

@@ -10,6 +10,7 @@ import { absUrl, SERVER_URL } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
+import { loadMessages, saveMessages, clearConversationCache } from '../services/cache';
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -107,9 +108,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
     socket.emit('conversation:open', { otherUserId });
 
+    // Seed UI with offline cache immediately, then server history overwrites
+    loadMessages(currentUser.id, otherUserId).then((cached) => {
+      if (cached && cached.length) {
+        setMessages(cached);
+        atBottomRef.current = true;
+        atBottomNearRef.current = true;
+        setAtBottomNear(true);
+        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 80);
+      }
+    });
+
     const hHistory = (msgs) => {
       setMessages(msgs);
-      atBottomRef.current = true;
+      saveMessages(currentUser.id, otherUserId, msgs);
       atBottomNearRef.current = true;
       setAtBottomNear(true);
       setPendingCount(0);
@@ -159,7 +171,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:edited', hEdited);
     socket.on('message:deleted', hDeleted);
     socket.on('message:reaction', hReaction);
-    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); };
+    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); clearConversationCache(currentUser.id, otherUserId); };
     socket.on('conversation:cleared', hCleared);
     const hPresence = ({ userId, isOnline, lastSeen }) => {
       if (userId === otherUserId) setPresence({ isOnline, lastSeen });
@@ -191,6 +203,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.io?.off('reconnect', onReconnect);
     };
   }, [socket, otherUserId, currentUser.id]);
+
+  // Persist messages to offline cache whenever they change
+  useEffect(() => {
+    if (!currentUser?.id || !otherUserId || !messages.length) return;
+    saveMessages(currentUser.id, otherUserId, messages);
+  }, [messages, otherUserId, currentUser.id]);
 
   function updateStatus(id, status) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
