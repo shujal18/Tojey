@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'tojey-secret-key';
 
 const USERS = {
-  tom: { username: 'tom', password: 'tom18', displayName: 'Tom' },
+  tom: { username: 'tom', password: 'tom4', displayName: 'Tom' },
   jerry: { username: 'jerry', password: 'jerry22', displayName: 'Jerry' },
 };
 

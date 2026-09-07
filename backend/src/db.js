@@ -157,7 +157,7 @@ const { hashSync } = require('bcryptjs');
 
 async function seedUsers(client) {
   const users = [
-    { username: 'tom', password: 'tom18', display_name: 'Tom' },
+    { username: 'tom', password: 'tom4', display_name: 'Tom' },
     { username: 'jerry', password: 'jerry22', display_name: 'Jerry' },
   ];
 

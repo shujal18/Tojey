@@ -76,7 +76,20 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({ profilePic: absolute }),
           });
-          const data = await pRes.json();
+          const pText = await pRes.text();
+          let data;
+          try {
+            data = JSON.parse(pText);
+          } catch (parseErr) {
+            throw new Error(
+              pText && pText.includes('<') && !pText.includes('{')
+                ? 'Server is outdated — please redeploy the backend, then try again.'
+                : 'Invalid response from server.'
+            );
+          }
+          if (!pRes.ok) {
+            throw new Error(data.error || `Profile update failed (${pRes.status})`);
+          }
           if (data.user) {
             setUser(data.user);
             await AsyncStorage.setItem('@tojey_user', JSON.stringify(data.user));

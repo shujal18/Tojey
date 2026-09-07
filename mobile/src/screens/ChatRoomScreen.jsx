@@ -41,7 +41,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const otherUserOnline = safeOtherUser.online ?? false;
   const otherUserLastSeen = safeOtherUser.last_seen ?? null;
 
-  const openMedia = (message) => {
+  const openMedia = useCallback((message) => {
     if (!message || !message.media_url) return;
     const uri = absUrl(message.media_url);
     if (message.type === 'VIDEO' || message.type === 'VOICE') {
@@ -49,7 +49,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     } else {
       setViewingMedia({ uri, message });
     }
-  };
+  }, []);
 
   const handleContentSizeChange = useCallback(() => {
     if (atBottomRef.current && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
@@ -68,6 +68,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
+  const handleLongPress = useCallback((msg) => setReactionMenu(msg), []);
+
   const renderMessage = useCallback(({ item, index }) => {
     const isSent = item.sender_id === currentUser.id;
     const prev = index > 0 ? messages[index - 1] : null;
@@ -78,13 +80,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         isSent={isSent}
         grouped={grouped}
         theme={theme}
-        onLongPress={() => setReactionMenu(item)}
+        onLongPress={handleLongPress}
         onOpenMedia={openMedia}
         onRetry={retrySendMedia}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme]);
+  }, [messages, theme, handleLongPress, openMedia]);
 
   const onType = (t) => {
     setText(t);
@@ -240,12 +242,37 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   };
 
   const sendVoice = () => {
+    const tempId = `tmp-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: 'VOICE',
+      content: 'Voice message',
+      media_url: '',
+      thumb_url: '',
+      duration: recordTime || 8,
+      waveform: 'waveform',
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reactions: [],
+      _local: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
+    if (atBottomRef.current) {
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+    }
     socket.emit('message:send', {
       otherUserId,
       type: 'VOICE',
       content: 'Voice message',
       duration: recordTime || 8,
       waveform: 'waveform',
+    }, (ack) => {
+      if (ack?.ok) {
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+      } else {
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      }
     });
     setRecording(false);
     setRecordTime(0);
@@ -343,7 +370,30 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }
       })();
     } else {
-      socket.emit('message:send', { otherUserId, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' });
+      const tempId = `tmp-${Date.now()}`;
+      const localMsg = {
+        id: tempId,
+        sender_id: currentUser.id,
+        type: 'DOCUMENT',
+        content: '📄 Document',
+        media_url: '',
+        thumb_url: '',
+        created_at: new Date().toISOString(),
+        status: 'SENT',
+        reactions: [],
+        _local: true,
+      };
+      setMessages((prev) => [...prev, localMsg]);
+      if (atBottomRef.current) {
+        setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+      }
+      socket.emit('message:send', { otherUserId, type: 'DOCUMENT', content: '📄 Document', mediaUrl: '' }, (ack) => {
+        if (ack?.ok) {
+          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+        } else {
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        }
+      });
     }
   };
 
@@ -407,7 +457,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     })();
   };
 
-  const retrySendMedia = (msg) => {
+  const retrySendMedia = useCallback((msg) => {
     if (!msg || !msg.media_url) return;
     const tempId = `tmp-${Date.now()}-r`;
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false } : m)));
@@ -437,7 +487,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       console.error('retry sendMedia failed:', e);
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
     });
-  };
+  }, [otherUserId, socket, currentUser.token]);
 
 const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
@@ -480,12 +530,11 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         onScroll={handleScroll}
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
         initialNumToRender={15}
         maxToRenderPerBatch={10}
         updateCellsBatchingPeriod={30}
         windowSize={11}
-        removeClippedSubviews={Platform.OS === 'android'}
         renderItem={renderMessage}
         contentContainerStyle={styles.messageList}
       />
@@ -736,7 +785,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
             isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble }],
             grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
           ]}
-          onLongPress={onLongPress}
+          onLongPress={() => onLongPress(message)}
           delayLongPress={350}
         >
           {message.is_deleted_for_everyone ? (
