@@ -296,6 +296,25 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
   }, []);
 
+  // Blur + refocus (with a fallback retry) so the keyboard reliably returns when the
+  // user taps the input after dismissing it. Guarded by the visibility flag.
+  const reopenKeyboard = () => {
+    const t = inputRef.current;
+    if (!t || kbVisibleRef.current) return;
+    t.blur();
+    setTimeout(() => {
+      if (!inputRef.current || inputRef.current !== t) return;
+      t.focus();
+      setTimeout(() => {
+        if (kbVisibleRef.current || !inputRef.current || inputRef.current !== t) return;
+        t.blur();
+        setTimeout(() => {
+          if (inputRef.current === t) t.focus();
+        }, 60);
+      }, 180);
+    }, 40);
+  };
+
   useEffect(() => {
     return () => {
       resetVoice().catch(() => {});
@@ -1105,12 +1124,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 placeholderTextColor={theme.textSecondary}
                 style={[styles.input, { color: theme.text }]}
                 multiline
-                onPress={() => {
-                  if (!kbVisibleRef.current && inputRef.current) {
-                    inputRef.current.blur();
-                    setTimeout(() => inputRef.current && inputRef.current.focus(), 40);
-                  }
-                }}
+                onPress={reopenKeyboard}
               />
             </View>
             {text.trim() ? (

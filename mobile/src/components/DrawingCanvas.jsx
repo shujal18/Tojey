@@ -198,10 +198,15 @@ export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, br
   );
 }
 
-export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo, onClear, onDone, busy, accent }) {
+export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo, onClear, onDone, onCancel, busy, accent }) {
   return (
     <View style={[styles.toolbar, { backgroundColor: theme.card }]}>
       <View style={styles.toolRow}>
+        {onCancel && (
+          <TouchableOpacity onPress={onCancel} accessibilityLabel="Exit drawing" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
+            <Icon name="close" size={20} color={theme.danger} />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity onPress={onUndo} accessibilityLabel="Undo" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
           <Icon name="arrow-undo" size={20} color={theme.primary} />
         </TouchableOpacity>

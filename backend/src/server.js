@@ -15,6 +15,21 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json());
 
+// Minimal in-memory rate limiter for the notification endpoint (single Render instance).
+const sendBucket = new Map();
+function rateLimited(userId) {
+  const now = Date.now();
+  const windowMs = 30000;
+  const max = 10;
+  const b = sendBucket.get(userId);
+  if (!b || now - b.start >= windowMs) {
+    sendBucket.set(userId, { start: now, count: 1 });
+    return false;
+  }
+  b.count += 1;
+  return b.count > max;
+}
+
 const FRONTEND_DIST = path.join(__dirname, '..', '..', 'frontend', 'dist');
 const fs = require('fs');
 if (fs.existsSync(FRONTEND_DIST)) {
@@ -166,6 +181,31 @@ app.post('/api/devices/token', authMiddleware, async (req, res) => {
   }
 });
 
+// Deactivate the caller's FCM token (logout / app data cleared). The owner is taken
+// from the JWT - a token can only be deactivated by the user it belongs to.
+app.post('/api/devices/token/deactivate', authMiddleware, async (req, res) => {
+  try {
+    const user = (await pool.query('SELECT id FROM users WHERE username = $1', [req.user.username])).rows[0];
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { token } = req.body || {};
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ error: 'token is required' });
+    }
+
+    await pool.query(
+      `UPDATE device_tokens SET is_active = FALSE, updated_at = NOW()
+       WHERE fcm_token = $1 AND user_id = $2`,
+      [token.trim(), user.id]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('devices:token deactivate error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Send a notification from the authenticated user to receiverId.
 // The sender is taken from the JWT, never from the request body.
 // Routing decision happens here, server-side:
@@ -178,6 +218,10 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       [req.user.username]
     )).rows[0];
     if (!sender) return res.status(401).json({ error: 'Unauthorized' });
+
+    if (rateLimited(sender.id)) {
+      return res.status(429).json({ error: 'Too many notifications. Try again shortly.' });
+    }
 
     const { receiverId, message, conversationId, idempotencyKey } = req.body || {};
 

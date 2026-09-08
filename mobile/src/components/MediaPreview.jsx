@@ -1,35 +1,42 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet, Modal, Image,
-  ActivityIndicator, Alert, PanResponder, Dimensions, Platform,
+  ActivityIndicator, Alert, PanResponder, Platform, StatusBar, Keyboard,
 } from 'react-native';
+import { useWindowDimensions } from 'react-native';
 import Video from 'react-native-video';
 import { captureRef } from 'react-native-view-shot';
 import { Icon } from './AppIcon';
 import { canInlineVideoPreview } from '../utils/media';
 import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-
 const MAX_OUT = 1440;
 const MAX_IMGVIEW_PX = 8000000;
 const MIN_CROP = 64;
+const DRAW_TOOLBAR_H = 176;
 
 export default function MediaPreview({ uri, type, fileName, mimeType, theme, onCancel, onSend }) {
   const isVideo = type === 'VIDEO';
+  const { width: winW, height: winH } = useWindowDimensions();
+  const topInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
 
   const [caption, setCaption] = useState('');
-  const [mode, setMode] = useState('view'); // view | draw | crop | apply
+  const [mode, setMode] = useState('view'); // view | draw | crop | rotate | apply
   const [displayUri, setDisplayUri] = useState(uri || '');
   const [sending, setSending] = useState(false);
   const [videoErr, setVideoErr] = useState(false);
-  const [videoOn, setVideoOn] = useState(false);
+  const [videoLoadDone, setVideoLoadDone] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(true);
+  const [videoKey, setVideoKey] = useState(0);
   const [imgErr, setImgErr] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [applyGeom, setApplyGeom] = useState(null);
+  const [kbH, setKbH] = useState(0);
 
   const drawRef = useRef(null);
   const shotRef = useRef(null);
+  const rotateRef = useRef(null);
+  const strokesRef = useRef([]);
   const [strokes, setStrokes] = useState([]);
   const [color, setColor] = useState('#FF5252');
   const [brush, setBrush] = useState(6);
@@ -38,6 +45,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const drawModeRef = useRef(true);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { brushRef.current = brush; }, [brush]);
+  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
 
   const [box, setBox] = useState(null);
   const [srcSize, setSrcSize] = useState(null);
@@ -48,25 +56,47 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   geomRef.current.contained = contained;
   geomRef.current.crop = crop;
 
-  const resetTools = () => {
-    setMode('view');
-    setStrokes([]);
+  const resetGeometry = () => {
     setCrop(null);
     setBox(null);
     setSrcSize(null);
-    setImgReady(false);
     setContained(null);
+    setImgReady(false);
+  };
+
+  const resetTools = () => {
+    setMode('view');
+    setStrokes([]);
+    strokesRef.current = [];
+    setCrop(null);
   };
 
   useEffect(() => {
     setDisplayUri(uri || '');
     resetTools();
+    resetGeometry();
     setCaption('');
     setVideoErr(false);
-    setVideoOn(false);
+    setVideoLoadDone(false);
+    setVideoPaused(true);
     setImgErr(false);
+    setApplyGeom(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uri]);
+
+  // Keep the bottom overlay above the keyboard while typing a caption.
+  useEffect(() => {
+    const show = (e) => setKbH((e && e.endCoordinates && e.endCoordinates.height) || 0);
+    const hide = () => setKbH(0);
+    const subs = [
+      (Platform.OS === 'ios'
+        ? Keyboard.addListener('keyboardWillChangeFrame', show)
+        : Keyboard.addListener('keyboardDidShow', show)),
+      Keyboard.addListener('keyboardDidHide', hide),
+    ];
+    return () => subs.forEach((s) => s.remove());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onBoxLayout = useCallback((e) => {
     const { width, height } = e.nativeEvent.layout;
@@ -81,7 +111,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       setSrcSize({ w, h });
       setImgReady(true);
     }, () => {
-      if (active) setSrcSize({ w: box.w, h: box.h });
+      if (active) { setSrcSize({ w: box.w, h: box.h }); }
       setImgReady(true);
     });
     return () => { active = false; };
@@ -114,10 +144,30 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     try {
       const shot = await captureRef(drawRef, { format: 'png', quality: 0.92, result: 'tmpfile' });
       setDisplayUri(shot);
+      setStrokes([]);
+      strokesRef.current = [];
+      resetGeometry();
       setMode('view');
     } catch (e) {
       console.error('capture drawing failed', e);
       Alert.alert('Draw failed', e.message || 'Could not create the drawing');
+      setMode('view');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const applyRotate = async () => {
+    if (!rotateRef.current) return;
+    setProcessing(true);
+    try {
+      const shot = await captureRef(rotateRef, { format: 'png', quality: 0.95, result: 'tmpfile' });
+      setDisplayUri(shot);
+      resetGeometry();
+      setMode('view');
+    } catch (e) {
+      console.error('rotate capture failed', e);
+      Alert.alert('Rotate failed', e.message || 'Could not rotate the photo');
       setMode('view');
     } finally {
       setProcessing(false);
@@ -202,6 +252,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       const shot = await captureRef(shotRef, { format: 'png', quality: 0.95, result: 'tmpfile' });
       setDisplayUri(shot);
       setApplyGeom(null);
+      resetGeometry();
       setMode('view');
     } catch (e) {
       console.error('crop capture failed', e);
@@ -223,27 +274,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     }
   };
 
-  const header = (
-    <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
-      <TouchableOpacity onPress={onCancel} style={styles.headerBtn} accessibilityLabel="Cancel">
-        <Icon name="close" size={26} color={theme.text} />
-      </TouchableOpacity>
-      <View style={{ flex: 1, alignItems: 'center', paddingHorizontal: 8 }}>
-        <Text style={[styles.headerTitle, { color: theme.text }]} numberOfLines={1}>
-          {isVideo ? 'Send video' : 'Send photo'}
-        </Text>
-        {!!fileName && <Text style={[styles.headerSub, { color: theme.textSecondary }]} numberOfLines={1}>{fileName}</Text>}
-      </View>
-      <TouchableOpacity
-        onPress={isVideo ? handleSend : () => { if (mode === 'view') handleSend(); }}
-        style={[styles.headerBtn, { backgroundColor: theme.primary, borderRadius: 20, width: 40, height: 40, marginRight: 6 }]}
-        accessibilityLabel="Send media"
-        disabled={processing}
-      >
-        {sending || processing ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="send" size={18} color="#fff" />}
-      </TouchableOpacity>
-    </View>
-  );
+  const retryVideo = () => {
+    setVideoErr(false);
+    setVideoLoadDone(false);
+    setVideoKey((k) => k + 1);
+  };
 
   const renderBody = () => {
     if (mode === 'draw') {
@@ -258,9 +293,36 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             colorRef={colorRef}
             brushRef={brushRef}
             setStrokes={setStrokes}
-            maxHeight={SCREEN_H - 300}
+            maxHeight={winH - DRAW_TOOLBAR_H * 2 - topInset}
             style={{ padding: 4 }}
           />
+        </View>
+      );
+    }
+    if (mode === 'rotate') {
+      const s = srcSize && box ? Math.min((box.w - 24) / srcSize.h, (box.h - 24) / srcSize.w) : 1;
+      const rw = srcSize ? Math.round(srcSize.h * s) : winW;
+      const rh = srcSize ? Math.round(srcSize.w * s) : winH;
+      return (
+        <View style={styles.body} onLayout={onBoxLayout}>
+          <View style={styles.bodyCenter}>
+            <View
+              ref={rotateRef}
+              collapsable={false}
+              style={{ width: rw, height: rh, overflow: 'hidden' }}
+            >
+              <Image
+                source={{ uri: displayUri }}
+                style={{ width: rh, height: rw, transform: [{ rotate: '90deg' }] }}
+                resizeMode="stretch"
+              />
+            </View>
+          </View>
+          {!imgReady && !imgErr && (
+            <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
+              <ActivityIndicator color="#fff" />
+            </View>
+          )}
         </View>
       );
     }
@@ -300,11 +362,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       return (
         <View style={styles.body}>
           <View style={styles.bodyCenter}>
-            <View ref={shotRef} collapsable={false} style={{ width: g.outW || SCREEN_W, height: g.outH || 1, overflow: 'hidden' }}>
+            <View ref={shotRef} collapsable={false} style={{ width: g.outW || winW, height: g.outH || 1, overflow: 'hidden' }}>
               <Image source={{ uri: displayUri }} style={{ width: g.imgW || g.outW, height: g.imgH || g.outH, left: g.left, top: g.top }} resizeMode="stretch" />
             </View>
           </View>
-          <View style={[StyleSheet.absoluteFill, styles.processingDim]} pointerEvents="none">
+          <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
             <View style={styles.processingPill}>
               <ActivityIndicator color="#fff" />
               <Text style={{ color: '#fff', marginLeft: 10, fontWeight: '600' }}>Cropping…</Text>
@@ -316,37 +378,46 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     if (isVideo) {
       const previewSafe = canInlineVideoPreview(fileName, mimeType);
       return (
-        <View style={styles.body}>
-          {videoErr || !previewSafe ? (
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-              <Icon name="alert-circle-outline" size={44} color={theme.danger} />
-              <Text style={{ color: theme.textSecondary, marginTop: 10 }}>This video could not be previewed here.</Text>
-              <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 4 }}>You can still send it.</Text>
-            </View>
-          ) : !videoOn ? (
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-              <Icon name="videocam-outline" size={52} color={theme.textSecondary} />
-              <TouchableOpacity
-                onPress={() => setVideoOn(true)}
-                style={[styles.videoPreviewBtn, { backgroundColor: theme.primary }]}
-                accessibilityLabel="Preview video"
-              >
-                <Icon name="play" size={22} color="#fff" />
-                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14, marginLeft: 8 }}>Tap to preview</Text>
-              </TouchableOpacity>
+        <View style={styles.body} onLayout={onBoxLayout}>
+          {!previewSafe || videoErr ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
+              <Icon name="alert-circle-outline" size={46} color="rgba(255,255,255,0.85)" />
+              <Text style={{ color: 'rgba(255,255,255,0.9)', marginTop: 12, textAlign: 'center', fontSize: 14 }}>
+                {videoErr ? 'Unable to load video' : 'This video could not be previewed here.'}
+              </Text>
+              <Text style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12, marginTop: 4 }}>
+                {videoErr ? 'Check the file and try again.' : 'You can still send it.'}
+              </Text>
+              {videoErr && (
+                <TouchableOpacity
+                  onPress={retryVideo}
+                  style={[styles.videoPreviewBtn, { backgroundColor: theme.primary, marginTop: 18 }]}
+                  accessibilityLabel="Retry video"
+                >
+                  <Icon name="refresh" size={18} color="#fff" />
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14, marginLeft: 8 }}>Retry</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ) : (
-            <View style={styles.body}>
-              <Video
-                source={{ uri }}
-                style={[StyleSheet.absoluteFill, { width: box?.w || SCREEN_W, height: box?.h || SCREEN_H - 220 }]}
-                resizeMode="contain"
-                controls
-                repeat={false}
-                paused={false}
-                bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
-                onError={() => setVideoErr(true)}
-              />
+            <Video
+              key={videoKey}
+              source={{ uri }}
+              style={StyleSheet.absoluteFill}
+              resizeMode="contain"
+              controls
+              repeat={false}
+              paused={videoPaused}
+              onPlay={() => setVideoPaused(false)}
+              onPause={() => setVideoPaused(true)}
+              bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
+              onLoad={() => setVideoLoadDone(true)}
+              onError={() => setVideoErr(true)}
+            />
+          )}
+          {!videoLoadDone && !videoErr && previewSafe && (
+            <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
+              <ActivityIndicator color="#fff" size="large" />
             </View>
           )}
         </View>
@@ -355,21 +426,24 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     return (
       <View style={styles.body}>
         <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
-          <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" onLoad={() => setImgReady(true)} onError={() => setImgErr(true)} />
+          <Image
+            source={{ uri: displayUri }}
+            style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]}
+            resizeMode="contain"
+            onLoad={() => setImgReady(true)}
+            onError={() => setImgErr(true)}
+          />
         </View>
         {!imgReady && !imgErr && (
-          <View style={[StyleSheet.absoluteFill, styles.processingDim]} pointerEvents="none">
-            <View style={styles.processingPill}>
-              <ActivityIndicator color="#fff" />
-              <Text style={{ color: '#fff', marginLeft: 10, fontWeight: '600' }}>Loading photo…</Text>
-            </View>
+          <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
+            <ActivityIndicator color="#fff" size="large" />
           </View>
         )}
         {imgErr && (
-          <View style={{ position: 'absolute', bottom: 18, alignSelf: 'center' }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: theme.inputBg, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}>
-              <Icon name="alert-circle-outline" size={16} color={theme.danger} />
-              <Text style={{ color: theme.danger, fontSize: 12, fontWeight: '600', marginLeft: 6 }}>Could not preview this image — you can still send it</Text>
+          <View style={{ position: 'absolute', bottom: 170, alignSelf: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}>
+              <Icon name="alert-circle-outline" size={16} color="#FFB4AB" />
+              <Text style={{ color: '#FFB4AB', fontSize: 12, fontWeight: '600', marginLeft: 6 }}>Could not preview this image — you can still send it</Text>
             </View>
           </View>
         )}
@@ -377,76 +451,113 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     );
   };
 
+  const overlayBtn = (styles.overlayBtn);
+  const sendDisabled = sending || processing || !displayUri || (isVideo && videoErr);
+
   return (
-    <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={{ flex: 1, backgroundColor: theme.background, paddingTop: 40 }}>
-        {header}
-        <View style={{ flex: 1 }}>
+    <Modal visible transparent animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onCancel}>
+      <View style={styles.modalRoot}>
+        {/* Media always fills the whole screen; controls overlay it. */}
+        <View style={StyleSheet.absoluteFill}>
           {renderBody()}
         </View>
 
         {mode === 'view' && (
-          <View style={[styles.composer, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <View style={[styles.topBar, { paddingTop: topInset + 4 }]} pointerEvents="box-none">
+            <View style={styles.topBarRow}>
+              <TouchableOpacity onPress={onCancel} style={overlayBtn} accessibilityLabel="Close media preview">
+                <Icon name="close" size={26} color="#fff" />
+              </TouchableOpacity>
+              <View style={{ flex: 1, alignItems: 'center', paddingHorizontal: 8 }}>
+                <Text style={styles.topBarTitle} numberOfLines={1}>
+                  {isVideo ? 'Video' : 'Photo'}
+                </Text>
+              </View>
+              <View style={[overlayBtn, { opacity: 0 }]} pointerEvents="none">
+                <Icon name="close" size={26} color="#fff" />
+              </View>
+            </View>
+          </View>
+        )}
+
+        {mode === 'view' && (
+          <View style={[styles.bottomPanel, { bottom: kbH }]}>
             {!isVideo && (
               <View style={styles.toolRow}>
-                <TouchableOpacity
-                  style={[styles.toolBtn, { backgroundColor: theme.primaryLight }, !imgReady || imgErr ? { opacity: 0.45 } : null]}
-                  disabled={!imgReady || imgErr}
-                  onPress={() => { setMode('draw'); }}
-                >
-                  <Icon name="color-wand" size={20} color={theme.primary} />
-                  <Text style={[styles.toolBtnText, { color: theme.primary }]}>Draw</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.toolBtn, { backgroundColor: theme.primaryLight }, !imgReady || imgErr ? { opacity: 0.45 } : null]}
-                  disabled={!imgReady || imgErr || !box || !srcSize}
-                  onPress={() => { if (box && srcSize) setMode('crop'); }}
-                >
-                  <Icon name="crop" size={20} color={theme.primary} />
-                  <Text style={[styles.toolBtnText, { color: theme.primary }]}>Crop</Text>
-                </TouchableOpacity>
+                <ToolBtn icon="color-wand" label="Draw" onPress={() => setMode('draw')} disabled={!imgReady || imgErr} />
+                <ToolBtn icon="crop" label="Crop" onPress={() => { if (box && srcSize) setMode('crop'); }} disabled={!imgReady || imgErr || !box || !srcSize} />
+                <ToolBtn icon="refresh" label="Rotate" onPress={() => { if (box && srcSize) setMode('rotate'); }} disabled={!imgReady || imgErr || !box || !srcSize} />
               </View>
             )}
             <View style={styles.captionRow}>
               <TextInput
-                style={[styles.caption, { backgroundColor: theme.inputBg, color: theme.text }]}
+                style={styles.caption}
                 placeholder="Add a caption…"
-                placeholderTextColor={theme.textSecondary}
+                placeholderTextColor="rgba(255,255,255,0.5)"
                 value={caption}
                 onChangeText={setCaption}
                 maxLength={300}
               />
+              <TouchableOpacity
+                onPress={handleSend}
+                style={[styles.sendBtn, { backgroundColor: theme.primary }]}
+                accessibilityLabel="Send media"
+                disabled={sendDisabled}
+              >
+                {sending || processing ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="send" size={18} color="#fff" />}
+              </TouchableOpacity>
             </View>
           </View>
         )}
 
         {mode === 'draw' && (
-          <DrawingToolbar
-            theme={theme}
-            color={color}
-            brush={brush}
-            setColor={setColor}
-            setBrush={setBrush}
-            onUndo={() => setStrokes((s) => s.slice(0, -1))}
-            onClear={() => setStrokes([])}
-            onDone={applyDrawing}
-            busy={processing}
-          />
+          <View style={[styles.modeBarWrap, { bottom: 0 }]}>
+            <DrawingToolbar
+              theme={theme}
+              color={color}
+              brush={brush}
+              setColor={setColor}
+              setBrush={setBrush}
+              onUndo={() => setStrokes((s) => s.slice(0, -1))}
+              onClear={() => setStrokes([])}
+              onCancel={() => setMode('view')}
+              onDone={applyDrawing}
+              busy={processing}
+            />
+          </View>
+        )}
+
+        {mode === 'rotate' && (
+          <View style={[styles.modeBarWrap, { bottom: 0 }]}>
+            <View style={[styles.toolbar, { backgroundColor: 'rgba(0,0,0,0.88)' }]}>
+              <View style={styles.toolbarRow}>
+                <ToolBtn icon="close" label="Cancel" onPress={() => setMode('view')} light />
+                <View style={{ flex: 1 }} />
+                {processing ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <TouchableOpacity onPress={applyRotate} style={[styles.primaryBarBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Apply rotation">
+                    <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Apply</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
         )}
 
         {mode === 'crop' && (
-          <View style={[styles.composer, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
-            <TouchableOpacity style={[styles.cropCancelBtn, { backgroundColor: theme.primaryLight }]} onPress={() => setMode('view')}>
-              <Icon name="close" size={18} color={theme.danger} />
-              <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 6 }}>Cancel</Text>
-            </TouchableOpacity>
-            <Text style={{ flex: 1, textAlign: 'center', fontSize: 13, color: theme.textSecondary }}>
-              Drag to move · corner handle to resize
-            </Text>
-            <TouchableOpacity style={[styles.cropApplyBtn, { backgroundColor: theme.primary }]} onPress={applyCrop}>
-              <Icon name="checkmark" size={18} color="#fff" />
-              <Text style={{ color: '#fff', fontWeight: '700', marginLeft: 6 }}>Crop</Text>
-            </TouchableOpacity>
+          <View style={[styles.modeBarWrap, { bottom: 0 }]}>
+            <View style={[styles.toolbar, { backgroundColor: 'rgba(0,0,0,0.88)' }]}>
+              <View style={styles.toolbarRow}>
+                <ToolBtn icon="close" label="Cancel" onPress={() => setMode('view')} light />
+                <Text style={{ flex: 1, textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
+                  Drag to move · handle to resize
+                </Text>
+                <TouchableOpacity onPress={applyCrop} style={[styles.primaryBarBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Apply crop">
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Crop</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
           </View>
         )}
       </View>
@@ -454,21 +565,46 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   );
 }
 
+function ToolBtn({ icon, label, onPress, disabled, light }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      style={[styles.toolBtn, light ? styles.toolBtnLight : styles.toolBtnDim, disabled ? { opacity: 0.45 } : null]}
+      disabled={disabled}
+      accessibilityLabel={label}
+    >
+      <Icon name={icon} size={20} color="#fff" />
+      <Text style={[styles.toolBtnText, { color: '#fff' }]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 10, borderBottomWidth: 1 },
-  headerBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  headerTitle: { fontSize: 16, fontWeight: '700' },
-  headerSub: { fontSize: 11, marginTop: 2, maxWidth: SCREEN_W - 150 },
+  modalRoot: { flex: 1, backgroundColor: '#000' },
   body: { flex: 1 },
   bodyCenter: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  composer: { paddingTop: 8, paddingHorizontal: 12, paddingBottom: Platform.OS === 'ios' ? 22 : 14, borderTopWidth: 1 },
-  toolRow: { flexDirection: 'row', marginBottom: 8 },
-  toolBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20, marginRight: 10 },
+  topBar: { position: 'absolute', top: 0, left: 0, right: 0, paddingBottom: 10, backgroundColor: 'rgba(0,0,0,0.45)' },
+  topBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8 },
+  topBarTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  overlayBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.16)' },
+  bottomPanel: {
+    position: 'absolute', left: 0, right: 0,
+    paddingTop: 10, paddingHorizontal: 12,
+    paddingBottom: Platform.OS === 'ios' ? 26 : 16,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  toolRow: { flexDirection: 'row', marginBottom: 10 },
+  toolBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 22, marginRight: 10 },
+  toolBtnDim: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  toolBtnLight: { backgroundColor: 'rgba(255,255,255,0.14)' },
   toolBtnText: { fontWeight: '700', fontSize: 13, marginLeft: 6 },
   captionRow: { flexDirection: 'row', alignItems: 'center' },
-  caption: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14 },
-  cropCancelBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18 },
-  cropApplyBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 18 },
+  caption: { flex: 1, borderRadius: 22, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, color: '#fff', backgroundColor: 'rgba(255,255,255,0.14)', marginRight: 10 },
+  sendBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  modeBarWrap: { position: 'absolute', left: 0, right: 0 },
+  toolbar: { paddingVertical: 8, paddingHorizontal: 10 },
+  toolbarRow: { flexDirection: 'row', alignItems: 'center' },
+  primaryBarBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 18 },
   cropOverlay: { position: 'absolute', backgroundColor: 'rgba(255,255,255,0.06)' },
   gridH: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,0.6)' },
   gridV: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,0.6)' },
@@ -478,7 +614,7 @@ const styles = StyleSheet.create({
   handleBR: { position: 'absolute', right: 0, bottom: 0, width: 30, height: 30, borderRightWidth: 4, borderBottomWidth: 4, borderColor: '#fff' },
   dim: { position: 'absolute', left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.55)' },
   dimSide: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.55)' },
-  processingDim: { backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  centerDim: { backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' },
   processingPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 24 },
-  videoPreviewBtn: { flexDirection: 'row', alignItems: 'center', borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12, marginTop: 16 },
+  videoPreviewBtn: { flexDirection: 'row', alignItems: 'center', borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12 },
 });

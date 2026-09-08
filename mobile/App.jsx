@@ -13,7 +13,7 @@ import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import { ensureMediaPermission, ensureCameraPermission, ensureMicPermission } from './src/services/permissions';
 import {
-  startPush, stopPush, onForegroundMessage, checkInitialNotification, onNotificationOpened,
+  startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
 } from './src/services/notifications';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
@@ -131,6 +131,7 @@ function Shell() {
     await logout();
     disconnect();
     stopPush();
+    try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
     setSession(null);
     setSocket(null);
     setActiveChat(null);

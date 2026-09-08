@@ -1,6 +1,7 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import messaging from '@react-native-firebase/messaging';
 import { SERVER_URL } from '../config';
+import { loadSession } from './auth';
 
 export const NOTIFICATION_CHANNEL_ID = 'tojey-messages';
 
@@ -107,6 +108,37 @@ export function stopPush() {
   if (tokenUnsub) {
     tokenUnsub();
     tokenUnsub = null;
+  }
+}
+
+/**
+ * Deactivate this device's FCM token on the backend (logout). Uses the calling
+ * user's session; the server only deactivates tokens that belong to that user.
+ */
+export async function deactivateToken() {
+  if (Platform.OS !== 'android') return;
+  let token = null;
+  try {
+    token = await messaging().getToken();
+  } catch (e) {
+    console.warn('deactivateToken: could not read token:', e.message);
+    return;
+  }
+  if (!token) return;
+  try {
+    const s = await loadSession();
+    if (!s || !s.token) return;
+    const res = await fetch(`${SERVER_URL}/api/devices/token/deactivate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.token}`,
+      },
+      body: JSON.stringify({ token }),
+    });
+    if (!res.ok) console.warn('deactivateToken server error', res.status);
+  } catch (e) {
+    console.warn('deactivateToken failed:', e.message);
   }
 }
 
