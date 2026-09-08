@@ -7,6 +7,10 @@ buildscript {
         targetSdkVersion = 34
         ndkVersion = "25.1.8937393"
         kotlinVersion = "1.8.0"
+        // react-native-video's default media3Version (1.8.0) requires compileSdk 35,
+        // but this project (RN 0.73 / AGP 8.1.1) is capped at compileSdk 34. Pin a
+        // media3 version that targets SDK 34 so the now-autolinked video module builds.
+        media3Version = "1.4.1"
     }
     repositories {
         google()

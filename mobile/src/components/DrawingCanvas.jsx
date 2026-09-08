@@ -16,6 +16,12 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
 
   const pointsRef = useRef([]);
   const lastFlushRef = useRef(0);
+  const originRef = useRef({ x: 0, y: 0 });
+
+  const pointFromEvent = (e) => ({
+    x: e.nativeEvent.pageX - originRef.current.x,
+    y: e.nativeEvent.pageY - originRef.current.y,
+  });
 
   const [itemW, setItemW] = useState(SCREEN_W);
   const [itemH, setItemH] = useState(maxHeight);
@@ -42,12 +48,12 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
     onStartShouldSetPanResponder: () => !!drawModeRef.current,
     onMoveShouldSetPanResponder: () => !!drawModeRef.current,
     onPanResponderGrant: (e) => {
-      pointsRef.current = [{ x: e.nativeEvent.locationX, y: e.nativeEvent.locationY }];
+      pointsRef.current = [pointFromEvent(e)];
       lastFlushRef.current = 0;
       flush();
     },
     onPanResponderMove: (e) => {
-      const p = { x: e.nativeEvent.locationX, y: e.nativeEvent.locationY };
+      const p = pointFromEvent(e);
       const pts = pointsRef.current;
       const last = pts[pts.length - 1];
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < 3) return;
@@ -113,7 +119,19 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
 
   return (
     <View style={[styles.canvasWrap, style]}>
-      <View collapsable={false} ref={drawRef} style={{ width: dims.w, height: dims.h }}>
+      <View
+        collapsable={false}
+        ref={drawRef}
+        onLayout={() => {
+          const node = drawRef.current;
+          if (node && typeof node.measureInWindow === 'function') {
+            node.measureInWindow((x, y) => {
+              originRef.current = { x, y };
+            });
+          }
+        }}
+        style={{ width: dims.w, height: dims.h }}
+      >
         {loading && (
           <View style={styles.imgLoading}>
             <ActivityIndicator color="#fff" />

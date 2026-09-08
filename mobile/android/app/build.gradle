@@ -3,6 +3,16 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
 /**
+ * Autolinking.
+ *
+ * Registers every RN native module under node_modules (document-picker, view-shot,
+ * react-native-video, rn-fetch-blob, firebase, …) and generates the PackageList that
+ * MainApplication loads. Without this call the built PackageList was stale and several
+ * native modules were never registered, causing "native module is undefined" at runtime.
+ */
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
+
+/**
  * Firebase Cloud Messaging.
  *
  * google-services.json comes from the user's Firebase project and must NOT be committed
