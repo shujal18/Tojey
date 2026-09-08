@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet, Modal,
-  Dimensions, Image, ActivityIndicator, Alert, Animated, PanResponder,
+  Dimensions, Image, ActivityIndicator, Alert, Animated, PanResponder, Platform,
 } from 'react-native';
 import Video from 'react-native-video';
 import { captureRef } from 'react-native-view-shot';
@@ -476,6 +476,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           initialScrollIndex={startIndex}
           getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
           renderItem={renderItem}
+          removeClippedSubviews={Platform.OS === 'android'}
           style={{ flex: 1 }}
         />
 

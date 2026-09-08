@@ -34,6 +34,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [recordTime, setRecordTime] = useState(0);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
   const [voiceProgress, setVoiceProgress] = useState(0);
+  const playingIdRef = useRef(null);
   const [showAttach, setShowAttach] = useState(false);
   const [presence, setPresence] = useState(null);
   const listRef = useRef(null);
@@ -144,7 +145,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         onEditRow={(m) => doAction('edit', m)}
         onCancelUpload={cancelUpload}
         voicePlaying={playingVoiceId === item.id}
-        voiceProgress={voiceProgress}
+        voiceProgress={playingVoiceId === item.id ? voiceProgress : 0}
         onPlayVoice={toggleVoicePlayback}
       />
     );
@@ -504,32 +505,38 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const toggleVoicePlayback = useCallback(async (msg) => {
     if (!msg || !msg.media_url) return;
     if (msg._pending || msg._uploading || msg._uploadError) return;
-    if (playingVoiceId === msg.id) {
+    const current = playingIdRef.current;
+    if (current === msg.id) {
       await stopVoicePlayback();
+      playingIdRef.current = null;
       setPlayingVoiceId(null);
       setVoiceProgress(0);
       return;
     }
     try {
-      if (playingVoiceId) await stopVoicePlayback();
+      if (current) await stopVoicePlayback();
       setVoiceProgress(0);
+      playingIdRef.current = msg.id;
       setPlayingVoiceId(msg.id);
       await playVoice(absUrl(msg.media_url), (e) => {
         const dur = (e && e.duration) || 0;
         const pos = (e && e.currentPosition) || 0;
         setVoiceProgress(dur > 0 ? Math.min(1, pos / dur) : 0);
         if (e && e.isFinished) {
+          playingIdRef.current = null;
           setPlayingVoiceId(null);
           setVoiceProgress(0);
         }
       });
     } catch (e) {
       console.error('voice play failed', e);
+      playingIdRef.current = null;
       setPlayingVoiceId(null);
       setVoiceProgress(0);
       Alert.alert('Could not play voice note', (e && e.message) || 'Unknown error');
     }
-  }, [playingVoiceId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const reactTo = (id, reaction) => {
     socket.emit('message:react', { messageId: id, reaction });
@@ -955,6 +962,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         maxToRenderPerBatch={10}
         updateCellsBatchingPeriod={30}
         windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
         renderItem={renderMessage}
         contentContainerStyle={styles.messageList}
       />
