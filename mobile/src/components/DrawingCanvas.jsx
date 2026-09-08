@@ -9,19 +9,51 @@ export const DRAW_SIZES = [3, 6, 12];
 
 const DRAW_MAX_W = SCREEN_W;
 const DRAW_MAX_H = SCREEN_H - 180;
+const FLUSH_INTERVAL = 33;
+const MIN_SEG_LEN = 3;
 
-export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, drawModeRef, colorRef, brushRef, lastPtRef, setCurPoints, setStrokes, maxHeight = DRAW_MAX_H, style }) {
+function buildSegments(stroke, keyer) {
+  const out = [];
+  if (!stroke || !stroke.points || stroke.points.length < 2) return out;
+  const { color, size, points } = stroke;
+  for (let i = 1; i < points.length; i++) {
+    const p1 = points[i - 1];
+    const p2 = points[i];
+    if (!p1 || !p2) continue;
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) continue;
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
+    out.push(
+      <View
+        key={keyer(i)}
+        style={{
+          position: 'absolute',
+          width: size,
+          height: len,
+          left: (p1.x + p2.x) / 2 - size / 2,
+          top: (p1.y + p2.y) / 2 - len / 2,
+          backgroundColor: color,
+          borderRadius: size / 2,
+          transform: [{ rotate: `${angle}deg` }],
+        }}
+      />
+    );
+  }
+  return out;
+}
+
+export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, brushRef, setStrokes, maxHeight = DRAW_MAX_H, style }) {
   const [loading, setLoading] = useState(true);
   const [size, setSize] = useState(null);
+  const [segments, setSegments] = useState([]);
 
   const pointsRef = useRef([]);
+  const pendingRef = useRef([]);
   const lastFlushRef = useRef(0);
+  const activeKeyRef = useRef(0);
   const originRef = useRef({ x: 0, y: 0 });
-
-  const pointFromEvent = (e) => ({
-    x: e.nativeEvent.pageX - originRef.current.x,
-    y: e.nativeEvent.pageY - originRef.current.y,
-  });
 
   const [itemW, setItemW] = useState(SCREEN_W);
   const [itemH, setItemH] = useState(maxHeight);
@@ -29,6 +61,13 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
     setItemW(SCREEN_W);
     setItemH(maxHeight);
   }, [maxHeight]);
+
+  useEffect(() => {
+    pointsRef.current = [];
+    pendingRef.current = [];
+    lastFlushRef.current = 0;
+    setSegments([]);
+  }, [uri]);
 
   useEffect(() => {
     let active = true;
@@ -42,78 +81,66 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
     return () => { active = false; };
   }, [uri, itemW, itemH]);
 
-  const flush = () => setCurPoints([...pointsRef.current]);
+  // Committed strokes drive undo/clear. Rebuilding the segment list only happens
+  // on commit/undo/clear — never while a stroke is being drawn.
+  useEffect(() => {
+    const rebuilt = [];
+    strokes.forEach((s, si) => {
+      buildSegments(s, (i) => `s${si}-${i}`).forEach((el) => rebuilt.push(el));
+    });
+    setSegments(rebuilt);
+  }, [strokes]);
+
+  const pointFromEvent = (e) => ({
+    x: e.nativeEvent.pageX - originRef.current.x,
+    y: e.nativeEvent.pageY - originRef.current.y,
+  });
+
+  const flushPending = () => {
+    if (!pendingRef.current.length) return;
+    const stroke = { color: colorRef.current, size: brushRef.current, points: pendingRef.current };
+    const key = `a${activeKeyRef.current++}`;
+    const built = buildSegments(stroke, (i) => `${key}-${i}`);
+    pendingRef.current = [];
+    if (built.length) setSegments((prev) => [...prev, ...built]);
+  };
+
+  const finishStroke = () => {
+    const pts = pointsRef.current;
+    pointsRef.current = [];
+    pendingRef.current = [];
+    lastFlushRef.current = 0;
+    if (pts.length) {
+      setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
+    }
+  };
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => !!drawModeRef.current,
     onMoveShouldSetPanResponder: () => !!drawModeRef.current,
     onPanResponderGrant: (e) => {
-      pointsRef.current = [pointFromEvent(e)];
+      const p = pointFromEvent(e);
+      pointsRef.current = [p];
+      pendingRef.current = [p];
       lastFlushRef.current = 0;
-      flush();
+      flushPending();
     },
     onPanResponderMove: (e) => {
       const p = pointFromEvent(e);
       const pts = pointsRef.current;
       const last = pts[pts.length - 1];
-      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 3) return;
-      pointsRef.current = [...pts, p];
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < MIN_SEG_LEN) return;
+      pointsRef.current.push(p);
+      pendingRef.current.push(p);
       const now = Date.now();
-      if (now - lastFlushRef.current >= 33) {
+      if (now - lastFlushRef.current >= FLUSH_INTERVAL) {
         lastFlushRef.current = now;
-        flush();
+        flushPending();
       }
     },
-    onPanResponderRelease: () => {
-      const pts = pointsRef.current;
-      if (pts.length) {
-        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
-      }
-      pointsRef.current = [];
-      setCurPoints(null);
-      lastPtRef.current = null;
-    },
-    onPanResponderTerminate: () => {
-      const pts = pointsRef.current;
-      if (pts.length) {
-        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
-      }
-      pointsRef.current = [];
-      setCurPoints(null);
-      lastPtRef.current = null;
-    },
+    onPanResponderRelease: finishStroke,
+    onPanResponderTerminate: finishStroke,
   })).current;
-
-  const lines = [];
-  const pushLines = (stroke) => {
-    if (!stroke || !stroke.points || stroke.points.length < 2) return;
-    for (let i = 1; i < stroke.points.length; i++) {
-      const p1 = stroke.points[i - 1];
-      const p2 = stroke.points[i];
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 1) continue;
-      const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
-      lines.push(
-        <View
-          key={`${i}-${p1.x}-${p1.y}`}
-          style={{
-            position: 'absolute',
-            width: stroke.size,
-            height: len,
-            left: (p1.x + p2.x) / 2 - stroke.size / 2,
-            top: (p1.y + p2.y) / 2 - len / 2,
-            backgroundColor: stroke.color,
-            borderRadius: stroke.size / 2,
-            transform: [{ rotate: `${angle}deg` }],
-          }}
-        />
-      );
-    }
-  };
-  strokes.forEach((s) => pushLines(s));
-  pushLines({ color, size: brush, points: curPoints || [] });
 
   const dims = size || { w: itemW, h: itemH };
 
@@ -139,7 +166,7 @@ export function DrawableImage({ uri, drawRef, strokes, curPoints, color, brush, 
         )}
         <Image source={{ uri }} style={{ width: dims.w, height: dims.h }} resizeMode="stretch" onLoad={() => setLoading(false)} />
         <View style={StyleSheet.absoluteFill} {...pan.panHandlers}>
-          {lines}
+          {segments}
         </View>
       </View>
     </View>

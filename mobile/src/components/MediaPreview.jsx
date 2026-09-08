@@ -6,6 +6,7 @@ import {
 import Video from 'react-native-video';
 import { captureRef } from 'react-native-view-shot';
 import { Icon } from './AppIcon';
+import { canInlineVideoPreview } from '../utils/media';
 import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -30,13 +31,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const drawRef = useRef(null);
   const shotRef = useRef(null);
   const [strokes, setStrokes] = useState([]);
-  const [curPoints, setCurPoints] = useState(null);
   const [color, setColor] = useState('#FF5252');
   const [brush, setBrush] = useState(6);
   const colorRef = useRef(color);
   const brushRef = useRef(brush);
   const drawModeRef = useRef(true);
-  const lastPtRef = useRef(null);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { brushRef.current = brush; }, [brush]);
 
@@ -52,7 +51,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const resetTools = () => {
     setMode('view');
     setStrokes([]);
-    setCurPoints(null);
     setCrop(null);
     setBox(null);
     setSrcSize(null);
@@ -252,17 +250,13 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       return (
         <View style={styles.body}>
           <DrawableImage
+            key={displayUri}
             uri={displayUri}
             drawRef={drawRef}
             strokes={strokes}
-            curPoints={curPoints}
-            color={color}
-            brush={brush}
             drawModeRef={drawModeRef}
             colorRef={colorRef}
             brushRef={brushRef}
-            lastPtRef={lastPtRef}
-            setCurPoints={setCurPoints}
             setStrokes={setStrokes}
             maxHeight={SCREEN_H - 300}
             style={{ padding: 4 }}
@@ -320,10 +314,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       );
     }
     if (isVideo) {
+      const previewSafe = canInlineVideoPreview(fileName, mimeType);
       return (
         <View style={styles.body}>
-          {videoErr ? (
-            <View style={{ alignItems: 'center' }}>
+          {videoErr || !previewSafe ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
               <Icon name="alert-circle-outline" size={44} color={theme.danger} />
               <Text style={{ color: theme.textSecondary, marginTop: 10 }}>This video could not be previewed here.</Text>
               <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 4 }}>You can still send it.</Text>

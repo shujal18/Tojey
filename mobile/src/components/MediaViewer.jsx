@@ -9,7 +9,8 @@ import { Icon } from './AppIcon';
 import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
-import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
+import { canInlineVideoPreview } from '../utils/media';
+import { DrawableImage, DrawingToolbar, DRAW_COLORS, DRAW_SIZES } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -153,17 +154,6 @@ function sanitizeFileName(name) {
 // codec mismatches (MOV, MKV, WEBM, HEVC…) throw a native error that no JS boundary
 // can catch, crashing the app. Only allow known-safe formats to run in-app; the rest
 // are handed to the system video player.
-function isSafeWebVideo(m) {
-  const name = (m.file_name || m.media_url || '').toLowerCase();
-  if (/\.(m3u8|mp4|m4v)$/.test(name)) return true;
-  if (/\.(mov|mkv|webm|avi|flv|3gp|3gpp|ts|mpg|mpeg|hevc|ogv|wmv)$/.test(name)) return false;
-  const mime = (m.mime_type || '').toLowerCase();
-  if (mime) {
-    if (mime === 'video/mp4' || mime === 'video/mpeg' || mime === 'video/3gpp' || mime === 'video/quicktime') return mime === 'video/mp4' || mime === 'video/mpeg';
-    if (mime.startsWith('video/')) return false;
-  }
-  return true;
-}
 
 class VideoBoundary extends React.Component {
   constructor(props) {
@@ -200,7 +190,6 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
 
   const [drawMode, setDrawMode] = useState(false);
   const [strokes, setStrokes] = useState([]);
-  const [curPoints, setCurPoints] = useState(null);
   const [color, setColor] = useState(DRAW_COLORS[4]);
   const [brush, setBrush] = useState(DRAW_SIZES[1]);
   const [drawingBusy, setDrawingBusy] = useState(false);
@@ -209,7 +198,6 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   const colorRef = useRef(color);
   const brushRef = useRef(brush);
   const drawModeRef = useRef(drawMode);
-  const lastPtRef = useRef(null);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { brushRef.current = brush; }, [brush]);
   useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
@@ -217,15 +205,12 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   // Reset drawing state when switching media or leaving draw mode
   useEffect(() => {
     setStrokes([]);
-    setCurPoints(null);
     setDrawMode(false);
-    lastPtRef.current = null;
   }, [items, index]);
 
   useEffect(() => {
     setIndex(startIndex);
     setStrokes([]);
-    setCurPoints(null);
     setDrawMode(false);
   }, [startIndex]);
 
@@ -324,7 +309,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       const failed = videoErrors[m.id];
       const active = activeVideoId === m.id;
       const loading = videoLoading[m.id] && !failed;
-      const safeFormat = isSafeWebVideo(m);
+      const safeFormat = canInlineVideoPreview(m.file_name, m.mime_type);
       return (
         <View style={styles.slide}>
           {failed ? (
@@ -404,10 +389,10 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       );
     }
     if (drawMode && m.id === item?.id) {
-      return <DrawableImage uri={uri} drawRef={drawRef} strokes={strokes} curPoints={curPoints} color={color} brush={brush} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} lastPtRef={lastPtRef} setCurPoints={setCurPoints} setStrokes={setStrokes} />;
+      return <DrawableImage key={m.id} uri={uri} drawRef={drawRef} strokes={strokes} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} setStrokes={setStrokes} />;
     }
     return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
-  }, [videoErrors, videoLoading, activeVideoId, drawMode, item, strokes, curPoints, color, brush, playExternal, onExternalImage]);
+  }, [videoErrors, videoLoading, activeVideoId, drawMode, item, strokes, playExternal, onExternalImage]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems && viewableItems.length) {
@@ -467,7 +452,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
             </TouchableOpacity>
           )}
           {drawMode && (
-            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); setCurPoints(null); }} style={styles.topBtn} accessibilityLabel="Close drawing">
+            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); }} style={styles.topBtn} accessibilityLabel="Close drawing">
               <Icon name="close" size={24} color="#fff" />
             </TouchableOpacity>
           )}

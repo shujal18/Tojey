@@ -255,9 +255,18 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
   }, [socket, otherUserId, currentUser.id]);
 
-  // Persist messages to offline cache whenever they change
+  // Persist messages to offline cache whenever meaningful state changes.
+  // Upload progress (_uploadProgress) ticks ~8x/sec; skip those to avoid
+  // constant AsyncStorage churn and app-jank while media is sending.
+  const persistSigRef = useRef('');
   useEffect(() => {
     if (!currentUser?.id || !otherUserId || !messages.length) return;
+    const sig = messages
+      .map((m) => [m.id, m.status, m.is_edited ? 1 : 0, m.is_deleted_for_everyone ? 1 : 0, m._uploadError ? 1 : 0, m.content].join('|'))
+      .join(';')
+      .slice(0, 40000);
+    if (sig === persistSigRef.current) return;
+    persistSigRef.current = sig;
     saveMessages(currentUser.id, otherUserId, messages);
   }, [messages, otherUserId, currentUser.id]);
 
