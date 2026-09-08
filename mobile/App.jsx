@@ -427,10 +427,22 @@ class RootErrorBoundary extends React.Component {
   }
   render() {
     if (!this.state.error) return this.props.children;
+    const msg = (this.state.error && (this.state.error.message || this.state.error.name)) || String(this.state.error || 'Unknown error');
+    const stack = (this.state.error && this.state.error.stack)
+      ? String(this.state.error.stack).split('\n').slice(0, 4).join('\n')
+      : '';
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: '#6C3CE9', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-        <View style={{ alignItems: 'center' }}>
+        <View style={{ alignItems: 'center', width: '100%' }}>
           <Text style={{ color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 }}>Something went wrong</Text>
+          <Text style={{ color: 'rgba(255,255,255,0.92)', fontSize: 13, textAlign: 'center', marginBottom: 6 }}>
+            {msg}
+          </Text>
+          {!!stack && (
+            <Text style={{ color: 'rgba(255,255,255,0.65)', fontSize: 11, textAlign: 'center', marginBottom: 8 }}>
+              {stack}
+            </Text>
+          )}
           <TouchableOpacity
             onPress={() => this.setState({ error: null })}
             style={{ backgroundColor: '#fff', paddingHorizontal: 26, paddingVertical: 12, borderRadius: 10, marginTop: 8 }}

@@ -95,10 +95,40 @@ app.get('/uploads/:filename', async (req, res) => {
       [req.params.filename]
     );
     if (result.rows.length === 0) return res.status(404).send('Not found');
-    res.set('Content-Type', result.rows[0].mimetype);
+    const mimetype = result.rows[0].mimetype || 'application/octet-stream';
+    const body = result.rows[0].data;
+    const total = body.length;
+    res.set('Accept-Ranges', 'bytes');
+    res.set('Content-Type', mimetype);
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(result.rows[0].data);
+
+    // HTTP Range support is required by ExoPlayer (in-app video playback) for
+    // seeking and for large files. Return a 206 with the requested slice.
+    const range = req.headers.range;
+    if (typeof range === 'string' && /^bytes=.+$/.test(range.trim())) {
+      const m = range.trim().match(/^bytes=(-?\d*)-(-?\d*)$/);
+      let start = NaN;
+      let end = NaN;
+      if (m) {
+        if (m[1] !== '') start = parseInt(m[1], 10);
+        if (m[2] !== '') end = parseInt(m[2], 10);
+      }
+      if (Number.isNaN(start)) start = 0;
+      if (Number.isNaN(end)) end = total - 1;
+      if (start < 0) start = Math.max(0, total + start); // suffix range e.g. bytes=-500
+      if (end >= total) end = total - 1;
+      if (start > end || start >= total) {
+        return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      }
+      res.status(206);
+      res.set('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.set('Content-Length', String(end - start + 1));
+      return res.send(body.slice(start, end + 1));
+    }
+
+    res.send(body);
   } catch (e) {
+    console.error('upload serve error', e.message);
     res.status(500).send('Server error');
   }
 });

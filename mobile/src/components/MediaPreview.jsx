@@ -44,6 +44,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const [srcSize, setSrcSize] = useState(null);
   const [contained, setContained] = useState(null);
   const [crop, setCrop] = useState(null);
+  const [imgReady, setImgReady] = useState(false);
   const geomRef = useRef({ contained: null, crop: null });
   geomRef.current.contained = contained;
   geomRef.current.crop = crop;
@@ -55,6 +56,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     setCrop(null);
     setBox(null);
     setSrcSize(null);
+    setImgReady(false);
     setContained(null);
   };
 
@@ -79,8 +81,10 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     Image.getSize(displayUri, (w, h) => {
       if (!active) return;
       setSrcSize({ w, h });
+      setImgReady(true);
     }, () => {
       if (active) setSrcSize({ w: box.w, h: box.h });
+      setImgReady(true);
     });
     return () => { active = false; };
   }, [box, displayUri, isVideo]);
@@ -356,8 +360,16 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     return (
       <View style={styles.body}>
         <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
-          <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" onError={() => setImgErr(true)} />
+          <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" onLoad={() => setImgReady(true)} onError={() => setImgErr(true)} />
         </View>
+        {!imgReady && !imgErr && (
+          <View style={[StyleSheet.absoluteFill, styles.processingDim]} pointerEvents="none">
+            <View style={styles.processingPill}>
+              <ActivityIndicator color="#fff" />
+              <Text style={{ color: '#fff', marginLeft: 10, fontWeight: '600' }}>Loading photo…</Text>
+            </View>
+          </View>
+        )}
         {imgErr && (
           <View style={{ position: 'absolute', bottom: 18, alignSelf: 'center' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: theme.inputBg, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}>
@@ -382,11 +394,19 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
           <View style={[styles.composer, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
             {!isVideo && (
               <View style={styles.toolRow}>
-                <TouchableOpacity style={[styles.toolBtn, { backgroundColor: theme.primaryLight }]} onPress={() => { setMode('draw'); }}>
+                <TouchableOpacity
+                  style={[styles.toolBtn, { backgroundColor: theme.primaryLight }, !imgReady || imgErr ? { opacity: 0.45 } : null]}
+                  disabled={!imgReady || imgErr}
+                  onPress={() => { setMode('draw'); }}
+                >
                   <Icon name="color-wand" size={20} color={theme.primary} />
                   <Text style={[styles.toolBtnText, { color: theme.primary }]}>Draw</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[styles.toolBtn, { backgroundColor: theme.primaryLight }]} onPress={() => { if (box && srcSize) setMode('crop'); }}>
+                <TouchableOpacity
+                  style={[styles.toolBtn, { backgroundColor: theme.primaryLight }, !imgReady || imgErr ? { opacity: 0.45 } : null]}
+                  disabled={!imgReady || imgErr || !box || !srcSize}
+                  onPress={() => { if (box && srcSize) setMode('crop'); }}
+                >
                   <Icon name="crop" size={20} color={theme.primary} />
                   <Text style={[styles.toolBtnText, { color: theme.primary }]}>Crop</Text>
                 </TouchableOpacity>

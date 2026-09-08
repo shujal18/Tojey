@@ -149,6 +149,22 @@ function sanitizeFileName(name) {
   return (base.replace(/[^\w.\- ]+/g, '_') || null).slice(0, 120);
 }
 
+// ExoPlayer decodes just a few codecs in-app (mainly MP4/H.264/AAC). Container or
+// codec mismatches (MOV, MKV, WEBM, HEVC…) throw a native error that no JS boundary
+// can catch, crashing the app. Only allow known-safe formats to run in-app; the rest
+// are handed to the system video player.
+function isSafeWebVideo(m) {
+  const name = (m.file_name || m.media_url || '').toLowerCase();
+  if (/\.(m3u8|mp4|m4v)$/.test(name)) return true;
+  if (/\.(mov|mkv|webm|avi|flv|3gp|3gpp|ts|mpg|mpeg|hevc|ogv|wmv)$/.test(name)) return false;
+  const mime = (m.mime_type || '').toLowerCase();
+  if (mime) {
+    if (mime === 'video/mp4' || mime === 'video/mpeg' || mime === 'video/3gpp' || mime === 'video/quicktime') return mime === 'video/mp4' || mime === 'video/mpeg';
+    if (mime.startsWith('video/')) return false;
+  }
+  return true;
+}
+
 class VideoBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -308,6 +324,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       const failed = videoErrors[m.id];
       const active = activeVideoId === m.id;
       const loading = videoLoading[m.id] && !failed;
+      const safeFormat = isSafeWebVideo(m);
       return (
         <View style={styles.slide}>
           {failed ? (
@@ -319,7 +336,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                 <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
               </TouchableOpacity>
             </View>
-          ) : !active ? (
+          ) : (!active && safeFormat) ? (
             <View style={styles.vidPosterWrap}>
               {m.thumb_url ? (
                 <Image source={{ uri: absUrl(m.thumb_url) }} style={StyleSheet.absoluteFill} resizeMode="contain" />
@@ -332,6 +349,18 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                 accessibilityLabel="Play video"
               >
                 <Icon name="play" size={30} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          ) : (!active && !safeFormat) ? (
+            <View style={styles.vidPosterWrap}>
+              {m.thumb_url ? (
+                <Image source={{ uri: absUrl(m.thumb_url) }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+              ) : (
+                <Icon name="videocam-outline" size={56} color="rgba(255,255,255,0.4)" />
+              )}
+              <TouchableOpacity onPress={() => playExternal(m, m.mime_type || 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
+                <Icon name="open-outline" size={18} color="#fff" />
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
               </TouchableOpacity>
             </View>
           ) : (

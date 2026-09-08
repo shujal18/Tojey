@@ -550,11 +550,26 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
-  const openEditor = (asset) => {
+  const toCacheFile = async (uri) => {
+    if (!uri || !String(uri).startsWith('content://')) return uri;
+    try {
+      const { dirs } = RNFetchBlob.fs;
+      const ext = String(uri).split('.').pop() || 'img';
+      const target = `${dirs.CacheDir}/tojey_pick_${Date.now()}.${ext}`;
+      const res = await RNFetchBlob.config({ fileCache: true, path: target }).fetch('GET', uri);
+      return res.path();
+    } catch (e) {
+      console.error('toCacheFile failed:', e.message);
+      return uri;
+    }
+  };
+
+  const openEditor = async (asset) => {
     if (!asset || !asset.uri) return;
     const isVideo = !!(asset.type && asset.type.toLowerCase().startsWith('video'));
+    const uri = await toCacheFile(asset.uri);
     setPreviewAsset({
-      uri: asset.uri,
+      uri,
       type: isVideo ? 'VIDEO' : 'IMAGE',
       fileName: asset.fileName || (isVideo ? 'video' : 'photo'),
       mimeType: asset.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
@@ -622,6 +637,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           content,
           mediaUrl: upData.url,
           thumbUrl: upData.url,
+          fileName,
         };
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
@@ -663,6 +679,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           mediaSize: isFile ? (msg.media_size || 0) : 0,
           mediaUrl: upData.url,
           thumbUrl: isFile ? '' : upData.url,
+          fileName,
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
