@@ -15,6 +15,10 @@ import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } fr
 import { loadMessages, saveMessages, clearConversationCache } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
+import {
+  startVoiceRecording, trackVoiceRecording, stopVoiceRecording, deleteVoiceFile,
+  playVoice, stopVoicePlayback, resetVoice,
+} from '../services/voice';
 
 const { width: APP_W } = Dimensions.get('window');
 
@@ -28,10 +32,15 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [reactionMenu, setReactionMenu] = useState(null);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
+  const [playingVoiceId, setPlayingVoiceId] = useState(null);
+  const [voiceProgress, setVoiceProgress] = useState(0);
   const [showAttach, setShowAttach] = useState(false);
   const [presence, setPresence] = useState(null);
   const listRef = useRef(null);
-  const recTimer = useRef(null);
+  const voicePathRef = useRef(null);
+  const recListenUnsub = useRef(null);
+  const inputRef = useRef(null);
+  const kbVisibleRef = useRef(Platform.OS === 'ios');
   const typingTimer = useRef(null);
   const [mediaViewer, setMediaViewer] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
@@ -134,10 +143,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         suggestEdit={isSent && item.type === 'TEXT' && !!item.content && !item._pending}
         onEditRow={(m) => doAction('edit', m)}
         onCancelUpload={cancelUpload}
+        voicePlaying={playingVoiceId === item.id}
+        voiceProgress={voiceProgress}
+        onPlayVoice={toggleVoicePlayback}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback]);
 
   const onType = (t) => {
     setText(t);
@@ -270,6 +282,25 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     saveMessages(currentUser.id, otherUserId, messages);
   }, [messages, otherUserId, currentUser.id]);
 
+  // Keyboard reopen fix: Android stops showing the keyboard on the focused input
+  // after a manual dismiss. Track visibility and force a blur+refocus cycle.
+  useEffect(() => {
+    const show = () => { kbVisibleRef.current = true; };
+    const hide = () => { if (Platform.OS !== 'ios') kbVisibleRef.current = false; };
+    Keyboard.addListener('keyboardDidShow', show);
+    Keyboard.addListener('keyboardDidHide', hide);
+    return () => {
+      Keyboard.removeListener('keyboardDidShow', show);
+      Keyboard.removeListener('keyboardDidHide', hide);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      resetVoice().catch(() => {});
+    };
+  }, []);
+
   function updateStatus(id, status) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
   }
@@ -361,60 +392,144 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setReplyingTo(null);
   };
 
-  const sendVoice = () => {
+  const sendVoiceMessage = useCallback((filePath, durationSec) => {
+    if (!filePath) return;
+    const cleanPath = String(filePath).replace(/^file:\/\//, '');
     const tempId = `tmp-${Date.now()}`;
+    const fileName = `voice_${Date.now()}.m4a`;
+    const waveform = '8,12,7,16,10,14,6,11,9,13,10,8,12,15,7,9,11,6';
     const localMsg = {
       id: tempId,
       sender_id: currentUser.id,
       type: 'VOICE',
       content: 'Voice message',
-      media_url: '',
+      media_url: cleanPath,
       thumb_url: '',
-      duration: recordTime || 8,
-      waveform: 'waveform',
+      duration: durationSec || 1,
+      waveform,
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
       _local: true,
+      _pending: true,
+      _uploading: true,
+      _uploadKey: fileName,
+      _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
     }
-    socket.emit('message:send', {
-      otherUserId,
-      type: 'VOICE',
-      content: 'Voice message',
-      duration: recordTime || 8,
-      waveform: 'waveform',
-    }, (ack) => {
-      if (ack?.ok) {
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-      } else {
-        setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      }
-    });
-    setRecording(false);
-    setRecordTime(0);
-  };
+    uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(tempId, p))
+      .then((upData) => {
+        uploadTasks.current.delete(fileName);
+        socket.emit('message:send', {
+          otherUserId,
+          type: 'VOICE',
+          content: 'Voice message',
+          mediaUrl: upData.url,
+          duration: durationSec || 1,
+          waveform,
+        }, (ack) => {
+          if (ack?.ok) {
+            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
+          } else {
+            setMessages((prev) => prev.filter((m) => m.id !== tempId));
+            deleteVoiceFile(cleanPath).catch(() => {});
+          }
+        });
+      })
+      .catch((e) => {
+        uploadTasks.current.delete(fileName);
+        console.error('voice upload failed:', e);
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
+      });
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress]);
 
   const startRecording = async () => {
+    if (recording) return;
     const ok = await ensureMicPermission();
     if (!ok) {
       alert('Microphone permission is required to record voice messages.');
       return;
     }
-    setRecording(true);
-    setRecordTime(0);
-    recTimer.current = setInterval(() => setRecordTime((t) => t + 1), 1000);
+    try {
+      const { path } = await startVoiceRecording();
+      voicePathRef.current = path;
+      setRecordTime(0);
+      setRecording(true);
+      setShowAttach(false);
+      recListenUnsub.current = trackVoiceRecording((e) => {
+        if (e && e.currentPosition) {
+          setRecordTime(Math.max(0, Math.floor(e.currentPosition / 1000)));
+        }
+      });
+    } catch (e) {
+      console.error('startRecording failed', e);
+      alert('Could not start recording: ' + (e.message || 'Unknown error'));
+    }
   };
 
-  const stopRecording = (cancel) => {
-    clearInterval(recTimer.current);
-    if (cancel) { setRecording(false); setRecordTime(0); return; }
+  const stopRecording = async (cancel) => {
+    const path = voicePathRef.current;
+    voicePathRef.current = null;
+    if (recListenUnsub.current) {
+      recListenUnsub.current();
+      recListenUnsub.current = null;
+    }
     setRecording(false);
-    sendVoice();
+    setRecordTime(0);
+
+    let resolvedPath = null;
+    try {
+      resolvedPath = await stopVoiceRecording();
+    } catch (e) {
+      console.warn('stopVoiceRecording failed', e);
+    }
+    const filePath = resolvedPath || path;
+
+    if (cancel || !filePath) {
+      await deleteVoiceFile(filePath || path);
+      return;
+    }
+
+    if (recordTime < 1) {
+      await deleteVoiceFile(filePath);
+      Alert.alert('Too short', 'Hold a little longer before sending.');
+      return;
+    }
+    sendVoiceMessage(filePath, Math.max(1, Math.round((recordTime * 1000) / 1000)));
   };
+
+  const toggleVoicePlayback = useCallback(async (msg) => {
+    if (!msg || !msg.media_url) return;
+    if (msg._pending || msg._uploading || msg._uploadError) return;
+    if (playingVoiceId === msg.id) {
+      await stopVoicePlayback();
+      setPlayingVoiceId(null);
+      setVoiceProgress(0);
+      return;
+    }
+    try {
+      if (playingVoiceId) await stopVoicePlayback();
+      setVoiceProgress(0);
+      setPlayingVoiceId(msg.id);
+      await playVoice(absUrl(msg.media_url), (e) => {
+        const dur = (e && e.duration) || 0;
+        const pos = (e && e.currentPosition) || 0;
+        setVoiceProgress(dur > 0 ? Math.min(1, pos / dur) : 0);
+        if (e && e.isFinished) {
+          setPlayingVoiceId(null);
+          setVoiceProgress(0);
+        }
+      });
+    } catch (e) {
+      console.error('voice play failed', e);
+      setPlayingVoiceId(null);
+      setVoiceProgress(0);
+      Alert.alert('Could not play voice note', (e && e.message) || 'Unknown error');
+    }
+  }, [playingVoiceId]);
 
   const reactTo = (id, reaction) => {
     socket.emit('message:react', { messageId: id, reaction });
@@ -443,6 +558,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     else if (action === 'edit') { setEditing(message); setText(message.content || ''); }
     else if (action === 'deleteMe') { deleteMessage(message, 'me'); }
     else if (action === 'deleteAll') { deleteMessage(message, 'everyone'); }
+    else if (action === 'save') { if (message && message.media_url) downloadAndOpen(message); }
   };
 
   const sendFile = (asset) => {
@@ -669,12 +785,15 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     if (!msg || !msg.media_url) return;
     const isFile = msg.type === 'FILE' || msg.type === 'DOCUMENT';
     const isVideo = msg.type === 'VIDEO';
+    const isVoice = msg.type === 'VOICE';
     const tempId = `tmp-${Date.now()}-r`;
     const fileName = isFile
       ? (msg.file_name || msg.content || `file_${Date.now()}`)
+      : isVoice ? `voice_${Date.now()}.m4a`
       : isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`;
     const mimeType = isFile
       ? (mimeFor(msg) || 'application/octet-stream')
+      : isVoice ? 'audio/mp4'
       : isVideo ? 'video/mp4' : 'image/jpeg';
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
     uploadAsset({ uri: msg.media_url, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
@@ -683,12 +802,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         socket.emit('message:send', {
           otherUserId,
           type: msg.type,
-          content: isFile ? fileName : (isVideo ? '🎬 Video' : '📷 Photo'),
-          fileName: isFile ? fileName : '',
+          content: isFile ? fileName : (isVoice ? 'Voice message' : (isVideo ? '🎬 Video' : '📷 Photo')),
           mediaSize: isFile ? (msg.media_size || 0) : 0,
           mediaUrl: upData.url,
-          thumbUrl: isFile ? '' : upData.url,
+          thumbUrl: isFile || isVoice ? '' : upData.url,
           fileName,
+          ...(isVoice ? { duration: msg.duration || 1, waveform: msg.waveform || '8,12,7,16,10,14,6,11,9,13' } : {}),
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
@@ -875,6 +994,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <View style={styles.actionRow}>
               <ActionBtn label="Reply" icon="return-down-back-outline" onPress={() => doAction('reply', reactionMenu)} theme={theme} />
               <ActionBtn label="Like" icon="heart-outline" onPress={() => reactTo(reactionMenu.id, '❤️')} theme={theme} />
+              <ActionBtn label="Save" icon="download-outline" onPress={() => doAction('save', reactionMenu)} theme={theme} visible={!!reactionMenu.media_url} />
             </View>
             <View style={styles.actionRow}>
               <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id && reactionMenu.type === 'TEXT'} />
@@ -958,30 +1078,31 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Composer */}
-      <View style={[styles.composer, { backgroundColor: theme.composerBg, borderTopColor: theme.border }]}>
-        {recording ? (
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <TouchableOpacity onPress={() => stopRecording(false)} style={[styles.micBtnRec, { backgroundColor: theme.danger }]}>
-              <Icon name="stop" size={18} color="#fff" />
-            </TouchableOpacity>
-          </View>
-        ) : (
+      {!recording && (
+        <View style={[styles.composer, { backgroundColor: theme.composerBg, borderTopColor: theme.border }]}>
           <View style={styles.composerRow}>
             <TouchableOpacity
               style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
-              onPress={() => { Keyboard.dismiss(); setShowAttach(!showAttach); setRecording(false); }}
+              onPress={() => { Keyboard.dismiss(); setShowAttach(!showAttach); }}
               accessibilityLabel="Add attachments"
             >
               <Icon name="add" size={24} color={showAttach ? '#fff' : theme.primary} />
             </TouchableOpacity>
             <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
+                ref={inputRef}
                 value={text}
                 onChangeText={onType}
                 placeholder="Type a message"
                 placeholderTextColor={theme.textSecondary}
                 style={[styles.input, { color: theme.text }]}
                 multiline
+                onPress={() => {
+                  if (!kbVisibleRef.current && inputRef.current) {
+                    inputRef.current.blur();
+                    setTimeout(() => inputRef.current && inputRef.current.focus(), 40);
+                  }
+                }}
               />
             </View>
             {text.trim() ? (
@@ -989,18 +1110,13 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 <Icon name="send" size={18} color="#fff" />
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity
-                style={[styles.micBtn, { backgroundColor: theme.primary }]}
-                onPressIn={startRecording}
-                onPressOut={() => stopRecording(false)}
-                accessibilityLabel="Record voice message"
-              >
+              <TouchableOpacity style={[styles.micBtn, { backgroundColor: theme.primary }]} onPress={startRecording} accessibilityLabel="Record voice message">
                 <Icon name="mic" size={20} color="#fff" />
               </TouchableOpacity>
             )}
           </View>
-        )}
-      </View>
+        </View>
+      )}
 
       {mediaViewer && (
         <MediaViewer
@@ -1081,6 +1197,7 @@ function replyPreview(m) {
 function mimeFor(m) {
   if (m.type === 'VIDEO') return 'video/mp4';
   if (m.type === 'IMAGE') return 'image/jpeg';
+  if (m.type === 'VOICE') return 'audio/mp4';
   const n = (m.content || m.file_name || '').toLowerCase();
   if (n.endsWith('.pdf')) return 'application/pdf';
   if (n.endsWith('.zip') || n.endsWith('.rar') || n.endsWith('.7z')) return 'application/zip';
@@ -1140,7 +1257,7 @@ function formatBytes(b) {
   return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload }) {
+function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
@@ -1174,6 +1291,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
   })).current;
 
   const hasMedia = !!(message.media_url || message.thumb_url);
+  const voicePct = `${Math.min(100, Math.max(0, Math.round((voiceProgress || 0) * 100)))}%`;
   const statusIcon = message.status === 'READ'
     ? 'checkmark-done' : message.status === 'DELIVERED'
       ? 'checkmark-done' : 'checkmark';
@@ -1202,7 +1320,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
       onRetry(m);
       return;
     }
-    if (m.type === 'IMAGE' || m.type === 'VIDEO' || m.type === 'FILE' || m.type === 'DOCUMENT' || m.type === 'VOICE') {
+    if (m.type === 'IMAGE' || m.type === 'VIDEO' || m.type === 'FILE' || m.type === 'DOCUMENT') {
       onOpenMedia(m);
     }
   };
@@ -1262,22 +1380,47 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                   )}
                 </View>
               ) : message.type === 'VOICE' ? (
-                <TouchableOpacity onPress={() => onOpenMedia(message)} activeOpacity={0.7} style={{ minWidth: 180 }}>
+                <TouchableOpacity onPress={() => (onPlayVoice ? onPlayVoice(message) : onOpenMedia(message))} activeOpacity={0.7} style={{ minWidth: 180 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                     <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
-                      <Icon name="play" size={18} color={isSent ? '#fff' : theme.primary} />
+                      <Icon name={voicePlaying ? 'pause' : 'play'} size={18} color={isSent ? '#fff' : theme.primary} />
                     </View>
                     <View style={{ flex: 1, marginLeft: 10 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
                         {[5, 9, 13, 7, 15, 11, 8, 13, 7, 10].map((h, i) => (
-                          <View key={i} style={{ width: 3, height: h, backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary, borderRadius: 2 }} />
+                          <View
+                            key={i}
+                            style={{
+                              width: 3, height: h, borderRadius: 2,
+                              backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary,
+                              opacity: i / 10 <= (voiceProgress || 0) ? 1 : (isSent ? 0.45 : 0.35),
+                            }}
+                          />
                         ))}
                       </View>
+                      <View style={{ height: 2, marginTop: 5, borderRadius: 1, overflow: 'hidden', backgroundColor: isSent ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.12)' }}>
+                        <View style={{ width: voicePct, height: 2, backgroundColor: isSent ? '#fff' : theme.primary }} />
+                      </View>
                       <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
-                        0:{String(message.duration || 26).padStart(2, '0')} · 1×
+                        {voicePlaying
+                          ? `0:${String(Math.max(0, Math.min(message.duration || 0, Math.floor((voiceProgress || 0) * (message.duration || 0))))).padStart(2, '0')}`
+                          : `0:${String(message.duration || 26).padStart(2, '0')}`} · 1×
                       </Text>
                     </View>
                   </View>
+                  {message._uploading && (
+                    <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center' }}>
+                      <ArcProgress size={28} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
+                      <Text style={{ marginLeft: 6, fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
+                        {Math.round((message._uploadProgress || 0) * 100)}%
+                      </Text>
+                    </View>
+                  )}
+                  {message._uploadError && (
+                    <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 4 }}>
+                      Upload failed · tap to retry
+                    </Text>
+                  )}
                 </TouchableOpacity>
               ) : message.type === 'FILE' || message.type === 'DOCUMENT' ? (
                 <View style={[styles.docRow, { backgroundColor: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight, borderRadius: 10, padding: 8, flexDirection: 'row', alignItems: 'center', minWidth: 200 }]}>

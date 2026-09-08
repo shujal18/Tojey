@@ -153,21 +153,40 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
     setNotifSending(true);
     setNotifResult(null);
     try {
+      const conv = conversations.find((c) => c.other && c.other.id === notifTarget.id);
       const res = await fetch(`${SERVER_URL}/api/notifications/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token || ''}`,
         },
-        body: JSON.stringify({ receiverId: notifTarget.id, message: msg }),
+        body: JSON.stringify({
+          receiverId: notifTarget.id,
+          message: msg,
+          conversationId: (conv && conv.conversationId) || null,
+        }),
       });
-      const data = await res.json();
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        data = null;
+      }
       if (!res.ok) {
-        setNotifResult({ error: data.error || 'Failed to send' });
+        setNotifResult({ error: (data && (data.error || data.message)) || `Server error (${res.status})` });
         return;
       }
-      if (data.status === 'failed') {
-        setNotifResult({ error: data.note || 'Delivery failed (offline user has no device token)' });
+      if (data && data.status === 'failed') {
+        const offline = !notifTarget.online && notifTarget.online !== undefined;
+        setNotifResult({
+          error: offline
+            ? `${notifTarget.display_name || notifTarget.username} is offline and has no push token yet — the notification is saved but FCM delivery needs Firebase set up (google-services.json).`
+            : (data.note || 'Delivery failed — receiver has no device registered for push.'),
+        });
+        return;
+      }
+      if (!data || !data.ok) {
+        setNotifResult({ error: (data && data.error) || 'No response from server' });
         return;
       }
       const via = data.deliveryMethod === 'socket' ? 'live connection' : 'push notification';
@@ -179,7 +198,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       }, 1600);
     } catch (e) {
       console.error('sendNotification failed:', e);
-      setNotifResult({ error: 'Cannot reach server' });
+      setNotifResult({ error: 'Cannot reach server — check your internet connection' });
     } finally {
       setNotifSending(false);
     }

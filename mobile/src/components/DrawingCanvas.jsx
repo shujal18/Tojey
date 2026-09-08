@@ -54,6 +54,7 @@ export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, br
   const lastFlushRef = useRef(0);
   const activeKeyRef = useRef(0);
   const originRef = useRef({ x: 0, y: 0 });
+  const readyRef = useRef(false);
 
   const [itemW, setItemW] = useState(SCREEN_W);
   const [itemH, setItemH] = useState(maxHeight);
@@ -119,13 +120,31 @@ export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, br
     onStartShouldSetPanResponder: () => !!drawModeRef.current,
     onMoveShouldSetPanResponder: () => !!drawModeRef.current,
     onPanResponderGrant: (e) => {
-      const p = pointFromEvent(e);
-      pointsRef.current = [p];
-      pendingRef.current = [p];
+      // The origin is (re)measured right here, not just once at onLayout, so
+      // strokes stay aligned even if the canvas moved (e.g. Modal centering).
+      readyRef.current = false;
+      pointsRef.current = [];
+      pendingRef.current = [];
       lastFlushRef.current = 0;
-      flushPending();
+      const node = drawRef.current;
+      const grantX = e.nativeEvent.pageX;
+      const grantY = e.nativeEvent.pageY;
+      const init = (x, y) => {
+        originRef.current = { x, y };
+        const p = { x: grantX - x, y: grantY - y };
+        pointsRef.current = [p];
+        pendingRef.current = [p];
+        lastFlushRef.current = 0;
+        readyRef.current = true;
+      };
+      if (node && typeof node.measureInWindow === 'function') {
+        node.measureInWindow((x, y) => init(x, y));
+      } else {
+        init(originRef.current.x, originRef.current.y);
+      }
     },
     onPanResponderMove: (e) => {
+      if (!readyRef.current) return;
       const p = pointFromEvent(e);
       const pts = pointsRef.current;
       const last = pts[pts.length - 1];
@@ -138,8 +157,14 @@ export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, br
         flushPending();
       }
     },
-    onPanResponderRelease: finishStroke,
-    onPanResponderTerminate: finishStroke,
+    onPanResponderRelease: () => {
+      readyRef.current = false;
+      finishStroke();
+    },
+    onPanResponderTerminate: () => {
+      readyRef.current = false;
+      finishStroke();
+    },
   })).current;
 
   const dims = size || { w: itemW, h: itemH };
