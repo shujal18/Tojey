@@ -8,6 +8,9 @@ android/local.properties
 android/.cxx/
 *.keystore
 
+# Firebase config for this project only - never commit
+android/app/google-services.json
+
 # iOS
 ios/Pods/
 ios/build/

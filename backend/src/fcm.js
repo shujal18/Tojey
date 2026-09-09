@@ -49,6 +49,7 @@ function ensureInitialized() {
         projectId: creds.project_id,
       });
       messaging = admin.messaging();
+      console.log('FCM enabled for project', creds.project_id || creds.projectId || '(unknown)');
     } catch (e) {
       admin = null;
       messaging = null;
