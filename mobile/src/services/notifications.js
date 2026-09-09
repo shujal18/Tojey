@@ -46,8 +46,12 @@ async function requestNotificationPermission() {
   if (Platform.OS !== 'android') return true;
   if (Platform.Version >= 33) {
     try {
+      const already = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      if (already) return true;
       const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
+      if (granted === PermissionsAndroid.RESULTS.GRANTED) return true;
+      console.warn('POST_NOTIFICATIONS not granted:', granted);
+      return false;
     } catch (e) {
       console.warn('POST_NOTIFICATIONS request failed:', e.message);
       return false;
@@ -82,7 +86,7 @@ export async function startPush(userToken) {
   if (Platform.OS !== 'android') return false;
   try {
     await createNotificationChannel();
-    await requestNotificationPermission();
+    const hasPerm = await requestNotificationPermission();
 
     if (tokenUnsub) {
       tokenUnsub();
@@ -96,6 +100,9 @@ export async function startPush(userToken) {
     tokenUnsub = messaging().onTokenRefresh(async (t) => {
       await registerToken(t, userToken);
     });
+    if (!hasPerm) {
+      console.warn('Push enabled but POST_NOTIFICATIONS denied - banners will not show on Android 13+.');
+    }
     return true;
   } catch (e) {
     // Firebase not configured (no google-services.json) or FCM unavailable.
