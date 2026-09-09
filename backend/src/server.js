@@ -376,6 +376,32 @@ app.get('/api/devices/tokens', authMiddleware, async (req, res) => {
   }
 });
 
+// Diagnostics: force an FCM push to the caller's OWN active tokens, regardless of
+// online/socket state. Used to prove device-side rendering while the app is open.
+app.post('/api/devices/tokens/sendtest', authMiddleware, async (req, res) => {
+  try {
+    const user = (await pool.query('SELECT id, username, display_name FROM users WHERE username = $1', [req.user.username])).rows[0];
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const tokensRes = await pool.query(
+      `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      [user.id]
+    );
+    const tokens = tokensRes.rows.map((r) => r.fcm_token);
+    if (!tokens.length) return res.json({ ok: true, note: 'no active tokens registered', sent: false });
+
+    const push = await sendPush({
+      tokens,
+      notification: { title: 'Tojey direct test', body: 'FCM reached your phone directly.' },
+      data: { type: 'tojey_diag', body: 'FCM reached your phone directly.' },
+    });
+    if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+    res.json({ ok: true, sent: push.success, tokens: tokens.length, note: push.note, invalid: push.invalidTokens.length });
+  } catch (e) {
+    console.error('devices:sendtest error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.put('/api/profile', authMiddleware, async (req, res) => {
   try {
     const { displayName, bio, profilePic } = req.body;

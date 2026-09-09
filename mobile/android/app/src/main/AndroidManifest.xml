@@ -20,6 +20,16 @@
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true"
         tools:replace="android:label">
+
+        <!-- FCM notification icon/color: a monochrome drawable is required for the
+             notification tray on older Android; without it pushes can be dropped. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_tojey" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/tojey_notification" />
+
         <activity
             android:name=".MainActivity"
             android:label="Tojey"
