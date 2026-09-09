@@ -352,6 +352,10 @@ app.get('/api/profile', authMiddleware, async (req, res) => {
     const u = result.rows[0];
     if (!u) return res.status(404).json({ error: 'User not found' });
     res.json({ id: u.id, username: u.username, displayName: u.display_name, bio: u.bio, profilePic: u.profile_pic_url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Diagnostics: the caller's own FCM token registrations (read-only, masked).
 app.get('/api/devices/tokens', authMiddleware, async (req, res) => {
@@ -369,10 +373,6 @@ app.get('/api/devices/tokens', authMiddleware, async (req, res) => {
   } catch (e) {
     console.error('devices:tokens diag error', e.message);
     res.status(500).json({ error: 'Server error' });
-  }
-});
-  } catch (e) {
-    res.status(500).json({ error: e.message });
   }
 });
 
