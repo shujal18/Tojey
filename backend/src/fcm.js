@@ -98,6 +98,9 @@ async function sendPush({ tokens, notification, data }) {
         notification: {
           channelId: 'tojey-messages',
           sound: 'default',
+          notificationPriority: 'PRIORITY_HIGH',
+          defaultVibrateTimings: true,
+          visibility: 'private',
         },
       },
     });
