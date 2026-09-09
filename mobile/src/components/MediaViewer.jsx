@@ -177,7 +177,7 @@ class VideoBoundary extends React.Component {
   }
 }
 
-export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing }) {
+export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing, onExternalImage }) {
   const [index, setIndex] = useState(startIndex);
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});

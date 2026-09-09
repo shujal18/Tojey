@@ -203,7 +203,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         if (!atBottomRef.current) {
           setPendingCount((n) => n + 1);
         } else {
-          setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+          setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50);
         }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
@@ -438,7 +438,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
     }
     uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
@@ -611,7 +611,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
     }
     uploadAsset({ uri: asset.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
@@ -777,7 +777,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
     }
     uploadAsset({ uri: opts.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
@@ -938,6 +938,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
+  const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
+  const composerBg = hexToRgba(theme.composerBg, 0.94);
 
   return (
     <KeyboardAvoidingView
@@ -984,12 +986,14 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         removeClippedSubviews={Platform.OS === 'android'}
         renderItem={renderMessage}
         contentContainerStyle={styles.messageList}
+        style={{ backgroundColor: chatBg }}
       />
 
       {!atBottomNear && (
         <TouchableOpacity
           onPress={() => {
-            listRef.current?.scrollToEnd({ animated: true });
+            listRef.current?.scrollToEnd({ animated: false });
+            atBottomRef.current = true;
             setAtBottomNear(true);
             setPendingCount(0);
           }}
@@ -1106,7 +1110,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Composer */}
       {!recording && (
-        <View style={[styles.composer, { backgroundColor: theme.composerBg, borderTopColor: theme.border }]}>
+        <View style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}>
           <View style={styles.composerRow}>
             <TouchableOpacity
               style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
@@ -1319,6 +1323,14 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
       ? 'checkmark-done' : 'checkmark';
   const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
 
+  const emojiOnly = message.type === 'TEXT' && isEmojiOnly(message.content);
+  const mediaBase = Math.min(APP_W * 0.62, 250);
+  const mw = message.media_width;
+  const mh = message.media_height;
+  const mediaRatio = (mw && mh) ? Math.min(Math.max(mh / mw, 0.5), 2.2) : 0.81;
+  const mediaW = mediaBase;
+  const mediaH = mediaBase * mediaRatio;
+
   // Double-tap ↔ single-tap detection (WhatsApp style)
   const lastTap = useRef(0);
   const singleTimer = useRef(null);
@@ -1360,7 +1372,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
             <TouchableOpacity
               style={[
                 styles.bubble,
-                isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble }],
+                isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble, borderColor: theme.border }],
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
               ]}
               onPress={handlePress}
@@ -1375,7 +1387,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                 <View>
                   <Image
                     source={{ uri: absUrl(message.thumb_url || message.media_url) }}
-                    style={[styles.mediaImage, { backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
+                    style={[styles.mediaImage, { width: mediaW, height: mediaH, backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
                     resizeMode="cover"
                   />
                   {(message.type === 'VIDEO' || message._uploading) && (
@@ -1486,7 +1498,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                       </Text>
                     </View>
                   ) : null}
-                  <Text style={{ fontSize: 15, color: isSent ? '#fff' : theme.receivedText }}>{message.content}</Text>
+                  <Text style={[styles.msgText, { color: isSent ? '#fff' : theme.receivedText }, emojiOnly && styles.msgTextEmoji]}>{message.content}</Text>
                 </View>
               )}
 
@@ -1563,6 +1575,27 @@ function timeOf(t) {
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function isEmojiOnly(s) {
+  if (!s || typeof s !== 'string') return false;
+  const t = s.trim();
+  if (!t.length || t.length > 12) return false;
+  // Must contain at least one non-ASCII character and no ASCII alphanumerics.
+  if (!/[^\x00-\x7F]/.test(t)) return false;
+  if (/[A-Za-z0-9]/.test(t)) return false;
+  // Reject if it looks like normal text with a stray unicode char.
+  const words = t.split(/\s+/);
+  return words.length <= 4;
+}
+
+function hexToRgba(hex, alpha) {
+  if (!hex || typeof hex !== 'string') return hex;
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length !== 6) return hex;
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
@@ -1579,7 +1612,9 @@ const styles = StyleSheet.create({
   msgRow: { flexDirection: 'row', marginVertical: 3 },
   bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
   sentBubble: { borderBottomRightRadius: 4 },
-  recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#F0EDF8' },
+  recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
+  msgText: { fontSize: 15, lineHeight: 21 },
+  msgTextEmoji: { fontSize: 34, lineHeight: 42 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
