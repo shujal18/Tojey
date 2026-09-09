@@ -352,6 +352,25 @@ app.get('/api/profile', authMiddleware, async (req, res) => {
     const u = result.rows[0];
     if (!u) return res.status(404).json({ error: 'User not found' });
     res.json({ id: u.id, username: u.username, displayName: u.display_name, bio: u.bio, profilePic: u.profile_pic_url });
+
+// Diagnostics: the caller's own FCM token registrations (read-only, masked).
+app.get('/api/devices/tokens', authMiddleware, async (req, res) => {
+  try {
+    const user = (await pool.query('SELECT id FROM users WHERE username = $1', [req.user.username])).rows[0];
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await pool.query(
+      `SELECT id, platform, device_id,
+              left(fcm_token, 16) || '...' AS fcm_token_masked,
+              is_active, created_at, updated_at
+       FROM device_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 10`,
+      [user.id]
+    );
+    res.json({ tokens: result.rows });
+  } catch (e) {
+    console.error('devices:tokens diag error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
