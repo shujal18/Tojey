@@ -38,14 +38,20 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const rotateRef = useRef(null);
   const strokesRef = useRef([]);
   const [strokes, setStrokes] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const redoStackRef = useRef(redoStack);
+  const [eraser, setEraser] = useState(false);
   const [color, setColor] = useState('#FF5252');
   const [brush, setBrush] = useState(6);
   const colorRef = useRef(color);
   const brushRef = useRef(brush);
   const drawModeRef = useRef(true);
+  const eraserRef = useRef(eraser);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { brushRef.current = brush; }, [brush]);
   useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+  useEffect(() => { eraserRef.current = eraser; }, [eraser]);
+  useEffect(() => { redoStackRef.current = redoStack; }, [redoStack]);
 
   const [box, setBox] = useState(null);
   const [srcSize, setSrcSize] = useState(null);
@@ -68,6 +74,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     setMode('view');
     setStrokes([]);
     strokesRef.current = [];
+    setRedoStack([]);
+    setEraser(false);
     setCrop(null);
   };
 
@@ -146,6 +154,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       setDisplayUri(shot);
       setStrokes([]);
       strokesRef.current = [];
+      setRedoStack([]);
+      setEraser(false);
       resetGeometry();
       setMode('view');
     } catch (e) {
@@ -289,10 +299,13 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             uri={displayUri}
             drawRef={drawRef}
             strokes={strokes}
+            strokesRef={strokesRef}
+            setStrokes={setStrokes}
+            setRedoStack={setRedoStack}
             drawModeRef={drawModeRef}
+            eraserRef={eraserRef}
             colorRef={colorRef}
             brushRef={brushRef}
-            setStrokes={setStrokes}
             maxHeight={winH - DRAW_TOOLBAR_H * 2 - topInset}
             style={{ padding: 4 }}
           />
@@ -518,11 +531,26 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               brush={brush}
               setColor={setColor}
               setBrush={setBrush}
-              onUndo={() => setStrokes((s) => s.slice(0, -1))}
-              onClear={() => setStrokes([])}
+              onUndo={() => {
+                const cur = strokesRef.current;
+                if (!cur.length) return;
+                setRedoStack((r) => [...r, cur[cur.length - 1]]);
+                setStrokes(cur.slice(0, -1));
+              }}
+              onRedo={() => {
+                const rs = redoStackRef.current;
+                if (!rs.length) return;
+                setStrokes((s) => [...s, rs[rs.length - 1]]);
+                setRedoStack(rs.slice(0, -1));
+              }}
+              onClear={() => { setStrokes([]); setRedoStack([]); }}
               onCancel={() => setMode('view')}
               onDone={applyDrawing}
               busy={processing}
+              eraser={eraser}
+              setEraser={setEraser}
+              canUndo={strokes.length > 0}
+              canRedo={redoStack.length > 0}
             />
           </View>
         )}

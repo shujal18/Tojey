@@ -190,6 +190,8 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
 
   const [drawMode, setDrawMode] = useState(false);
   const [strokes, setStrokes] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const [eraser, setEraser] = useState(false);
   const [color, setColor] = useState(DRAW_COLORS[4]);
   const [brush, setBrush] = useState(DRAW_SIZES[1]);
   const [drawingBusy, setDrawingBusy] = useState(false);
@@ -198,19 +200,42 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   const colorRef = useRef(color);
   const brushRef = useRef(brush);
   const drawModeRef = useRef(drawMode);
+  const eraserRef = useRef(eraser);
+  const strokesRef = useRef(strokes);
+  const redoStackRef = useRef(redoStack);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { brushRef.current = brush; }, [brush]);
   useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
+  useEffect(() => { eraserRef.current = eraser; }, [eraser]);
+  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+  useEffect(() => { redoStackRef.current = redoStack; }, [redoStack]);
+
+  const undoDrawing = useCallback(() => {
+    const cur = strokesRef.current;
+    if (!cur.length) return;
+    setRedoStack((r) => [...r, cur[cur.length - 1]]);
+    setStrokes(cur.slice(0, -1));
+  }, []);
+  const redoDrawing = useCallback(() => {
+    const rs = redoStackRef.current;
+    if (!rs.length) return;
+    setStrokes((s) => [...s, rs[rs.length - 1]]);
+    setRedoStack(rs.slice(0, -1));
+  }, []);
 
   // Reset drawing state when switching media or leaving draw mode
   useEffect(() => {
     setStrokes([]);
+    setRedoStack([]);
+    setEraser(false);
     setDrawMode(false);
   }, [items, index]);
 
   useEffect(() => {
     setIndex(startIndex);
     setStrokes([]);
+    setRedoStack([]);
+    setEraser(false);
     setDrawMode(false);
   }, [startIndex]);
 
@@ -389,7 +414,21 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       );
     }
     if (drawMode && m.id === item?.id) {
-      return <DrawableImage key={m.id} uri={uri} drawRef={drawRef} strokes={strokes} drawModeRef={drawModeRef} colorRef={colorRef} brushRef={brushRef} setStrokes={setStrokes} />;
+      return (
+        <DrawableImage
+          key={m.id}
+          uri={uri}
+          drawRef={drawRef}
+          strokes={strokes}
+          strokesRef={strokesRef}
+          setStrokes={setStrokes}
+          setRedoStack={setRedoStack}
+          drawModeRef={drawModeRef}
+          eraserRef={eraserRef}
+          colorRef={colorRef}
+          brushRef={brushRef}
+        />
+      );
     }
     return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
   }, [videoErrors, videoLoading, activeVideoId, drawMode, item, strokes, playExternal, onExternalImage]);
@@ -423,10 +462,15 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       brush={brush}
       setColor={setColor}
       setBrush={setBrush}
-      onUndo={() => setStrokes((s) => s.slice(0, -1))}
-      onClear={() => setStrokes([])}
+      onUndo={undoDrawing}
+      onRedo={redoDrawing}
+      onClear={() => { setStrokes([]); setRedoStack([]); }}
       onDone={sendDrawing}
       busy={drawingBusy}
+      eraser={eraser}
+      setEraser={setEraser}
+      canUndo={strokes.length > 0}
+      canRedo={redoStack.length > 0}
     />
   );
 
@@ -452,7 +496,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
             </TouchableOpacity>
           )}
           {drawMode && (
-            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); }} style={styles.topBtn} accessibilityLabel="Close drawing">
+            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); setRedoStack([]); setEraser(false); }} style={styles.topBtn} accessibilityLabel="Close drawing">
               <Icon name="close" size={24} color="#fff" />
             </TouchableOpacity>
           )}

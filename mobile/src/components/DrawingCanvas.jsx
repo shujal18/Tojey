@@ -1,141 +1,218 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, StyleSheet, Image, PanResponder, ActivityIndicator, Dimensions, TouchableOpacity } from 'react-native';
+import Svg, { Path, Circle } from 'react-native-svg';
 import { Icon } from './AppIcon';
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const { width: SCREEN_W } = Dimensions.get('window');
 
 export const DRAW_COLORS = ['#FFFFFF', '#FF5252', '#2196F3', '#4CAF50', '#FFC107', '#000000'];
 export const DRAW_SIZES = [3, 6, 12];
 
-const DRAW_MAX_W = SCREEN_W;
-const DRAW_MAX_H = SCREEN_H - 180;
 const FLUSH_INTERVAL = 33;
-const MIN_SEG_LEN = 3;
+const MIN_SEG_LEN = 2;
+const ERASE_SCALE = 1.5;
 
-function buildSegments(stroke, keyer) {
-  const out = [];
-  if (!stroke || !stroke.points || stroke.points.length < 2) return out;
-  const { color, size, points } = stroke;
-  for (let i = 1; i < points.length; i++) {
-    const p1 = points[i - 1];
-    const p2 = points[i];
-    if (!p1 || !p2) continue;
-    const dx = p2.x - p1.x;
-    const dy = p2.y - p1.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 1) continue;
-    const angle = (Math.atan2(dy, dx) * 180) / Math.PI - 90;
-    out.push(
-      <View
-        key={keyer(i)}
-        style={{
-          position: 'absolute',
-          width: size,
-          height: len,
-          left: (p1.x + p2.x) / 2 - size / 2,
-          top: (p1.y + p2.y) / 2 - len / 2,
-          backgroundColor: color,
-          borderRadius: size / 2,
-          transform: [{ rotate: `${angle}deg` }],
-        }}
-      />
-    );
+function smoothPath(points) {
+  if (!points || points.length < 2) return '';
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
   }
-  return out;
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const mx = (points[i].x + points[i + 1].x) / 2;
+    const my = (points[i].y + points[i + 1].y) / 2;
+    d += ` Q ${points[i].x} ${points[i].y} ${mx} ${my}`;
+  }
+  d += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
+  return d;
 }
 
-export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, brushRef, setStrokes, maxHeight = DRAW_MAX_H, style }) {
+function strokeElement(stroke, key) {
+  if (!stroke || !stroke.points || !stroke.points.length) return null;
+  const { color, size, points } = stroke;
+  if (points.length === 1) {
+    return <Circle key={key} cx={points[0].x} cy={points[0].y} r={size / 2} fill={color} />;
+  }
+  return (
+    <Path
+      key={key}
+      d={smoothPath(points)}
+      stroke={color}
+      strokeWidth={size}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    />
+  );
+}
+
+/** Erase drawing strokes (not the photo) by removing points under the eraser path. */
+function eraseStrokes(strokes, points, radius) {
+  if (!strokes.length || !points.length) return strokes;
+  let changed = false;
+  const out = [];
+  for (let si = 0; si < strokes.length; si++) {
+    const s = strokes[si];
+    const keep = [];
+    for (const pt of s.points) {
+      let near = false;
+      for (let ei = 0; ei < points.length; ei++) {
+        const e = points[ei];
+        const dx = pt.x - e.x;
+        const dy = pt.y - e.y;
+        if (dx * dx + dy * dy <= radius * radius) {
+          near = true;
+          break;
+        }
+      }
+      keep.push(!near);
+    }
+    if (keep.every(Boolean)) {
+      out.push(s);
+      continue;
+    }
+    changed = true;
+    let run = [];
+    const flushRun = () => {
+      if (run.length >= 1) {
+        out.push({ color: s.color, size: s.size, points: run });
+      }
+      run = [];
+    };
+    for (let i = 0; i < s.points.length; i++) {
+      if (keep[i]) run.push(s.points[i]);
+      else flushRun();
+    }
+    flushRun();
+  }
+  return changed ? out : strokes;
+}
+
+/**
+ * Contains `src` inside `box` (resizeMode=contain semantics) and returns the
+ * displayed rectangle + scale so drawing coords map exactly on the visible image.
+ */
+function containBox(srcW, srcH, boxW, boxH) {
+  const scale = Math.min(boxW / srcW, boxH / srcH);
+  const dw = srcW * scale;
+  const dh = srcH * scale;
+  return { dw, dh, scale, ox: (boxW - dw) / 2, oy: (boxH - dh) / 2 };
+}
+
+export function DrawableImage({
+  uri,
+  drawRef,
+  strokes,
+  strokesRef,
+  setStrokes,
+  setRedoStack,
+  drawModeRef,
+  eraserRef,
+  colorRef,
+  brushRef,
+  maxHeight,
+  style,
+}) {
   const [loading, setLoading] = useState(true);
-  const [size, setSize] = useState(null);
-  const [segments, setSegments] = useState([]);
+  const [srcSize, setSrcSize] = useState(null);
+  const [layout, setLayout] = useState({ w: SCREEN_W, h: maxHeight || 400 });
+  const [active, setActive] = useState(null); // { points, color, size, cursor, erasing }
 
   const pointsRef = useRef([]);
-  const pendingRef = useRef([]);
+  const eraserPtsRef = useRef([]);
   const lastFlushRef = useRef(0);
-  const activeKeyRef = useRef(0);
   const originRef = useRef({ x: 0, y: 0 });
   const readyRef = useRef(false);
-
-  const [itemW, setItemW] = useState(SCREEN_W);
-  const [itemH, setItemH] = useState(maxHeight);
-  useEffect(() => {
-    setItemW(SCREEN_W);
-    setItemH(maxHeight);
-  }, [maxHeight]);
+  const drawingRef = useRef(false);
 
   useEffect(() => {
     pointsRef.current = [];
-    pendingRef.current = [];
+    eraserPtsRef.current = [];
     lastFlushRef.current = 0;
-    setSegments([]);
+    setActive(null);
+    setLoading(true);
   }, [uri]);
 
   useEffect(() => {
-    let active = true;
-    Image.getSize(uri, (w, h) => {
-      if (!active || !w || !h) return;
-      const scale = Math.min(itemW / w, itemH / h);
-      setSize({ w: Math.round(w * scale), h: Math.round(h * scale) });
-    }, () => {
-      if (active) setSize({ w: itemW, h: itemH });
-    });
-    return () => { active = false; };
-  }, [uri, itemW, itemH]);
+    let activeOk = true;
+    const loadSize = (url) => {
+      Image.getSize(url, (w, h) => {
+        if (!activeOk || !w || !h) return;
+        setSrcSize({ w, h });
+      }, () => {
+        if (activeOk) setSrcSize({ w: layout.w, h: layout.h });
+      });
+    };
+    loadSize(uri);
+    return () => { activeOk = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uri, layout.w, layout.h]);
 
-  // Committed strokes drive undo/clear. Rebuilding the segment list only happens
-  // on commit/undo/clear — never while a stroke is being drawn.
-  useEffect(() => {
-    const rebuilt = [];
-    strokes.forEach((s, si) => {
-      buildSegments(s, (i) => `s${si}-${i}`).forEach((el) => rebuilt.push(el));
-    });
-    setSegments(rebuilt);
-  }, [strokes]);
+  const dims = useCallback(() => {
+    if (srcSize) return containBox(srcSize.w, srcSize.h, layout.w, layout.h);
+    return { dw: layout.w, dh: layout.h, scale: 1, ox: 0, oy: 0 };
+  }, [srcSize, layout.w, layout.h]);
 
-  const pointFromEvent = (e) => ({
+  const localPoint = (e) => ({
     x: e.nativeEvent.pageX - originRef.current.x,
     y: e.nativeEvent.pageY - originRef.current.y,
   });
 
-  const flushPending = () => {
-    if (!pendingRef.current.length) return;
-    const stroke = { color: colorRef.current, size: brushRef.current, points: pendingRef.current };
-    const key = `a${activeKeyRef.current++}`;
-    const built = buildSegments(stroke, (i) => `${key}-${i}`);
-    pendingRef.current = [];
-    if (built.length) setSegments((prev) => [...prev, ...built]);
+  const paintActive = () => {
+    const now = Date.now();
+    if (now - lastFlushRef.current < FLUSH_INTERVAL) return;
+    lastFlushRef.current = now;
+    const pts = pointsRef.current;
+    const erasing = !!eraserRef.current;
+    const activePts = erasing ? eraserPtsRef.current : pts;
+    if (!activePts.length) return;
+    const last = activePts[activePts.length - 1];
+    setActive({ points: activePts, color: colorRef.current, size: brushRef.current, cursor: last, erasing });
   };
 
-  const finishStroke = () => {
-    const pts = pointsRef.current;
-    pointsRef.current = [];
-    pendingRef.current = [];
-    lastFlushRef.current = 0;
-    if (pts.length) {
-      setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
+  const finishGesture = () => {
+    readyRef.current = false;
+    drawingRef.current = false;
+    setActive(null);
+    const erasing = !!eraserRef.current;
+    if (erasing) {
+      if (eraserPtsRef.current.length) {
+        const radius = brushRef.current * ERASE_SCALE + 4;
+        const current = strokesRef.current || [];
+        setStrokes(eraseStrokes(current, eraserPtsRef.current, radius));
+      }
+      eraserPtsRef.current = [];
+    } else {
+      const pts = pointsRef.current;
+      if (pts.length) {
+        setStrokes((prev) => [...prev, { color: colorRef.current, size: brushRef.current, points: pts }]);
+        if (setRedoStack) setRedoStack([]);
+      }
     }
+    pointsRef.current = [];
+    lastFlushRef.current = 0;
   };
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => !!drawModeRef.current,
     onMoveShouldSetPanResponder: () => !!drawModeRef.current,
     onPanResponderGrant: (e) => {
-      // The origin is (re)measured right here, not just once at onLayout, so
-      // strokes stay aligned even if the canvas moved (e.g. Modal centering).
+      const node = drawRef.current;
       readyRef.current = false;
       pointsRef.current = [];
-      pendingRef.current = [];
+      eraserPtsRef.current = [];
       lastFlushRef.current = 0;
-      const node = drawRef.current;
       const grantX = e.nativeEvent.pageX;
       const grantY = e.nativeEvent.pageY;
       const init = (x, y) => {
         originRef.current = { x, y };
         const p = { x: grantX - x, y: grantY - y };
-        pointsRef.current = [p];
-        pendingRef.current = [p];
+        const bucket = eraserRef.current ? eraserPtsRef : pointsRef;
+        bucket.current = [p];
         lastFlushRef.current = 0;
         readyRef.current = true;
+        drawingRef.current = true;
+        paintActive();
       };
       if (node && typeof node.measureInWindow === 'function') {
         node.measureInWindow((x, y) => init(x, y));
@@ -145,60 +222,85 @@ export function DrawableImage({ uri, drawRef, strokes, drawModeRef, colorRef, br
     },
     onPanResponderMove: (e) => {
       if (!readyRef.current) return;
-      const p = pointFromEvent(e);
-      const pts = pointsRef.current;
-      const last = pts[pts.length - 1];
+      const p = localPoint(e);
+      const bucket = eraserRef.current ? eraserPtsRef : pointsRef;
+      const list = bucket.current;
+      const last = list[list.length - 1];
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < MIN_SEG_LEN) return;
-      pointsRef.current.push(p);
-      pendingRef.current.push(p);
-      const now = Date.now();
-      if (now - lastFlushRef.current >= FLUSH_INTERVAL) {
-        lastFlushRef.current = now;
-        flushPending();
-      }
+      list.push(p);
+      if (eraserRef.current) setActive(null); // live-erase happens on release
+      paintActive();
     },
-    onPanResponderRelease: () => {
-      readyRef.current = false;
-      finishStroke();
-    },
-    onPanResponderTerminate: () => {
-      readyRef.current = false;
-      finishStroke();
-    },
+    onPanResponderRelease: finishGesture,
+    onPanResponderTerminate: finishGesture,
   })).current;
 
-  const dims = size || { w: itemW, h: itemH };
+  const box = dims();
+  const committed = (strokes || []).map((s, i) => strokeElement(s, `s${i}`));
+  const activePath = active && active.points.length > 1 ? smoothPath(active.points) : '';
 
   return (
-    <View style={[styles.canvasWrap, style]}>
-      <View
-        collapsable={false}
-        ref={drawRef}
-        onLayout={() => {
-          const node = drawRef.current;
-          if (node && typeof node.measureInWindow === 'function') {
-            node.measureInWindow((x, y) => {
-              originRef.current = { x, y };
-            });
-          }
-        }}
-        style={{ width: dims.w, height: dims.h }}
-      >
+    <View
+      style={[styles.canvasWrap, style]}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setLayout({ w: width, h: maxHeight ? Math.min(height, maxHeight) : height });
+        const node = drawRef.current;
+        if (node && typeof node.measureInWindow === 'function') {
+          node.measureInWindow((x, y) => {
+            originRef.current = { x, y };
+          });
+        }
+      }}
+    >
+      <View collapsable={false} ref={drawRef} style={{ width: box.dw, height: box.dh }}>
         {loading && (
           <View style={styles.imgLoading}>
             <ActivityIndicator color="#fff" />
           </View>
         )}
-        <Image source={{ uri }} style={{ width: dims.w, height: dims.h }} resizeMode="stretch" onLoad={() => setLoading(false)} />
-        <View style={StyleSheet.absoluteFill} {...pan.panHandlers}>
-          {segments}
+        <Image source={{ uri }} style={{ width: box.dw, height: box.dh }} resizeMode="stretch" onLoad={() => setLoading(false)} />
+        <View style={StyleSheet.absoluteFill} collapsable={false}>
+          <Svg width={box.dw} height={box.dh} viewBox={`0 0 ${box.dw} ${box.dh}`} style={StyleSheet.absoluteFill}>
+            {committed}
+            {activePath ? (
+              <Path
+                d={activePath}
+                stroke={active.erasing ? 'rgba(255,255,255,0.9)' : active.color}
+                strokeWidth={active.erasing ? 2 : active.size}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+                strokeDasharray={active.erasing ? '4 6' : undefined}
+              />
+            ) : active && active.points.length === 1 && !active.erasing ? (
+              <Circle cx={active.points[0].x} cy={active.points[0].y} r={active.size / 2} fill={active.color} />
+            ) : null}
+            {active && active.cursor ? (
+              <Circle
+                cx={active.cursor.x}
+                cy={active.cursor.y}
+                r={active.erasing ? 4 : active.size / 2}
+                fill={active.erasing ? 'rgba(255,255,255,0.9)' : active.color}
+                stroke={active.erasing ? 'rgba(108,60,233,0.8)' : 'rgba(255,255,255,0.6)'}
+                strokeWidth={active.erasing ? 1.5 : 0.5}
+                opacity={0.85}
+                pointerEvents="none"
+              />
+            ) : null}
+          </Svg>
         </View>
+        <View style={StyleSheet.absoluteFill} {...pan.panHandlers} collapsable={false} />
       </View>
     </View>
   );
 }
 
-export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo, onClear, onDone, onCancel, busy, accent }) {
+export function DrawingToolbar({
+  theme, color, brush, setColor, setBrush,
+  onUndo, onRedo, onClear, onDone, onCancel, busy, accent,
+  eraser, setEraser, canUndo, canRedo,
+}) {
   return (
     <View style={[styles.toolbar, { backgroundColor: theme.card }]}>
       <View style={styles.toolRow}>
@@ -207,8 +309,18 @@ export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo
             <Icon name="close" size={20} color={theme.danger} />
           </TouchableOpacity>
         )}
-        <TouchableOpacity onPress={onUndo} accessibilityLabel="Undo" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
+        <TouchableOpacity onPress={onUndo} disabled={!canUndo} accessibilityLabel="Undo" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)', opacity: canUndo ? 1 : 0.35 }]}>
           <Icon name="arrow-undo" size={20} color={theme.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onRedo} disabled={!canRedo} accessibilityLabel="Redo" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)', opacity: canRedo ? 1 : 0.35 }]}>
+          <Icon name="arrow-redo" size={20} color={theme.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => setEraser && setEraser(!eraser)}
+          accessibilityLabel="Eraser"
+          style={[styles.toolBtn, { backgroundColor: eraser ? 'rgba(108,60,233,0.25)' : 'rgba(0,0,0,0.05)' }]}
+        >
+          <Icon name="eraser" size={20} color={eraser ? '#6C3CE9' : theme.textSecondary} />
         </TouchableOpacity>
         <TouchableOpacity onPress={onClear} accessibilityLabel="Clear drawing" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
           <Icon name="trash-outline" size={20} color={theme.danger} />
@@ -218,6 +330,7 @@ export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo
             <TouchableOpacity
               key={c}
               onPress={() => setColor(c)}
+              accessibilityLabel={`Color ${c}`}
               style={[styles.colorSwatch, { backgroundColor: c }, color === c && styles.colorSwatchActive]}
             />
           ))}
@@ -227,14 +340,15 @@ export function DrawingToolbar({ theme, color, brush, setColor, setBrush, onUndo
             <TouchableOpacity
               key={s}
               onPress={() => setBrush(s)}
-              style={[styles.sizeDot, brush === s && styles.sizeDotActive]}
+              accessibilityLabel={`Brush size ${s}`}
+              style={[styles.sizeDot, { borderColor: brush === s ? '#6C3CE9' : 'transparent', borderWidth: 2 }]}
             >
               <View style={{ width: s + 4, height: s + 4, borderRadius: (s + 4) / 2, backgroundColor: brush === s ? theme.primary : theme.textSecondary }} />
             </TouchableOpacity>
           ))}
         </View>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity onPress={onDone} disabled={busy} style={[styles.doneBtn, { backgroundColor: accent || theme.primary }]}>
+        <TouchableOpacity onPress={onDone} disabled={busy} accessibilityLabel="Apply drawing" style={[styles.doneBtn, { backgroundColor: accent || theme.primary }]}>
           {busy ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="checkmark" size={20} color="#fff" />}
         </TouchableOpacity>
       </View>
@@ -253,5 +367,5 @@ const styles = StyleSheet.create({
   colorSwatchActive: { borderWidth: 3, borderColor: '#6C3CE9' },
   sizeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   sizeDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
-  sizeDotActive: { backgroundColor: 'rgba(108,60,233,0.15)' },
+  doneBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
 });
