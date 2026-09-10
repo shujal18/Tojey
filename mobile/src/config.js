@@ -16,25 +16,8 @@ export function absUrl(url) {
 /**
  * Chat message-area background. Set to a URL/`require('...')` of the supplied
  * dark gaming-pattern image to use the real asset. The default is a subtle,
- * dependency-free dark pattern (data-URI SVG tile) so chats always have a
- * proper dark backdrop. Empty string falls back to the plain solid color.
+ * dependency-free dark PNG pattern tile so chats always have a proper dark
+ * backdrop. Empty string falls back to the plain solid color.
  */
 export const CHAT_BACKGROUND =
-  "data:image/svg+xml," +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="140" height="140">' +
-    '<rect width="140" height="140" fill="#121218"/>' +
-    '<g stroke="#8a63ff" stroke-opacity="0.10" stroke-width="1" fill="none">' +
-    '<path d="M0 0h140v140H0z"/>' +
-    '<path d="M14 14h112v112H14z"/>' +
-    '<path d="M28 28h84v84H28z"/>' +
-    '<circle cx="70" cy="70" r="50"/><circle cx="70" cy="70" r="34"/><circle cx="70" cy="70" r="18"/>' +
-    '</g>' +
-    '<g stroke="#6C3CE9" stroke-opacity="0.16" stroke-width="1" fill="none">' +
-    '<path d="M70 4v12M70 124v12M4 70h12M124 70h12"/>' +
-    '<path d="M18 18l8 8M114 114l8 8M18 122l10-10M114 18l10 10"/>' +
-    '<rect x="62" y="8" width="16" height="6"/><rect x="62" y="126" width="16" height="6"/>' +
-    '<rect x="8" y="62" width="6" height="16"/><rect x="126" y="62" width="6" height="16"/>' +
-    '</g>' +
-    '</svg>'
-  );
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAYAAAA5ZDbSAAACi0lEQVR42u3dTW7CMBAGUA4QsUBdRCw4SW+TbU+Sm/YUqSK1G0QKJMHM2G/xLRHGDzvO3/hwOvWT1JuDTgAsgAWwABbAAliaBh6HqQcMGDDgyoHHYboALtbmC2DAgAE/8EVL+fr8PmXIDJyknYt9XWwEZ0HNCHyN/ZYpGjBgwFmBM+JmBZ4DGHAZ4OgdmLV9oUZw5E7M2rZwU3TUjszarpDH4KzHu4h/urCLLMj79E/oVTTk7f0S/jQpCvI4TF3GtUCK8+ASyDPg1kRc6KW50PEK5D1QS2Gv/f2prmT9/sjj1rwS9gb0Hu3tW7lUeVyLXBJ1T+ytM1c64Ky4G0c04OiwG6EBZ8JdgQw4G+6TyICzwT4JDTgz7gPIbQPXgHsHGTDgSoFrwv0HuU3gGnEXkNsDrhn3BjJgwBUBt4B7hXxq6W5S11oAAwYMOMcTHV2rAQw4/UN3XesBDBgw4JgPvneyDhkwYMCAAQMGDBgwYAEMuAzw/Fbc2sB9HHlLPxvBRjBgwIABAwYMFzBgwIABA/ZEhyc6AAMGDBiyB98BezfJu0mAAQMG7A1/b/ir0aFGB2DA6mSpdKfSnVqValUCBqxetHrRKr6r+G7PBns22HWlZuBxmM72Taob+MPOZxUCz7DXsXdh5cB7bTGb5VbfHlvrhgOej7kLuH852z+43inaDuCAX/cHeOf3r0UOvYr+LTXwEaFjI+UZ5MgjuL9xHixPIocE3mu1DDnmKrrPPi1Galco4MgjN2vbwgBHn5azti/b3STA0c+Dx2G6AC7W5gtgwIABP4C6FMD7oy6l2Ahe+9l35l511qBtfs8UDRgw4KzAWZMReEsAAwYMGDBgASyABbAABiyAJUd+ACfqss0sPTeAAAAAAElFTkSuQmCC";
