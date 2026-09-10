@@ -1,9 +1,11 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import messaging from '@react-native-firebase/messaging';
+import notifee, { AndroidImportance, AndroidVisibility, EventType } from '@notifee/react-native';
 import { SERVER_URL } from '../config';
 import { loadSession } from './auth';
 
 export const NOTIFICATION_CHANNEL_ID = 'tojey-messages';
+export const NOTIFEE_PRESS_ACTION = 'open-chat';
 
 let tokenUnsub = null;
 
@@ -39,6 +41,107 @@ async function createNotificationChannel() {
     });
   } catch (e) {
     console.warn('createNotificationChannel failed:', e.message);
+  }
+}
+
+async function ensureNotifeeChannel() {
+  try {
+    const existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
+    if (!existing) {
+      await notifee.createChannel({
+        id: NOTIFICATION_CHANNEL_ID,
+        name: 'Chat notifications',
+        importance: AndroidImportance.HIGH,
+        sound: 'default',
+        vibration: true,
+        visibility: AndroidVisibility.PUBLIC,
+      });
+    }
+  } catch (e) {
+    console.warn('ensureNotifeeChannel failed:', e.message);
+  }
+}
+
+/**
+ * Post a real Android system notification (heads-up pop-up, sound, vibration),
+ * like WhatsApp/Messenger. This works even while the app is in the foreground
+ * and does not depend on Google Play services / push delivery, so it also covers
+ * the OPPO/ColorOS case where remote FCM banners are suppressed.
+ */
+export async function showSystemNotification(payload) {
+  if (!payload || Platform.OS !== 'android') return;
+  try {
+    await ensureNotifeeChannel();
+    await notifee.displayNotification({
+      id: payload.notificationId ? `tojey-n-${payload.notificationId}` : undefined,
+      title: payload.title || payload.senderName || 'Tojey',
+      body: payload.message || '',
+      data: {
+        type: 'tojey_notification',
+        senderId: payload.senderId != null ? String(payload.senderId) : undefined,
+        receiverId: payload.receiverId != null ? String(payload.receiverId) : undefined,
+        conversationId: payload.conversationId != null ? String(payload.conversationId) : undefined,
+      },
+      android: {
+        channelId: NOTIFICATION_CHANNEL_ID,
+        smallIcon: 'ic_stat_tojey',
+        color: '#6C3CE9',
+        importance: AndroidImportance.HIGH,
+        visibility: AndroidVisibility.PUBLIC,
+        pressAction: { id: NOTIFEE_PRESS_ACTION },
+      },
+    });
+  } catch (e) {
+    console.warn('showSystemNotification failed:', e.message);
+  }
+}
+
+/** Called when the user taps a system notification while the app is in the foreground. */
+export function onSystemNotificationPressed(cb) {
+  let unsub = null;
+  try {
+    unsub = notifee.onForegroundEvent(({ type, detail }) => {
+      if (type !== EventType.PRESS) return;
+      const pressId = detail.pressAction && detail.pressAction.id;
+      if (pressId !== NOTIFEE_PRESS_ACTION) return;
+      const n = detail.notification;
+      const d = (n && n.data) || {};
+      if (!d.senderId) return;
+      cb({
+        senderId: parseInt(d.senderId, 10) || undefined,
+        receiverId: d.receiverId ? parseInt(d.receiverId, 10) : undefined,
+        conversationId: d.conversationId ? parseInt(d.conversationId, 10) : undefined,
+        title: n.title || '',
+        message: n.body || '',
+      });
+    });
+  } catch (e) {
+    console.warn('onSystemNotificationPressed failed:', e.message);
+  }
+  return () => {
+    try {
+      if (unsub) unsub();
+    } catch (e) {}
+  };
+}
+
+/** Resolve the system notification that launched the app (cold start/background tap). */
+export async function checkInitialSystemNotification() {
+  if (Platform.OS !== 'android') return null;
+  try {
+    const initial = await notifee.getInitialNotification();
+    const n = initial && initial.notification;
+    const d = (n && n.data) || {};
+    if (!d || !d.senderId) return null;
+    return {
+      senderId: parseInt(d.senderId, 10) || undefined,
+      receiverId: d.receiverId ? parseInt(d.receiverId, 10) : undefined,
+      conversationId: d.conversationId ? parseInt(d.conversationId, 10) : undefined,
+      title: n.title || '',
+      message: n.body || '',
+    };
+  } catch (e) {
+    return null;
   }
 }
 
@@ -86,7 +189,13 @@ export async function startPush(userToken) {
   if (Platform.OS !== 'android') return false;
   try {
     await createNotificationChannel();
+    await ensureNotifeeChannel();
     const hasPerm = await requestNotificationPermission();
+    try {
+      await notifee.requestPermission();
+    } catch (e) {
+      console.warn('notifee requestPermission failed:', e.message);
+    }
 
     if (tokenUnsub) {
       tokenUnsub();
@@ -194,5 +303,10 @@ export function registerBackgroundHandler() {
     messaging().setBackgroundMessageHandler(async () => {});
   } catch (e) {
     console.warn('Background message handler unavailable:', e.message);
+  }
+  try {
+    notifee.onBackgroundEvent(async () => {});
+  } catch (e) {
+    console.warn('Notifee background handler unavailable:', e.message);
   }
 }

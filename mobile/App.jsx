@@ -14,6 +14,7 @@ import { TojeyColors } from './src/theme';
 import { ensureMediaPermission, ensureCameraPermission, ensureMicPermission } from './src/services/permissions';
 import {
   startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
+  showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification,
 } from './src/services/notifications';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
@@ -178,7 +179,7 @@ function Shell() {
     if (!socket) return undefined;
     const onNotif = (d) => {
       if (!d || !d.sender) return;
-      setNotifBanner({
+      const payload = {
         senderId: d.sender.userId,
         senderUsername: d.sender.username,
         senderName: d.sender.displayName,
@@ -186,18 +187,35 @@ function Shell() {
         conversationId: d.conversationId,
         message: (d.notification && d.notification.message) || '',
         title: d.sender.displayName || 'Tojey',
-      });
+        notificationId: d.notification && d.notification.id,
+      };
+      setNotifBanner(payload);
+      showSystemNotification(payload);
     };
     socket.on('notification:receive', onNotif);
     const unsubFg = onForegroundMessage((p) => {
       if (!session) return;
       setNotifBanner(p);
+      showSystemNotification(p);
     });
     return () => {
       socket.off('notification:receive', onNotif);
       if (unsubFg) unsubFg();
     };
   }, [socket, session]);
+
+  // Tapping a system notification (foreground while running / cold start) opens that conversation.
+  useEffect(() => {
+    const unsubPressed = onSystemNotificationPressed((p) => {
+      if (openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    checkInitialSystemNotification().then((p) => {
+      if (p && openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    return () => {
+      if (unsubPressed) unsubPressed();
+    };
+  }, []);
 
   // Notification taps: cold start and while running/backgrounded -> open that conversation.
   useEffect(() => {
