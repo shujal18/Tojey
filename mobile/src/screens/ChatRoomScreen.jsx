@@ -1180,7 +1180,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
         onContentSizeChange={handleContentSizeChange}
         onScroll={handleScroll}
-        maintainVisibleContentPosition={Platform.OS === 'android' ? { autoscrollToTopThreshold: 60, minIndexForVisible: 0 } : undefined}
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
