@@ -118,11 +118,11 @@ async function sendPush({ tokens, notification, data }) {
     });
 
     if (accepted > 0) {
-      console.log(`FCM send: accepted=${accepted}/${tokens.length} invalid=${invalidTokens.length} msgId=${firstSuccessMessageId}`);
+      console.log(`[FCM] multicast: tokens=${tokens.length} accepted=${accepted} invalid=${invalidTokens.length} msgId=${firstSuccessMessageId}`);
       return { success: true, messageId: firstSuccessMessageId, invalidTokens };
     }
     if (invalidTokens.length) {
-      console.log(`FCM send: all ${tokens.length} token(s) reported invalid.`);
+      console.log(`[FCM] multicast: all ${tokens.length} token(s) reported invalid (UNREGISTERED).`);
     }
     return { success: false, note: 'fcm-rejected', invalidTokens };
   } catch (e) {

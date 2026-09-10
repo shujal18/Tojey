@@ -7,6 +7,13 @@ import { loadSession } from './auth';
 export const NOTIFICATION_CHANNEL_ID = 'tojey-messages';
 export const NOTIFEE_PRESS_ACTION = 'open-chat';
 
+// Never log full FCM tokens (they are bearer credentials).
+function maskToken(t) {
+  if (!t) return '';
+  if (t.length <= 12) return '***';
+  return `${t.slice(0, 8)}…${t.slice(-4)}`;
+}
+
 let tokenUnsub = null;
 
 /**
@@ -203,14 +210,17 @@ export async function startPush(userToken) {
     }
 
     const token = await messaging().getToken();
+    console.log(`[FCM] token obtained: ${maskToken(token)}`);
     await registerToken(token, userToken);
+    console.log('[FCM] token registered with backend');
 
     // Refresh tokens as soon as Firebase issues them.
     tokenUnsub = messaging().onTokenRefresh(async (t) => {
+      console.log(`[FCM] token refreshed: ${maskToken(t)}`);
       await registerToken(t, userToken);
     });
     if (!hasPerm) {
-      console.warn('Push enabled but POST_NOTIFICATIONS denied - banners will not show on Android 13+.');
+      console.warn('[FCM] POST_NOTIFICATIONS denied on Android 13+ - banners/sound will NOT show. Ask the user to enable notifications in App Settings.');
     }
     return true;
   } catch (e) {
@@ -263,7 +273,10 @@ export function onForegroundMessage(cb) {
   try {
     return messaging().onMessage((remoteMessage) => {
       const payload = extractNotifPayload(remoteMessage);
-      if (payload) cb(payload);
+      if (payload) {
+        console.log(`[FCM] foreground message received: conversationId=${payload.conversationId} sender=${payload.senderName}`);
+        cb(payload);
+      }
     });
   } catch (e) {
     return () => {};
@@ -275,7 +288,11 @@ export function checkInitialNotification() {
   try {
     return messaging()
       .getInitialNotification()
-      .then((m) => extractNotifPayload(m));
+      .then((m) => {
+        const p = extractNotifPayload(m);
+        if (p) console.log(`[FCM] cold-start opened by notification: conversationId=${p.conversationId}`);
+        return p;
+      });
   } catch (e) {
     return Promise.resolve(null);
   }
@@ -286,7 +303,10 @@ export function onNotificationOpened(cb) {
   try {
     return messaging().onNotificationOpenedApp((remoteMessage) => {
       const payload = extractNotifPayload(remoteMessage);
-      if (payload) cb(payload);
+      if (payload) {
+        console.log(`[FCM] notification opened while running: conversationId=${payload.conversationId}`);
+        cb(payload);
+      }
     });
   } catch (e) {
     return () => {};
@@ -294,22 +314,29 @@ export function onNotificationOpened(cb) {
 }
 
 /**
- * Android background/headless handler. Our pushes include a `notification` payload so the
- * system renders them automatically; this hook exists for future data-only messages.
- * Must be registered at module scope (see index.js).
+ * Android background/headless handler. Our pushes carry a real `notification` payload,
+ * so Android's FCM client renders the tray notification by itself when the app is
+ * backgrounded/terminated, and this JS hook is intentionally NOT invoked for those.
+ * It only fires for purely data-only messages, which we render with Notifee. Must be
+ * registered at module scope (see index.js).
  */
 export function registerBackgroundHandler() {
   try {
-    // Data-only remote messages are rendered here with Notifee so notifications
-    // display identically in foreground/background/terminated, even on devices
-    // (e.g. OPPO/ColorOS) that suppress the automatic system-tray render.
     messaging().setBackgroundMessageHandler(async (remoteMessage) => {
+      // If the message already carries a `notification` payload, Android already
+      // rendered it in the tray - creating another clone here would duplicate it.
+      if (remoteMessage && remoteMessage.notification) {
+        console.log(`[FCM] background (system-rendered notification, no JS render) type=${remoteMessage.data && remoteMessage.data.type}`);
+        return;
+      }
       try {
         const payload = extractNotifPayload(remoteMessage);
         if (payload) {
+          console.log(`[FCM] background data-only render conversationId=${payload.conversationId}`);
           await showSystemNotification(payload);
         } else if (remoteMessage && remoteMessage.data) {
           const d = remoteMessage.data;
+          console.log('[FCM] background data-only render (generic)');
           await showSystemNotification({ title: d.title || 'Tojey', message: d.body || '' });
         }
       } catch (e) {

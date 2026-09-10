@@ -9,6 +9,37 @@ const { sendPush, deactivateTokens } = require('./fcm');
 const path = require('path');
 const { upload } = require('./media');
 
+// Human-friendly one-line summary used as the FCM notification body.
+function messageSummary(m) {
+  if (!m) return '';
+  if (m.is_view_once) {
+    if (m.type === 'IMAGE' || m.type === 'VIDEO') return 'Sent you a photo/video (view once)';
+    return 'Sent you a view-once message';
+  }
+  switch (m.type) {
+    case 'TEXT':
+      return String(m.content || '').slice(0, 160);
+    case 'IMAGE':
+      return 'Sent you a photo';
+    case 'VIDEO':
+      return 'Sent you a video';
+    case 'VOICE':
+      return 'Sent you a voice message';
+    case 'FILE':
+    case 'DOCUMENT':
+      return m.file_name ? `Sent you a file: ${String(m.file_name).slice(0, 80)}` : 'Sent you a file';
+    default:
+      return 'Sent you a message';
+  }
+}
+
+// Show only the start and end of a token so logs stay debuggable without leaking FCM tokens.
+function maskToken(t) {
+  if (!t) return '';
+  if (t.length <= 12) return '***';
+  return `${t.slice(0, 8)}…${t.slice(-4)}`;
+}
+
 const app = express();
 const server = http.createServer(app);
 
@@ -306,10 +337,14 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
 
     const push = await sendPush({
       tokens,
-      // Data-only payload: the app renders the notification with Notifee in both
-      // foreground and background (setBackgroundMessageHandler), so notification
-      // appearance works identically on every device - including OPPO/ColorOS,
-      // which can suppress the OS auto-rendered tray notification.
+      // Notification + data: the `notification` payload lets Android's FCM client
+      // render the tray notification itself when the app is backgrounded/terminated,
+      // so we never depend on React Native JS waking up to show it. The `data`
+      // payload carries conversationId/senderId for open-chat navigation on tap.
+      notification: {
+        title: `${sender.display_name || sender.username} • Tojey`,
+        body,
+      },
       data: {
         type: 'tojey_notification',
         notificationId: String(notif.id),
@@ -319,10 +354,10 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
         senderName: sender.display_name || sender.username,
         receiverId: String(receiver.id),
         conversationId: String(convo.id),
-        title: `${sender.display_name || sender.username} • Tojey`,
         body,
       },
     });
+    console.log(`[FCM] offline push to user ${receiver.id}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
 
     if (push.invalidTokens.length) {
       await deactivateTokens(push.invalidTokens);
@@ -395,11 +430,22 @@ app.post('/api/devices/tokens/sendtest', authMiddleware, async (req, res) => {
 
     const push = await sendPush({
       tokens,
-      // Data-only so the app renders with Notifee even in background/terminated.
-      data: { type: 'tojey_diag', title: 'Tojey direct test', body: 'FCM reached your phone directly.' },
+      // Notification + data (true FCM notification): Android renders this in the tray
+      // when the app is backgrounded/terminated, independent of the JS background handler.
+      notification: {
+        title: 'Tojey FCM Test',
+        body: 'FCM reached your Android device.',
+      },
+      data: {
+        type: 'tojey_diag',
+        title: 'Tojey FCM Test',
+        body: 'FCM reached your Android device.',
+      },
     });
     if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-    res.json({ ok: true, sent: push.success, tokens: tokens.length, note: push.note, invalid: push.invalidTokens.length });
+    const masked = tokens.slice(0, 3).map(maskToken).join(', ');
+    console.log(`[FCM] sendtest to user ${user.id}: tokens=${tokens.length} accepted-note=${push.success ? push.messageId || 'ok' : (push.note || 'failed')} invalid=${push.invalidTokens.length} tokens=${masked}${tokens.length > 3 ? '…' : ''}`);
+    res.json({ ok: true, sent: push.success, tokens: tokens.length, accepted: push.success ? 1 : 0, invalid: push.invalidTokens.length, messageId: push.messageId || null, note: push.note });
   } catch (e) {
     console.error('devices:sendtest error', e.message);
     res.status(500).json({ error: 'Server error' });
@@ -552,6 +598,45 @@ io.on('connection', async (socket) => {
               userId: dbUser.userId,
             });
           }, 300);
+        } else {
+          // Receiver has no active socket (background/terminated/minimized): send a
+          // real FCM notification+data push so Android's own client renders the tray
+          // notification. Never fall back to JS-wake-up-rendered pushes.
+          try {
+            const tokensRes = await pool.query(
+              `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+              [otherUserId]
+            );
+            const tokens = tokensRes.rows.map((r) => r.fcm_token);
+            if (tokens.length) {
+              const banner = messageSummary(message);
+              const push = await sendPush({
+                tokens,
+                notification: {
+                  title: dbUser.displayName || dbUser.username,
+                  body: banner,
+                },
+                data: {
+                  type: 'tojey_notification',
+                  notificationId: String(message.id),
+                  id: String(message.id),
+                  senderId: String(dbUser.userId),
+                  senderUsername: dbUser.username,
+                  senderName: dbUser.displayName || dbUser.username,
+                  receiverId: String(otherUserId),
+                  conversationId: String(convo.id),
+                  body: banner,
+                },
+              });
+              console.log(`[FCM] chat push for offline user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+              if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+            } else {
+              console.log(`[FCM] offline user ${otherUserId} has no registered tokens - skipping push`);
+            }
+          } catch (pushErr) {
+            // Never break message delivery because the push failed.
+            console.error('[FCM] chat push failed:', pushErr.message);
+          }
         }
 
         callback({ ok: true, message });
