@@ -9,8 +9,9 @@ import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
-const sheetReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
-import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
+// Includes extra smiles (😁😅🤣😜😎🥳…) alongside the core set.
+const sheetReactions = ['👍', '❤️', '😂', '😁', '😅', '🤣', '😮', '😢', '😍', '😘', '🙏', '🫂', '🎉', '🔥', '💯', '👏', '🥳', '😎', '😜', '🤗', '😭', '💀', '👻', '✨', '🙌', '🫡'];
+import { absUrl, SERVER_URL, CHAT_BACKGROUND, CHAT_FALLBACK_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
@@ -27,6 +28,9 @@ const { width: APP_W, height: APP_H } = Dimensions.get('window');
 
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
+// Fixed WhatsApp-style composer palette (never the purple theme).
+const COMPOSER_BOX_COLOR = '#1e2529';
+const MIC_BUTTON_COLOR = '#00a884';
 // Emoji quick-pick strip used by the composer's emoji button (unique set).
 const emojiQuick = ['👍','❤️','😂','😮','😢','🙏','🫂','🎉','🔥','😍','👏','💯','😄','😁','😘','🤗','😅','🙃','🫡','💀','👻','🎂','⚽','🎧','☕','🚗','✌️','🙌','🤝','🥳'];
 
@@ -99,6 +103,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [contactInfo, setContactInfo] = useState(false);
   const [selMode, setSelMode] = useState(false);
   const [selSet, setSelSet] = useState(new Set());
+  const [selMenu, setSelMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
@@ -1193,8 +1198,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
-  const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
-  const composerBg = hexToRgba(theme.composerBg, 0.94);
   // Fully measured bottom stack: every bar below the list + the composer height.
   // The scroll-to-latest FAB floats just above this stack so it never overlaps
   // the composer/mic or hides the newest message.
@@ -1205,9 +1208,21 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: theme.background }]}
+      style={[styles.container, { backgroundColor: CHAT_FALLBACK_BACKGROUND }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
+      {/* Wallpaper: fixed behind the whole screen (messages scroll over it, intensity kept subtle). */}
+      {CHAT_BACKGROUND && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          <Image
+            source={typeof CHAT_BACKGROUND === 'string' ? { uri: CHAT_BACKGROUND } : CHAT_BACKGROUND}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+            fadeDuration={0}
+          />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(8,10,14,0.42)' }]} />
+        </View>
+      )}
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
         {selMode ? (
@@ -1218,6 +1233,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>
               {selSet.size} selected
             </Text>
+            <TouchableOpacity onPress={() => setSelMenu((v) => !v)} style={styles.headerIconBtn} accessibilityLabel="More options">
+              <Icon name="ellipsis-vertical" size={22} color={theme.text} />
+            </TouchableOpacity>
           </>
         ) : (
           <>
@@ -1246,6 +1264,38 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           </>
         )}
       </View>
+
+      {selMenu && (
+        <View style={styles.headerMenuOverlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setSelMenu(false)} accessibilityLabel="Close menu" />
+          <View style={[styles.headerMenu, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); replySelected(); }} accessibilityLabel="Reply to selected">
+              <Icon name="return-down-back-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Reply</Text>
+            </TouchableOpacity>
+            {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); doAction('edit', selOne); exitSelect(); }} accessibilityLabel="Edit selected">
+                <Icon name="create-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: 15 }}>Edit</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); copySelected(); }} accessibilityLabel="Copy selected">
+              <Icon name="copy-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Copy</Text>
+            </TouchableOpacity>
+            {selOne && selOne.media_url && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); downloadAndOpen(selOne); exitSelect(); }} accessibilityLabel="Save selected">
+                <Icon name="download-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: 15 }}>Save</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); deleteSelected(); }} accessibilityLabel="Delete selected">
+              <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.danger, fontSize: 15 }}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {headerMenu && (
         <View style={styles.headerMenuOverlay}>
@@ -1298,15 +1348,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Messages */}
-      <View style={[styles.msgArea, { backgroundColor: chatBg }]}>
-        {CHAT_BACKGROUND && (
-          <Image
-            source={{ uri: CHAT_BACKGROUND }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="repeat"
-            fadeDuration={0}
-          />
-        )}
+      <View style={styles.msgArea}>
         <FlatList
         ref={listRef}
         data={messages}
@@ -1336,7 +1378,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             setAtBottomNear(true);
             setPendingCount(0);
           }}
-          style={[styles.fab, { backgroundColor: theme.primary, bottom: fabBottom }]}
+          style={[styles.fab, { backgroundColor: COMPOSER_BOX_COLOR, borderColor: 'rgba(255,255,255,0.10)', borderWidth: 1, bottom: fabBottom }]}
           accessibilityLabel="Scroll to latest message"
         >
           {pendingCount > 0 && (
@@ -1469,7 +1511,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => stopRecording(false)}
-            style={[styles.recSend, { backgroundColor: theme.primary }]}
+            style={[styles.recSend, { backgroundColor: MIC_BUTTON_COLOR }]}
             accessibilityLabel="Send voice message"
           >
             <Icon name="send" size={16} color="#fff" />
@@ -1507,54 +1549,51 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </View>
       )}
 
-      {/* Composer: [emoji] [input…………] [attachment] [camera] [mic/send] */}
+      {/* Composer: [emoji] [Message……] [attach] [camera]   (separate green mic/send circle) */}
       {!recording && !selMode && (
-        <View
-          style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}
-          onLayout={(e) => setComposerH(Math.round(e.nativeEvent.layout.height))}
-        >
+        <View style={styles.composer} onLayout={(e) => setComposerH(Math.round(e.nativeEvent.layout.height))}>
           <View style={styles.composerRow}>
-            <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: showEmoji ? theme.primary : theme.inputBg }]}
-              onPress={() => { if (showAttach) setShowAttach(false); setShowEmoji(!showEmoji); inputRef.current?.focus(); }}
-              accessibilityLabel="Add emoji"
-            >
-              <Icon name="happy-outline" size={22} color={showEmoji ? '#fff' : theme.primary} />
-            </TouchableOpacity>
-            <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
+            <View style={styles.composerBox}>
+              <TouchableOpacity
+                style={styles.composerGlyph}
+                onPress={() => { if (showAttach) setShowAttach(false); setShowEmoji(!showEmoji); inputRef.current?.focus(); }}
+                accessibilityLabel="Add emoji"
+              >
+                <Icon name="happy-outline" size={24} color={showEmoji ? '#ffffff' : '#c3ccd6'} />
+              </TouchableOpacity>
               <TextInput
                 ref={inputRef}
                 value={text}
                 onChangeText={onType}
-                placeholder="Type a message"
-                placeholderTextColor={theme.textSecondary}
-                style={[styles.input, { color: theme.text }]}
+                placeholder="Message"
+                placeholderTextColor="#8a949e"
+                style={[styles.input, { color: '#edf1f4' }]}
                 multiline
                 onPressIn={reopenKeyboard}
                 onFocus={ensureKeyboard}
               />
+              <TouchableOpacity
+                style={styles.composerGlyph}
+                onPress={() => { if (showEmoji) setShowEmoji(false); setShowAttach(!showAttach); }}
+                accessibilityLabel="Add attachments"
+              >
+                <Icon name="paperclip" size={22} color={showAttach ? '#ffffff' : '#c3ccd6'} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.composerGlyph}
+                onPress={() => pickMedia('camera')}
+                accessibilityLabel="Open camera"
+              >
+                <Icon name="camera-outline" size={22} color="#c3ccd6" />
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
-              onPress={() => { if (showEmoji) setShowEmoji(false); setShowAttach(!showAttach); }}
-              accessibilityLabel="Add attachments"
-            >
-              <Icon name="paperclip" size={20} color={showAttach ? '#fff' : theme.primary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
-              onPress={() => pickMedia('camera')}
-              accessibilityLabel="Open camera"
-            >
-              <Icon name="camera-outline" size={20} color={theme.primary} />
-            </TouchableOpacity>
             {text.trim() ? (
-              <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
-                <Icon name="send" size={18} color="#fff" />
+              <TouchableOpacity style={[styles.micBtn, { backgroundColor: MIC_BUTTON_COLOR }]} onPress={sendText} accessibilityLabel="Send message">
+                <Icon name="send" size={21} color="#fff" />
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity style={[styles.micBtn, { backgroundColor: theme.primary }]} onPress={startRecording} accessibilityLabel="Record voice message">
-                <Icon name="mic" size={20} color="#fff" />
+              <TouchableOpacity style={[styles.micBtn, { backgroundColor: MIC_BUTTON_COLOR }]} onPress={startRecording} accessibilityLabel="Record voice message">
+                <Icon name="mic" size={26} color="#fff" />
               </TouchableOpacity>
             )}
           </View>
@@ -1802,7 +1841,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     : 'Message';
 
   return (
-    <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
+    <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start', marginTop: grouped ? 2 : 4 }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
         {/* Swipe affordance revealed behind the bubble (reply, or edit for your own text) */}
         <View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)' }]}>
@@ -2069,15 +2108,6 @@ function isEmojiOnly(s) {
   return words.length <= 4;
 }
 
-function hexToRgba(hex, alpha) {
-  if (!hex || typeof hex !== 'string') return hex;
-  let h = hex.replace('#', '');
-  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
-  if (h.length !== 6) return hex;
-  const n = parseInt(h, 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
@@ -2092,8 +2122,8 @@ const styles = StyleSheet.create({
   headerStatus: { fontSize: 12, marginLeft: 4 },
   messageList: { padding: 14, paddingBottom: 18 },
   msgArea: { flex: 1, overflow: 'hidden' },
-  msgRow: { flexDirection: 'row', marginVertical: 3 },
-  bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
+  msgRow: { flexDirection: 'row', marginVertical: 0 },
+  bubble: { paddingHorizontal: 13, paddingVertical: 7, borderRadius: 16, overflow: 'hidden' },
   bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, paddingHorizontal: 4, paddingVertical: 2, overflow: 'visible' },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
@@ -2118,21 +2148,20 @@ const styles = StyleSheet.create({
   avatarLgImg: { width: '100%', height: '100%' },
   avatarLargeText: { color: '#fff', fontSize: 32, fontWeight: '700' },
   contactName: { fontSize: 18, fontWeight: '700', marginTop: 14 },
-  composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
+  composer: { paddingHorizontal: 8, paddingTop: 6, paddingBottom: 8 },
   selBar: { borderTopWidth: 1, paddingVertical: 10, paddingHorizontal: 8 },
   selBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   selBtn: { minWidth: 64, alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 8, paddingHorizontal: 10 },
-  composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  composerRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  composerBox: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 2, minHeight: 58, maxHeight: 132, borderRadius: 29, backgroundColor: COMPOSER_BOX_COLOR, paddingHorizontal: 10 },
+  composerGlyph: { width: 40, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   emojiPickBtn: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
   attachBtn: { alignItems: 'center', marginRight: 20 },
   attachIcon: { width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   attachLabel: { fontSize: 12, marginTop: 6 },
-  inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
-  input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
-  sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-  micBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
+  input: { flex: 1, fontSize: 15, paddingVertical: 8, maxHeight: 100, paddingHorizontal: 4 },
+  micBtn: { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#000000', shadowOpacity: 0.25, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
   micBtnRec: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: '#E53935', shadowOpacity: 0.35, shadowRadius: 7, shadowOffset: { width: 0, height: 3 } },
   recBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1 },
   recCancel: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(229,57,53,0.08)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
