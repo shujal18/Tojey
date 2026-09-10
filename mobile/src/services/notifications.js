@@ -26,7 +26,7 @@ export function extractNotifPayload(remoteMessage) {
     receiverId: num(d.receiverId),
     conversationId: num(d.conversationId),
     message: d.body || (remoteMessage.notification && remoteMessage.notification.body) || '',
-    title: (remoteMessage.notification && remoteMessage.notification.title) || '',
+    title: d.title || (remoteMessage.notification && remoteMessage.notification.title) || '',
   };
 }
 
@@ -300,7 +300,22 @@ export function onNotificationOpened(cb) {
  */
 export function registerBackgroundHandler() {
   try {
-    messaging().setBackgroundMessageHandler(async () => {});
+    // Data-only remote messages are rendered here with Notifee so notifications
+    // display identically in foreground/background/terminated, even on devices
+    // (e.g. OPPO/ColorOS) that suppress the automatic system-tray render.
+    messaging().setBackgroundMessageHandler(async (remoteMessage) => {
+      try {
+        const payload = extractNotifPayload(remoteMessage);
+        if (payload) {
+          await showSystemNotification(payload);
+        } else if (remoteMessage && remoteMessage.data) {
+          const d = remoteMessage.data;
+          await showSystemNotification({ title: d.title || 'Tojey', message: d.body || '' });
+        }
+      } catch (e) {
+        console.warn('background render failed:', e.message);
+      }
+    });
   } catch (e) {
     console.warn('Background message handler unavailable:', e.message);
   }

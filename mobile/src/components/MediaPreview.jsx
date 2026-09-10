@@ -13,7 +13,7 @@ import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
 const MAX_OUT = 1440;
 const MAX_IMGVIEW_PX = 8000000;
 const MIN_CROP = 64;
-const DRAW_TOOLBAR_H = 176;
+const DRAW_TOOLBAR_H = 72;
 
 export default function MediaPreview({ uri, type, fileName, mimeType, theme, onCancel, onSend }) {
   const isVideo = type === 'VIDEO';
@@ -306,8 +306,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             eraserRef={eraserRef}
             colorRef={colorRef}
             brushRef={brushRef}
-            maxHeight={winH - DRAW_TOOLBAR_H * 2 - topInset}
-            style={{ padding: 4 }}
+            maxHeight={winH - DRAW_TOOLBAR_H - topInset}
           />
         </View>
       );

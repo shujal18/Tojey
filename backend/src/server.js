@@ -306,7 +306,10 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
 
     const push = await sendPush({
       tokens,
-      notification: { title: `${sender.display_name || sender.username} • Tojey`, body },
+      // Data-only payload: the app renders the notification with Notifee in both
+      // foreground and background (setBackgroundMessageHandler), so notification
+      // appearance works identically on every device - including OPPO/ColorOS,
+      // which can suppress the OS auto-rendered tray notification.
       data: {
         type: 'tojey_notification',
         notificationId: String(notif.id),
@@ -316,6 +319,7 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
         senderName: sender.display_name || sender.username,
         receiverId: String(receiver.id),
         conversationId: String(convo.id),
+        title: `${sender.display_name || sender.username} • Tojey`,
         body,
       },
     });
@@ -391,8 +395,8 @@ app.post('/api/devices/tokens/sendtest', authMiddleware, async (req, res) => {
 
     const push = await sendPush({
       tokens,
-      notification: { title: 'Tojey direct test', body: 'FCM reached your phone directly.' },
-      data: { type: 'tojey_diag', body: 'FCM reached your phone directly.' },
+      // Data-only so the app renders with Notifee even in background/terminated.
+      data: { type: 'tojey_diag', title: 'Tojey direct test', body: 'FCM reached your phone directly.' },
     });
     if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
     res.json({ ok: true, sent: push.success, tokens: tokens.length, note: push.note, invalid: push.invalidTokens.length });

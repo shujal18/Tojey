@@ -30,6 +30,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [replyingTo, setReplyingTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [reactionMenu, setReactionMenu] = useState(null);
+  const [headerMenu, setHeaderMenu] = useState(false);
+  const [contactInfo, setContactInfo] = useState(false);
+  const [selMode, setSelMode] = useState(false);
+  const [selSet, setSelSet] = useState(new Set());
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
@@ -57,6 +61,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
   const otherUserId = safeOtherUser.id;
   const otherUserName = safeOtherUser.display_name || safeOtherUser.username || 'Unknown';
+  const otherUsername = safeOtherUser.username || otherUserName;
+  const otherUserBio = safeOtherUser.bio || '';
   const otherUserAvatar = safeOtherUser.profile_pic_url || '';
   const otherUserOnline = safeOtherUser.online ?? false;
   const otherUserLastSeen = safeOtherUser.last_seen ?? null;
@@ -148,10 +154,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         voicePlaying={playingVoiceId === item.id}
         voiceProgress={playingVoiceId === item.id ? voiceProgress : 0}
         onPlayVoice={toggleVoicePlayback}
+        selMode={selMode}
+        selActive={selSet.has(item.id)}
+        onSelectPress={() => toggleSelect(item.id)}
       />
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect]);
 
   const onType = (t) => {
     setText(t);
@@ -607,6 +616,38 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     else if (action === 'save') { if (message && message.media_url) downloadAndOpen(message); }
   };
 
+  const exitSelect = () => { setSelMode(false); setSelSet(new Set()); };
+
+  const toggleSelect = useCallback((id) => {
+    setSelSet((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearChatLocal = () => {
+    setMessages([]);
+    setReplyingTo(null);
+    setEditing(null);
+    setText('');
+    clearConversationCache(currentUser.id, otherUserId);
+    setSelMode(false);
+    setSelSet(new Set());
+  };
+
+  const copySelected = () => {
+    const parts = messages
+      .filter((m) => selSet.has(m.id) && m.type === 'TEXT' && m.content)
+      .map((m) => m.content)
+      .join('\n');
+    if (parts) Clipboard.setString(parts);
+    exitSelect();
+  };
+
+  const selectedMsgs = messages.filter((m) => selSet.has(m.id));
+
   const sendFile = (asset) => {
     if (!asset || !asset.uri) return;
     const fileName = asset.name || `file_${Date.now()}`;
@@ -968,26 +1009,120 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
     >
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
-        <TouchableOpacity onPress={onBack} style={styles.backBtn}>
-          <Icon name="chevron-back" size={28} color={theme.primary} />
-        </TouchableOpacity>
-        <View style={[styles.avatarSmall, { backgroundColor: otherUserId === 1 ? theme.primary : theme.primaryDeep }]}>
-          {otherUserAvatar ? (
-            <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarImg} />
-          ) : (
-            <Text style={styles.avatarSmallText}>{otherUserName[0].toUpperCase()}</Text>
-          )}
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.headerName, { color: theme.text }]}>{otherUserName}</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            {typing && <Icon name="pulse" size={12} color={theme.primary} />}
-            <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
-              {headerStatus}
-            </Text>
+        {selMode ? (
+          <>
+            <TouchableOpacity onPress={exitSelect} style={styles.backBtn} accessibilityLabel="Cancel selection">
+              <Icon name="close" size={26} color={theme.primary} />
+            </TouchableOpacity>
+            <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>{selSet.size} selected</Text>
+            <TouchableOpacity onPress={copySelected} style={styles.headerIconBtn} accessibilityLabel="Copy selected" disabled={!selSet.size}>
+              <Icon name="copy-outline" size={20} color={selSet.size ? theme.primary : theme.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                if (!selSet.size) return;
+                Alert.alert(`Delete ${selSet.size} message(s)?`, 'Delete for everyone?', [
+                  { text: 'For me', onPress: () => { selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); } },
+                  { text: 'For everyone', style: 'destructive', onPress: () => { selectedMsgs.forEach((m) => m.sender_id === currentUser.id && deleteMessage(m, 'everyone')); exitSelect(); } },
+                  { text: 'Cancel', style: 'cancel' },
+                ]);
+              }}
+              style={styles.headerIconBtn}
+              accessibilityLabel="Delete selected"
+              disabled={!selSet.size}
+            >
+              <Icon name="trash-outline" size={20} color={selSet.size ? theme.danger : theme.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                const last = selectedMsgs[selectedMsgs.length - 1];
+                if (last) { setReplyingTo(last); }
+                exitSelect();
+              }}
+              style={styles.headerIconBtn}
+              accessibilityLabel="Reply to selected"
+              disabled={!selSet.size}
+            >
+              <Icon name="return-down-back-outline" size={20} color={selSet.size ? theme.primary : theme.textSecondary} />
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+              <Icon name="chevron-back" size={28} color={theme.primary} />
+            </TouchableOpacity>
+            <View style={[styles.avatarSmall, { backgroundColor: otherUserId === 1 ? theme.primary : theme.primaryDeep }]}>
+              {otherUserAvatar ? (
+                <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarImg} />
+              ) : (
+                <Text style={styles.avatarSmallText}>{otherUserName[0].toUpperCase()}</Text>
+              )}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.headerName, { color: theme.text }]}>{otherUserName}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {typing && <Icon name="pulse" size={12} color={theme.primary} />}
+                <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
+                  {headerStatus}
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity onPress={() => setHeaderMenu((v) => !v)} style={styles.headerIconBtn} accessibilityLabel="Chat options">
+              <Icon name="ellipsis-vertical" size={22} color={theme.text} />
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+
+      {headerMenu && (
+        <View style={styles.headerMenuOverlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setHeaderMenu(false)} accessibilityLabel="Close menu" />
+          <View style={[styles.headerMenu, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setHeaderMenu(false); setContactInfo(true); }} accessibilityLabel="Contact info">
+              <Icon name="person-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Contact info</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setHeaderMenu(false); setSelMode(true); }} accessibilityLabel="Select messages">
+              <Icon name="checkmark-done-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Select messages</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerMenuItem}
+              onPress={() => {
+                setHeaderMenu(false);
+                Alert.alert('Clear chat', 'Remove all messages on this device?', [
+                  { text: 'Clear', style: 'destructive', onPress: clearChatLocal },
+                  { text: 'Cancel', style: 'cancel' },
+                ]);
+              }}
+              accessibilityLabel="Clear chat"
+            >
+              <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.danger, fontSize: 15 }}>Clear chat</Text>
+            </TouchableOpacity>
           </View>
         </View>
-      </View>
+      )}
+
+      {contactInfo && (
+        <View style={styles.headerMenuOverlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setContactInfo(false)} accessibilityLabel="Close contact info" />
+          <View style={[styles.contactSheet, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <View style={[styles.avatarLarge, { backgroundColor: theme.primaryDeep }]}>
+              {otherUserAvatar ? <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarLgImg} /> : <Text style={styles.avatarLargeText}>{otherUserName[0].toUpperCase()}</Text>}
+            </View>
+            <Text style={[styles.contactName, { color: theme.text }]}>{otherUserName}</Text>
+            <Text style={{ color: theme.textSecondary, fontSize: 13, marginTop: 2 }}>@{otherUsername}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+              <Icon name={isOnline ? 'radio-button-on' : 'time-outline'} size={14} color={isOnline ? theme.online : theme.textSecondary} />
+              <Text style={{ color: theme.textSecondary, fontSize: 13, marginLeft: 5 }}>{headerStatus}</Text>
+            </View>
+            {!!otherUserBio && (
+              <Text style={{ color: theme.text, fontSize: 14, marginTop: 14, textAlign: 'center' }}>{otherUserBio}</Text>
+            )}
+          </View>
+        </View>
+      )}
 
       {/* Messages */}
       <FlatList
@@ -1304,7 +1439,16 @@ function formatBytes(b) {
   return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
+function dedupeReactions(reactions) {
+  const map = new Map();
+  (reactions || []).forEach((r) => {
+    if (!r || !r.reaction) return;
+    map.set(r.reaction, (map.get(r.reaction) || 0) + 1);
+  });
+  return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
+}
+
+function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
@@ -1356,6 +1500,10 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
   const lastTap = useRef(0);
   const singleTimer = useRef(null);
   const handlePress = () => {
+    if (selMode) {
+      onSelectPress && onSelectPress(message);
+      return;
+    }
     const now = Date.now();
     if (now - lastTap.current < 300) {
       clearTimeout(singleTimer.current);
@@ -1397,7 +1545,7 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
               ]}
               onPress={handlePress}
-              onLongPress={() => { clearTimeout(singleTimer.current); onLongPress(message); }}
+              onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); }}
               delayLongPress={350}
             >
               {message.is_deleted_for_everyone ? (
@@ -1541,14 +1689,30 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
             onPress={() => onLongPress(message)}
             style={[
               styles.reactionBadge,
-              { backgroundColor: theme.primaryLight },
+              { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
               isSent ? { right: -8 } : { left: -8 },
             ]}
           >
-            {message.reactions.map((r, i) => (
-              <Text key={i} style={{ fontSize: 11 }}>{r.reaction}</Text>
+            {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
+              <View key={i} style={styles.reactionBadgeItem}>
+                <Text style={{ fontSize: 12 }}>{emoji}</Text>
+                {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
+              </View>
             ))}
           </TouchableOpacity>
+        )}
+        {selMode && (
+          <View
+            style={[
+              styles.selDot,
+              isSent ? styles.selDotSent : styles.selDotRecv,
+              { borderColor: selActive ? theme.primary : theme.border },
+              selActive ? { backgroundColor: theme.primary } : { backgroundColor: 'rgba(0,0,0,0.35)' },
+            ]}
+            pointerEvents="none"
+          >
+            {selActive ? <Icon name="checkmark" size={11} color="#fff" /> : null}
+          </View>
         )}
         </View>
       </View>
@@ -1639,7 +1803,21 @@ const styles = StyleSheet.create({
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
-  reactionBadge: { position: 'absolute', bottom: -8, borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, flexDirection: 'row', zIndex: 5, elevation: 3 },
+  reactionBadge: { position: 'absolute', bottom: -8, borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+  reactionBadgeItem: { flexDirection: 'row', alignItems: 'center' },
+  reactionBadgeCount: { fontSize: 10, marginLeft: 2 },
+  selDot: { position: 'absolute', top: 8, width: 22, height: 22, borderRadius: 11, borderWidth: 2, alignItems: 'center', justifyContent: 'center', zIndex: 6 },
+  selDotSent: { right: -12 },
+  selDotRecv: { left: -12 },
+  headerIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
+  headerMenuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, justifyContent: 'flex-start' },
+  headerMenu: { alignSelf: 'flex-end', marginTop: 62, marginRight: 8, borderRadius: 14, minWidth: 200, paddingVertical: 6, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
+  headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
+  contactSheet: { alignSelf: 'center', marginTop: 90, marginHorizontal: 40, borderRadius: 20, paddingVertical: 26, paddingHorizontal: 24, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, shadowOffset: { width: 0, height: 8 }, elevation: 12 },
+  avatarLarge: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  avatarLgImg: { width: '100%', height: '100%' },
+  avatarLargeText: { color: '#fff', fontSize: 32, fontWeight: '700' },
+  contactName: { fontSize: 18, fontWeight: '700', marginTop: 14 },
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
