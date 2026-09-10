@@ -32,7 +32,8 @@
             tools:replace="android:resource" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="tojey-messages" />
+            android:value="tojey-messages"
+            tools:replace="android:value" />
 
         <activity
             android:name=".MainActivity"
