@@ -2,11 +2,14 @@ import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from '
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
-  Animated, PanResponder, Dimensions,
+  Animated, PanResponder, Dimensions, ScrollView,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
-import { quickReactions, reactionPopRow } from '../theme';
+import { reactionPopRow } from '../theme';
+
+// Full reaction set shown when the + on the reaction bar is tapped (reactions only).
+const sheetReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
 import { absUrl, SERVER_URL } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
@@ -696,6 +699,30 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     exitSelect();
   };
 
+  const deleteSelected = () => {
+    if (!selSet.size) return;
+    const anyOwn = selectedMsgs.some((m) => m.sender_id === currentUser.id);
+    const opts = [
+      { text: 'For me', onPress: () => { selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); } },
+    ];
+    if (anyOwn) {
+      opts.push({
+        text: 'For everyone', style: 'destructive',
+        onPress: () => { selectedMsgs.forEach((m) => m.sender_id === currentUser.id && deleteMessage(m, 'everyone')); exitSelect(); },
+      });
+    }
+    opts.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert(`Delete ${selSet.size} message(s)?`, anyOwn ? 'Delete for everyone?' : 'Delete from this chat?', opts);
+  };
+
+  const replySelected = () => {
+    const last = selectedMsgs[selectedMsgs.length - 1];
+    if (last) setReplyingTo(last);
+    exitSelect();
+  };
+
+  const selOne = selectedMsgs.length === 1 ? selectedMsgs[0] : null;
+
   const selectedMsgs = messages.filter((m) => selSet.has(m.id));
 
   const sendFile = (asset) => {
@@ -1064,37 +1091,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <TouchableOpacity onPress={exitSelect} style={styles.backBtn} accessibilityLabel="Cancel selection">
               <Icon name="close" size={26} color={theme.primary} />
             </TouchableOpacity>
-            <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>{selSet.size} selected</Text>
-            <TouchableOpacity onPress={copySelected} style={styles.headerIconBtn} accessibilityLabel="Copy selected" disabled={!selSet.size}>
-              <Icon name="copy-outline" size={20} color={selSet.size ? theme.primary : theme.textSecondary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => {
-                if (!selSet.size) return;
-                Alert.alert(`Delete ${selSet.size} message(s)?`, 'Delete for everyone?', [
-                  { text: 'For me', onPress: () => { selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); } },
-                  { text: 'For everyone', style: 'destructive', onPress: () => { selectedMsgs.forEach((m) => m.sender_id === currentUser.id && deleteMessage(m, 'everyone')); exitSelect(); } },
-                  { text: 'Cancel', style: 'cancel' },
-                ]);
-              }}
-              style={styles.headerIconBtn}
-              accessibilityLabel="Delete selected"
-              disabled={!selSet.size}
-            >
-              <Icon name="trash-outline" size={20} color={selSet.size ? theme.danger : theme.textSecondary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => {
-                const last = selectedMsgs[selectedMsgs.length - 1];
-                if (last) { setReplyingTo(last); }
-                exitSelect();
-              }}
-              style={styles.headerIconBtn}
-              accessibilityLabel="Reply to selected"
-              disabled={!selSet.size}
-            >
-              <Icon name="return-down-back-outline" size={20} color={selSet.size ? theme.primary : theme.textSecondary} />
-            </TouchableOpacity>
+            <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>
+              {selSet.size} selected
+            </Text>
           </>
         ) : (
           <>
@@ -1132,21 +1131,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <Icon name="person-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
               <Text style={{ color: theme.text, fontSize: 15 }}>Contact info</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setHeaderMenu(false); setSelMode(true); }} accessibilityLabel="Select messages">
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { Keyboard.dismiss(); setShowAttach(false); setHeaderMenu(false); setSelMode(true); }} accessibilityLabel="Select messages">
               <Icon name="checkmark-done-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
               <Text style={{ color: theme.text, fontSize: 15 }}>Select messages</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.headerMenuItem}
-              onPress={() => {
-                setHeaderMenu(false);
-                const last = messages[messages.length - 1];
-                if (last) setReactionMenu(last);
-              }}
-              accessibilityLabel="Message actions"
-            >
-              <Icon name="ellipsis-horizontal" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: 15 }}>Reply · Edit · Copy · Delete</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.headerMenuItem}
@@ -1227,31 +1214,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </TouchableOpacity>
       )}
 
-      {/* Action menu */}
+      {/* More emojis (reached via the + on the reaction bar). Reactions only. */}
       {reactionMenu && (
         <View style={styles.menuOverlay}>
           <TouchableOpacity style={styles.menuBackdrop} onPress={() => setReactionMenu(null)} />
           <View style={[styles.menu, { backgroundColor: theme.card }]}>
-            <Text style={[styles.menuTitle, { color: theme.textSecondary }]}>Message actions</Text>
+            <Text style={[styles.menuTitle, { color: theme.textSecondary }]}>Reactions</Text>
             <View style={styles.reactionRow}>
-              {quickReactions.map((r) => (
+              {sheetReactions.map((r) => (
                 <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
                   <Text style={{ fontSize: 22 }}>{r}</Text>
                 </TouchableOpacity>
               ))}
-            </View>
-            <View style={styles.actionRow}>
-              <ActionBtn label="Reply" icon="return-down-back-outline" onPress={() => doAction('reply', reactionMenu)} theme={theme} />
-              <ActionBtn label="Like" icon="heart-outline" onPress={() => reactTo(reactionMenu.id, '❤️')} theme={theme} />
-              <ActionBtn label="Save" icon="download-outline" onPress={() => doAction('save', reactionMenu)} theme={theme} visible={!!reactionMenu.media_url} />
-            </View>
-            <View style={styles.actionRow}>
-              <ActionBtn label="Edit" icon="create-outline" onPress={() => doAction('edit', reactionMenu)} theme={theme} visible={reactionMenu.sender_id === currentUser.id && reactionMenu.type === 'TEXT'} />
-              <ActionBtn label="Copy" icon="copy-outline" onPress={() => { if (reactionMenu.content) Clipboard.setString(reactionMenu.content); }} theme={theme} visible={reactionMenu.type === 'TEXT' && !!reactionMenu.content} />
-            </View>
-            <View style={styles.actionRow}>
-              <ActionBtn label="Delete for me" icon="trash-outline" onPress={() => doAction('deleteMe', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
-              <ActionBtn label="Delete for all" icon="trash" onPress={() => doAction('deleteAll', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
             </View>
           </View>
         </View>
@@ -1325,8 +1299,25 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </View>
       )}
 
+      {/* Selection action bar: separate Reply / Edit / Copy / Save / Delete buttons */}
+      {selMode && (
+        <View style={[styles.selBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.selBarRow}>
+            <SelBtn label="Reply" icon="return-down-back-outline" onPress={replySelected} disabled={!selSet.size} theme={theme} />
+            {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
+              <SelBtn label="Edit" icon="create-outline" onPress={() => { doAction('edit', selOne); exitSelect(); }} theme={theme} />
+            )}
+            <SelBtn label="Copy" icon="copy-outline" onPress={copySelected} disabled={!selSet.size} theme={theme} />
+            {selOne && selOne.media_url && (
+              <SelBtn label="Save" icon="download-outline" onPress={() => { downloadAndOpen(selOne); exitSelect(); }} theme={theme} />
+            )}
+            <SelBtn label="Delete" icon="trash-outline" onPress={deleteSelected} disabled={!selSet.size} theme={theme} danger />
+          </ScrollView>
+        </View>
+      )}
+
       {/* Recording UI */}
-      {recording && (
+      {recording && !selMode && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
           <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
             <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
@@ -1350,7 +1341,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Attach options: Photo · Camera · Files */}
-      {showAttach && !recording && (
+      {showAttach && !recording && !selMode && (
         <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
           <AttachBtn label="Photo" icon="image-outline" color={theme.primary} onPress={() => pickMedia('photo')} theme={theme} />
           <AttachBtn label="Camera" icon="camera-outline" color={theme.primaryDeep} onPress={() => pickMedia('camera')} theme={theme} />
@@ -1359,7 +1350,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Composer */}
-      {!recording && (
+      {!recording && !selMode && (
         <View style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}>
           <View style={styles.composerRow}>
             <TouchableOpacity
@@ -1426,12 +1417,16 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   );
 }
 
-function ActionBtn({ label, icon, onPress, theme, danger, visible = true }) {
-  if (!visible) return null;
+function SelBtn({ label, icon, onPress, theme, danger, disabled }) {
   return (
-    <TouchableOpacity onPress={onPress} style={[styles.actionBtn, { backgroundColor: theme.primaryLight }]}>
-      <Icon name={icon} size={16} color={danger ? theme.danger : theme.primary} />
-      <Text style={{ color: danger ? theme.danger : theme.primary, fontWeight: '600', fontSize: 13, marginLeft: 6 }}>
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={disabled}
+      style={[styles.selBtn, { backgroundColor: danger ? 'rgba(229,57,53,0.12)' : theme.primaryLight }]}
+      accessibilityLabel={label}
+    >
+      <Icon name={icon} size={17} color={disabled ? theme.textSecondary : (danger ? theme.danger : theme.primary)} />
+      <Text style={{ color: disabled ? theme.textSecondary : (danger ? theme.danger : theme.primary), fontWeight: '700', fontSize: 12, marginTop: 2 }}>
         {label}
       </Text>
     </TouchableOpacity>
@@ -1915,6 +1910,9 @@ const styles = StyleSheet.create({
   avatarLargeText: { color: '#fff', fontSize: 32, fontWeight: '700' },
   contactName: { fontSize: 18, fontWeight: '700', marginTop: 14 },
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
+  selBar: { borderTopWidth: 1, paddingVertical: 10, paddingHorizontal: 8 },
+  selBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  selBtn: { minWidth: 64, alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 8, paddingHorizontal: 10 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
@@ -1964,10 +1962,8 @@ const styles = StyleSheet.create({
   },
   menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
   menuTitle: { fontSize: 13, fontWeight: '700' },
-  reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },
+  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, marginVertical: 12 },
   reactionBtn: { borderRadius: 14, width: 48, height: 44, alignItems: 'center', justifyContent: 'center' },
-  actionRow: { flexDirection: 'row', gap: 10, marginVertical: 6 },
-  actionBtn: { flex: 1, borderRadius: 10, paddingVertical: 12, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },

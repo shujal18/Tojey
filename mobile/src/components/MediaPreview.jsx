@@ -288,7 +288,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             eraserRef={eraserRef}
             colorRef={colorRef}
             brushRef={brushRef}
-            maxHeight={winH - DRAW_TOOLBAR_H - topInset}
+            maxHeight={winH - topInset}
           />
         </View>
       );
@@ -484,6 +484,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               brush={brush}
               setColor={setColor}
               setBrush={setBrush}
+              style={{ backgroundColor: 'rgba(18,18,26,0.72)' }}
               onUndo={() => {
                 const cur = strokesRef.current;
                 if (!cur.length) return;

@@ -299,10 +299,10 @@ export function DrawableImage({
 export function DrawingToolbar({
   theme, color, brush, setColor, setBrush,
   onUndo, onRedo, onClear, onDone, onCancel, busy, accent,
-  eraser, setEraser, canUndo, canRedo,
+  eraser, setEraser, canUndo, canRedo, style,
 }) {
   return (
-    <View style={[styles.toolbar, { backgroundColor: theme.card }]}>
+    <View style={[styles.toolbar, { backgroundColor: theme.card }, style]}>
       <View style={styles.toolRow}>
         {onCancel && (
           <TouchableOpacity onPress={onCancel} accessibilityLabel="Exit drawing" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
