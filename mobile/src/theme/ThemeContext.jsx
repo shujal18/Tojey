@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { CHAT_COLORS, hexBlend } from '.';
 
 const ThemeContext = createContext();
 
@@ -48,15 +49,25 @@ export const darkTheme = {
 };
 
 const THEME_KEY = '@tojey_theme';
+const CHAT_COLOR_KEY = '@tojey_chatColor';
 
 export function ThemeProvider({ children }) {
-  const [mode, setMode] = useState('light');
+  const [mode, setMode] = useState('dark');
+  const [chatColorId, setChatColorId] = useState('default');
   const [booted, setBooted] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const saved = await AsyncStorage.getItem(THEME_KEY);
-      if (saved) setMode(saved);
+      try {
+        const [savedMode, savedColor] = await Promise.all([
+          AsyncStorage.getItem(THEME_KEY),
+          AsyncStorage.getItem(CHAT_COLOR_KEY),
+        ]);
+        if (savedMode) setMode(savedMode);
+        if (savedColor) setChatColorId(savedColor);
+      } catch (e) {
+        console.warn('theme load failed', e);
+      }
       setBooted(true);
     })();
   }, []);
@@ -66,10 +77,25 @@ export function ThemeProvider({ children }) {
     AsyncStorage.setItem(THEME_KEY, m).catch(() => {});
   };
 
-  const theme = mode === 'dark' ? darkTheme : lightTheme;
+  const changeChatColor = (id) => {
+    setChatColorId(id);
+    AsyncStorage.setItem(CHAT_COLOR_KEY, id).catch(() => {});
+  };
+
+  const chatColor = CHAT_COLORS.find((c) => c.id === chatColorId) || CHAT_COLORS[0];
+
+  const theme = useMemo(() => {
+    const base = mode === 'dark' ? darkTheme : lightTheme;
+    return {
+      ...base,
+      sentBubble: chatColor.sent,
+      sentText: '#FFFFFF',
+      receivedBubble: hexBlend(base.receivedBubble, chatColor.sent, mode === 'dark' ? 0.16 : 0.09),
+    };
+  }, [mode, chatColor]);
 
   return (
-    <ThemeContext.Provider value={{ theme, mode, setMode: changeMode, booted }}>
+    <ThemeContext.Provider value={{ theme, mode, setMode: changeMode, chatColorId, setChatColor: changeChatColor, booted }}>
       {children}
     </ThemeContext.Provider>
   );
@@ -77,6 +103,6 @@ export function ThemeProvider({ children }) {
 
 export function useTheme() {
   const context = useContext(ThemeContext);
-  if (!context) return { theme: lightTheme, mode: 'light', setMode: () => {}, booted: false };
+  if (!context) return { theme: lightTheme, mode: 'dark', setMode: () => {}, chatColorId: 'default', setChatColor: () => {}, booted: false };
   return context;
 }

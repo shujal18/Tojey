@@ -6,13 +6,14 @@ import {
 import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
+import { CHAT_COLORS } from '../theme';
 import { Icon } from '../components/AppIcon';
 import { SERVER_URL, absUrl } from '../config';
 import { ensureMediaPermission } from '../services/permissions';
 import RNFetchBlob from 'rn-fetch-blob';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
-  const { theme, mode, setMode } = useTheme();
+  const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
   const [readReceipts, setReadReceipts] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [sound, setSound] = useState(true);
@@ -204,6 +205,24 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </View>
       </Section>
 
+      <Section title="Chat Color" theme={theme}>
+        <View style={styles.chatColorRow}>
+          {CHAT_COLORS.map((c) => (
+            <TouchableOpacity
+              key={c.id}
+              onPress={() => setChatColor(c.id)}
+              style={[styles.chatColorItem, { borderColor: chatColorId === c.id ? theme.primary : 'transparent' }]}
+              accessibilityLabel={`Chat color ${c.name}`}
+            >
+              <View style={[styles.chatColorCircle, { backgroundColor: c.sent }]}>
+                {chatColorId === c.id && <Icon name="checkmark" size={16} color="#fff" />}
+              </View>
+              <Text style={{ color: theme.textSecondary, fontSize: 11, marginTop: 4 }}>{c.name}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </Section>
+
       <Section title="Privacy" theme={theme}>
         <SettingRow label="Read receipts" icon="eye-outline" theme={theme}>
           <Switch value={readReceipts} onValueChange={setReadReceipts} trackColor={{ true: theme.primary }} />
@@ -339,6 +358,9 @@ const styles = StyleSheet.create({
   },
   rowLabel: { flex: 1, fontSize: 14 },
   themeRow: { flexDirection: 'row', gap: 8, padding: 14, borderBottomWidth: 1 },
+  chatColorRow: { flexDirection: 'row', flexWrap: 'wrap', padding: 14, gap: 12 },
+  chatColorItem: { alignItems: 'center', width: 56, borderWidth: 2, borderRadius: 12, paddingVertical: 8 },
+  chatColorCircle: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   themeBtn: {
     flex: 1, paddingVertical: 10, borderRadius: 12,
     alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 6,

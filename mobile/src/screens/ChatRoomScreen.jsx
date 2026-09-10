@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
-import { quickReactions } from '../theme';
+import { quickReactions, reactionPopRow } from '../theme';
 import { absUrl, SERVER_URL } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
@@ -20,7 +20,7 @@ import {
   playVoice, stopVoicePlayback, resetVoice,
 } from '../services/voice';
 
-const { width: APP_W } = Dimensions.get('window');
+const { width: APP_W, height: APP_H } = Dimensions.get('window');
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -30,6 +30,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [replyingTo, setReplyingTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [reactionMenu, setReactionMenu] = useState(null);
+  const [reactionPop, setReactionPop] = useState(null);
   const [headerMenu, setHeaderMenu] = useState(false);
   const [contactInfo, setContactInfo] = useState(false);
   const [selMode, setSelMode] = useState(false);
@@ -102,7 +103,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   }, [mediaItems]);
 
   const handleContentSizeChange = useCallback(() => {
-    if (atBottomRef.current && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
+    if ((atBottomRef.current || kbVisibleRef.current) && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
   }, []);
 
   const handleScroll = useCallback((e) => {
@@ -118,7 +119,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
-  const handleLongPress = useCallback((msg) => setReactionMenu(msg), []);
+  const REACTPOP_H = 60;
+  const handleLongPress = useCallback((msg, evt) => {
+    if (!msg) return;
+    const pageX = (evt && evt.nativeEvent && evt.nativeEvent.pageX) || APP_W / 2;
+    const pageY = (evt && evt.nativeEvent && evt.nativeEvent.pageY) || 260;
+    const popW = 7 * 40 + 22 + 16;
+    const left = Math.max(8, Math.min(pageX - popW / 2, APP_W - popW - 8));
+    const top = pageY > REACTPOP_H + 70 ? pageY - REACTPOP_H - 20 : Math.min(pageY + 44, APP_H - REACTPOP_H - 12);
+    setReactionPop({ msg, left, top, caretX: Math.max(10, Math.min(pageX - left - 7, popW - 20)) });
+  }, []);
 
   const toggleLike = useCallback((msg) => {
     if (!msg || typeof msg.id !== 'number') return;
@@ -295,15 +305,27 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   // Keyboard reopen fix: Android stops showing the keyboard on the focused input
   // after a manual dismiss. Track visibility and force a blur+refocus cycle.
+  // Also scroll the chat so the newest message sits just above the input box
+  // instead of hiding behind the keyboard/composer.
   useEffect(() => {
-    const show = () => { kbVisibleRef.current = true; };
-    const hide = () => { if (Platform.OS !== 'ios') kbVisibleRef.current = false; };
-    Keyboard.addListener('keyboardDidShow', show);
-    Keyboard.addListener('keyboardDidHide', hide);
-    return () => {
-      Keyboard.removeListener('keyboardDidShow', show);
-      Keyboard.removeListener('keyboardDidHide', hide);
+    const show = () => {
+      kbVisibleRef.current = true;
+      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 140);
     };
+    const hide = () => {
+      if (Platform.OS !== 'ios') kbVisibleRef.current = false;
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
+    };
+    const subs = [
+      Keyboard.addListener('keyboardDidShow', show),
+      Keyboard.addListener('keyboardDidHide', hide),
+      Keyboard.addListener('keyboardWillChangeFrame', (e) => {
+        if (Platform.OS !== 'ios') return;
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+      }),
+    ];
+    return () => subs.forEach((s) => s.remove());
   }, []);
 
   // Blur + refocus (with a fallback retry) so the keyboard reliably returns when the
@@ -440,6 +462,34 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setText('');
     setReplyingTo(null);
   };
+
+  const sendReplyText = useCallback((target, content) => {
+    const c = (content || '').trim();
+    if (!target || !c || !socket) return;
+    const tempId = `tmp-${Date.now()}`;
+    const localMsg = {
+      id: tempId,
+      sender_id: currentUser.id,
+      type: 'TEXT',
+      content: c,
+      created_at: new Date().toISOString(),
+      status: 'SENT',
+      reply_to: target.id || null,
+      reactions: [],
+      _local: true,
+      _pending: true,
+    };
+    setMessages((prev) => [...prev, localMsg]);
+    socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo: target.id || null }, (ack) => {
+      if (ack && ack.ok) {
+        atBottomRef.current = true;
+        setAtBottomNear(true);
+        setPendingCount(0);
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? ack.message : m)));
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+      }
+    });
+  }, [socket, otherUserId, currentUser.id]);
 
   const sendVoiceMessage = useCallback((filePath, durationSec) => {
     if (!filePath) return;
@@ -1090,6 +1140,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               style={styles.headerMenuItem}
               onPress={() => {
                 setHeaderMenu(false);
+                const last = messages[messages.length - 1];
+                if (last) setReactionMenu(last);
+              }}
+              accessibilityLabel="Message actions"
+            >
+              <Icon name="ellipsis-horizontal" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Reply · Edit · Copy · Delete</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerMenuItem}
+              onPress={() => {
+                setHeaderMenu(false);
                 Alert.alert('Clear chat', 'Remove all messages on this device?', [
                   { text: 'Clear', style: 'destructive', onPress: clearChatLocal },
                   { text: 'Cancel', style: 'cancel' },
@@ -1131,6 +1193,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
         onContentSizeChange={handleContentSizeChange}
         onScroll={handleScroll}
+        maintainVisibleContentPosition={Platform.OS === 'android' ? { autoscrollToTopThreshold: 60, minIndexForVisible: 0 } : undefined}
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
@@ -1190,6 +1253,38 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <ActionBtn label="Delete for me" icon="trash-outline" onPress={() => doAction('deleteMe', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
               <ActionBtn label="Delete for all" icon="trash" onPress={() => doAction('deleteAll', reactionMenu)} theme={theme} danger visible={reactionMenu.sender_id === currentUser.id} />
             </View>
+          </View>
+        </View>
+      )}
+
+      {/* WhatsApp-style floating reaction bar (intelligently kept on-screen) */}
+      {reactionPop && (
+        <View style={styles.menuOverlay}>
+          <TouchableOpacity style={styles.menuBackdrop} onPress={() => setReactionPop(null)} />
+          <View
+            style={[
+              styles.reactionPop,
+              { backgroundColor: theme.card, borderColor: theme.border, left: reactionPop.left, top: reactionPop.top },
+            ]}
+          >
+            {reactionPopRow.map((e) => (
+              <TouchableOpacity
+                key={e}
+                onPress={() => { reactTo(reactionPop.msg.id, e); setReactionPop(null); }}
+                style={styles.reactionPopBtn}
+                accessibilityLabel={`React ${e}`}
+              >
+                <Text style={{ fontSize: 23 }}>{e}</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              onPress={() => { setReactionMenu(reactionPop.msg); setReactionPop(null); }}
+              style={styles.reactionPopBtn}
+              accessibilityLabel="Show all options"
+            >
+              <Icon name="add" size={20} color={theme.primary} />
+            </TouchableOpacity>
+            <View style={[styles.reactionPopCaret, { backgroundColor: theme.card, left: reactionPop.caretX }]} />
           </View>
         </View>
       )}
@@ -1310,6 +1405,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           onClose={() => setMediaViewer(null)}
           onReact={reactTo}
           onReply={(item) => setReplyingTo(item)}
+          onSendReplyMessage={sendReplyText}
           onDelete={(item, mode) => deleteMessage(item, mode)}
           onSendDrawing={uploadDrawing}
         />
@@ -1842,6 +1938,30 @@ const styles = StyleSheet.create({
   replyPreview: { fontSize: 12 },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)' },
+  reactionPop: {
+    position: 'absolute',
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 28,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 12,
+  },
+  reactionPopBtn: { width: 38, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 21 },
+  reactionPopCaret: {
+    position: 'absolute',
+    bottom: -6,
+    width: 12,
+    height: 12,
+    transform: [{ rotate: '45deg' }],
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
   menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
   menuTitle: { fontSize: 13, fontWeight: '700' },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },

@@ -22,4 +22,27 @@ export const TojeyColors = {
 
 export const quickReactions = ['❤️', '😂', '😮', '😢', '👍', '👎'];
 
+export const reactionPopRow = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂'];
+
+export const CHAT_COLORS = [
+  { id: 'default', name: 'Purple', sent: '#6C3CE9' },
+  { id: 'teal', name: 'Teal', sent: '#00A884' },
+  { id: 'blue', name: 'Ocean', sent: '#0B7FE8' },
+  { id: 'green', name: 'Green', sent: '#1FA05B' },
+  { id: 'coral', name: 'Coral', sent: '#F24E42' },
+  { id: 'orange', name: 'Orange', sent: '#F5811E' },
+  { id: 'pink', name: 'Pink', sent: '#E2417D' },
+  { id: 'indigo', name: 'Indigo', sent: '#4156D7' },
+];
+
+export function hexBlend(a, b, t) {
+  const pa = /^#([0-9a-fA-F]{6})$/.exec(a || '');
+  const pb = /^#([0-9a-fA-F]{6})$/.exec(b || '');
+  if (!pa || !pb) return a;
+  const ca = [1, 3, 5].map((i) => parseInt(pa[1].slice(i - 1, i + 1), 16));
+  const cb = [1, 3, 5].map((i) => parseInt(pb[1].slice(i - 1, i + 1), 16));
+  const m = ca.map((v, i) => Math.round(v + (cb[i] - v) * t));
+  return `#${m.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export { lightTheme, darkTheme };

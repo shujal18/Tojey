@@ -35,7 +35,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
 
   const drawRef = useRef(null);
   const shotRef = useRef(null);
-  const rotateRef = useRef(null);
   const strokesRef = useRef([]);
   const [strokes, setStrokes] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
@@ -167,23 +166,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     }
   };
 
-  const applyRotate = async () => {
-    if (!rotateRef.current) return;
-    setProcessing(true);
-    try {
-      const shot = await captureRef(rotateRef, { format: 'png', quality: 0.95, result: 'tmpfile' });
-      setDisplayUri(shot);
-      resetGeometry();
-      setMode('view');
-    } catch (e) {
-      console.error('rotate capture failed', e);
-      Alert.alert('Rotate failed', e.message || 'Could not rotate the photo');
-      setMode('view');
-    } finally {
-      setProcessing(false);
-    }
-  };
-
   const gestureStart = useRef(null);
   const cropPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -308,33 +290,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             brushRef={brushRef}
             maxHeight={winH - DRAW_TOOLBAR_H - topInset}
           />
-        </View>
-      );
-    }
-    if (mode === 'rotate') {
-      const s = srcSize && box ? Math.min((box.w - 24) / srcSize.h, (box.h - 24) / srcSize.w) : 1;
-      const rw = srcSize ? Math.round(srcSize.h * s) : winW;
-      const rh = srcSize ? Math.round(srcSize.w * s) : winH;
-      return (
-        <View style={styles.body} onLayout={onBoxLayout}>
-          <View style={styles.bodyCenter}>
-            <View
-              ref={rotateRef}
-              collapsable={false}
-              style={{ width: rw, height: rh, overflow: 'hidden' }}
-            >
-              <Image
-                source={{ uri: displayUri }}
-                style={{ width: rh, height: rw, transform: [{ rotate: '90deg' }] }}
-                resizeMode="stretch"
-              />
-            </View>
-          </View>
-          {!imgReady && !imgErr && (
-            <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
-              <ActivityIndicator color="#fff" />
-            </View>
-          )}
         </View>
       );
     }
@@ -498,7 +453,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               <View style={styles.toolRow}>
                 <ToolBtn icon="color-wand" label="Draw" onPress={() => setMode('draw')} disabled={!imgReady || imgErr} />
                 <ToolBtn icon="crop" label="Crop" onPress={() => { if (box && srcSize) setMode('crop'); }} disabled={!imgReady || imgErr || !box || !srcSize} />
-                <ToolBtn icon="refresh" label="Rotate" onPress={() => { if (box && srcSize) setMode('rotate'); }} disabled={!imgReady || imgErr || !box || !srcSize} />
               </View>
             )}
             <View style={styles.captionRow}>
@@ -551,24 +505,6 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               canUndo={strokes.length > 0}
               canRedo={redoStack.length > 0}
             />
-          </View>
-        )}
-
-        {mode === 'rotate' && (
-          <View style={[styles.modeBarWrap, { bottom: 0 }]}>
-            <View style={[styles.toolbar, { backgroundColor: 'rgba(0,0,0,0.88)' }]}>
-              <View style={styles.toolbarRow}>
-                <ToolBtn icon="close" label="Cancel" onPress={() => setMode('view')} light />
-                <View style={{ flex: 1 }} />
-                {processing ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <TouchableOpacity onPress={applyRotate} style={[styles.primaryBarBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Apply rotation">
-                    <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Apply</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            </View>
           </View>
         )}
 

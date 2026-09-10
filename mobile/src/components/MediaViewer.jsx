@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, StyleSheet, Modal,
+  View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Modal,
   Dimensions, Image, ActivityIndicator, Alert, Animated, PanResponder, Platform,
 } from 'react-native';
 import Video from 'react-native-video';
 import { captureRef } from 'react-native-view-shot';
 import { Icon } from './AppIcon';
+import Clipboard from '@react-native-clipboard/clipboard';
 import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
@@ -144,6 +145,16 @@ function dist(a, b) {
   return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
+function fmtTime(s) {
+  const total = Math.max(0, Math.floor(s || 0));
+  const sec = total % 60;
+  const m = Math.floor(total / 60);
+  const h = Math.floor(m / 60);
+  const ss = sec < 10 ? `0${sec}` : `${sec}`;
+  if (h > 0) return `${h}:${m % 60 < 10 ? '0' : ''}${m % 60}:${ss}`;
+  return `${m}:${ss}`;
+}
+
 function sanitizeFileName(name) {
   if (!name || typeof name !== 'string') return null;
   const base = name.split(/[?#]/)[0];
@@ -177,13 +188,17 @@ class VideoBoundary extends React.Component {
   }
 }
 
-export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing, onExternalImage }) {
+export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onSendReplyMessage, onDelete, onSendDrawing, onExternalImage }) {
   const [index, setIndex] = useState(startIndex);
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});
   const [videoLoading, setVideoLoading] = useState({});
   const [activeVideoId, setActiveVideoId] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [replyText, setReplyText] = useState('');
+  const [videoPlay, setVideoPlay] = useState({ paused: false, currentTime: 0, duration: 0, rate: 1 });
+  const videoRef = useRef(null);
+  const seekWRef = useRef(0);
   const listRef = useRef(null);
   const item = items[index] || null;
   const canShare = !!item && !!item.media_url;
@@ -245,6 +260,10 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     const visId = visible ? visible.id : null;
     setActiveVideoId((cur) => (cur && visId && cur === visId ? cur : null));
   }, [index, items]);
+
+  useEffect(() => {
+    setVideoPlay({ paused: false, currentTime: 0, duration: 0, rate: 1 });
+  }, [activeVideoId]);
 
   const playExternal = useCallback(async (m, fallbackMime) => {
     if (!m || !m.media_url) return;
@@ -389,21 +408,75 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               }
             >
               <Video
+                ref={active ? videoRef : undefined}
                 source={{ uri }}
                 style={styles.video}
                 resizeMode="contain"
-                controls
+                controls={false}
+                paused={videoPlay.paused}
+                rate={videoPlay.rate}
+                progressUpdateInterval={200}
                 repeat={false}
                 playInBackground={false}
                 playWhenInactive={false}
-                paused={false}
                 bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
-                onEnd={() => setActiveVideoId(null)}
+                onEnd={() => { setVideoPlay((s) => ({ ...s, paused: true, currentTime: s.duration || 0 })); setActiveVideoId(null); }}
                 onError={() => { setVideoErrors((prev) => ({ ...prev, [m.id]: true })); setActiveVideoId(null); }}
-                onLoad={() => { setVideoErrors((prev) => ({ ...prev, [m.id]: false })); setVideoLoading((prev) => ({ ...prev, [m.id]: false })); }}
+                onLoad={(d) => {
+                  setVideoErrors((prev) => ({ ...prev, [m.id]: false }));
+                  setVideoLoading((prev) => ({ ...prev, [m.id]: false }));
+                  const dur = (d && d.duration) || 0;
+                  setVideoPlay((s) => ({ ...s, duration: dur, currentTime: 0, paused: false }));
+                }}
                 onLoadStart={() => setVideoLoading((prev) => ({ ...prev, [m.id]: true }))}
+                onProgress={(d) => {
+                  if (!videoPlay.paused) setVideoPlay((s) => ({ ...s, currentTime: (d && d.currentTime) || 0 }));
+                }}
+                onPlay={() => setVideoPlay((s) => ({ ...s, paused: false }))}
+                onPause={() => setVideoPlay((s) => ({ ...s, paused: true }))}
               />
             </VideoBoundary>
+          )}
+          {active && (
+            <View style={styles.vidCtrlWrap} pointerEvents="box-none">
+              <TouchableOpacity
+                style={styles.vidCenterCtrl}
+                onPress={() => setVideoPlay((s) => ({ ...s, paused: !s.paused }))}
+                accessibilityLabel={videoPlay.paused ? 'Play' : 'Pause'}
+              >
+                <Icon name={videoPlay.paused ? 'play' : 'pause'} size={34} color="#fff" />
+              </TouchableOpacity>
+              <View style={styles.vidCtrlRow}>
+                <Text style={styles.vidTime}>{fmtTime(videoPlay.currentTime)}</Text>
+                <TouchableOpacity
+                  style={styles.vidSeekTrack}
+                  onLayout={(e) => { seekWRef.current = e.nativeEvent.layout.width || 0; }}
+                  onPress={(e) => {
+                    const dur = videoPlay.duration || 0;
+                    if (!dur) return;
+                    const ratio = (e.nativeEvent.locationX || 0) / (seekWRef.current || 1);
+                    const t = Math.max(0, Math.min(dur, (dur * ratio) || 0));
+                    if (videoRef.current && videoRef.current.seek) videoRef.current.seek(t);
+                    setVideoPlay((s) => ({ ...s, currentTime: t }));
+                  }}
+                >
+                  <View style={styles.vidSeekTrackBg} />
+                  <View
+                    style={[styles.vidSeekFill, {
+                      width: `${videoPlay.duration ? Math.min(100, ((videoPlay.currentTime || 0) / videoPlay.duration) * 100) : 0}%`,
+                    }]}
+                  />
+                </TouchableOpacity>
+                <Text style={styles.vidTime}>{fmtTime(videoPlay.duration)}</Text>
+                <TouchableOpacity
+                  style={styles.vidRateBtn}
+                  onPress={() => setVideoPlay((s) => ({ ...s, rate: s.rate === 1 ? 1.5 : s.rate === 1.5 ? 2 : 1 }))}
+                  accessibilityLabel="Playback speed"
+                >
+                  <Text style={styles.vidTime}>{videoPlay.rate.toFixed(1)}x</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
           )}
           {loading && (
             <View style={styles.vidLoading}>
@@ -431,7 +504,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
       );
     }
     return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
-  }, [videoErrors, videoLoading, activeVideoId, drawMode, item, strokes, playExternal, onExternalImage]);
+  }, [videoErrors, videoLoading, activeVideoId, videoPlay, drawMode, item, strokes, playExternal, onExternalImage]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems && viewableItems.length) {
@@ -444,16 +517,26 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     setShowMenu(false);
   };
 
+  const sendReply = () => {
+    const txt = replyText.trim();
+    if (!txt || !item) return;
+    setReplyText('');
+    if (onSendReplyMessage) onSendReplyMessage(item, txt);
+    else if (onReply) onReply(item);
+    onClose();
+  };
+
   const isOwn = !!item && item.sender_id === currentUserId;
+  const isImage = !!item && item.type === 'IMAGE';
 
   const actionMenu = [
     { key: 'reply', label: 'Reply', icon: 'return-down-back-outline', onPress: () => { if (onReply && item) onReply(item); setShowMenu(false); } },
+    { key: 'edit', label: 'Edit', icon: 'create-outline', onPress: () => { setShowMenu(false); if (isImage && !drawMode) setDrawMode(true); }, visible: isImage },
+    { key: 'copy', label: 'Copy', icon: 'copy-outline', onPress: () => { if (item && item.content) Clipboard.setString(item.content); setShowMenu(false); }, visible: !!(item && item.content) },
     { key: 'download', label: 'Download', icon: 'download-outline', onPress: () => { setShowMenu(false); download(); } },
     ...(isOwn ? [{ key: 'delete', label: 'Delete for me', icon: 'trash-outline', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'me'); setShowMenu(false); } }] : []),
     ...(isOwn ? [{ key: 'deleteAll', label: 'Delete for everyone', icon: 'trash', danger: true, onPress: () => { if (onDelete && item) onDelete(item, 'everyone'); setShowMenu(false); } }] : []),
-  ];
-
-  const isImage = !!item && item.type === 'IMAGE';
+  ].filter((a) => a.visible !== false);
 
   const drawToolbar = (
     <DrawingToolbar
@@ -527,15 +610,46 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
         {drawMode ? drawToolbar : (
           canShare && (
             <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
-              <View style={styles.bottomTitleBar}>
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <Icon name="images-outline" size={14} color={theme.textSecondary} />
-                  <Text style={[styles.bottomText, { color: theme.textSecondary }]}>
-                    {item.type === 'VIDEO' ? 'Tap video to play' : 'Two fingers to zoom · tap ✨ to draw'}
-                  </Text>
-                </View>
-                <TouchableOpacity onPress={download} disabled={saving} style={[styles.dlBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Download media">
-                  {saving ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="download" size={16} color="#fff" />}
+              <View style={styles.replyRow}>
+                <TextInput
+                  style={[styles.replyInput, { backgroundColor: theme.inputBg, color: theme.text }]}
+                  placeholder="Reply…"
+                  placeholderTextColor={theme.textSecondary}
+                  value={replyText}
+                  onChangeText={setReplyText}
+                  onSubmitEditing={sendReply}
+                  returnKeyType="send"
+                />
+                <TouchableOpacity
+                  onPress={sendReply}
+                  disabled={!replyText.trim()}
+                  style={[styles.replySendBtn, { backgroundColor: theme.primary, opacity: replyText.trim() ? 1 : 0.5 }]}
+                  accessibilityLabel="Send reply"
+                >
+                  <Icon name="send" size={16} color="#fff" />
+                </TouchableOpacity>
+              </View>
+              <View style={[styles.reactRow, { borderTopColor: theme.border }]}>
+                {['❤️', '😂', '🙂'].map((r) => (
+                  <TouchableOpacity
+                    key={r}
+                    onPress={() => doReact(r)}
+                    style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
+                    accessibilityLabel={`React ${r}`}
+                  >
+                    <Text style={{ fontSize: 17 }}>{r}</Text>
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity
+                  onPress={() => setShowMenu(true)}
+                  style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
+                  accessibilityLabel="More media actions"
+                >
+                  <Icon name="add" size={18} color={theme.primary} />
+                </TouchableOpacity>
+                <View style={{ flex: 1 }} />
+                <TouchableOpacity onPress={download} disabled={saving} style={styles.dlBtnSm} accessibilityLabel="Download media">
+                  {saving ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="download" size={16} color={theme.primary} />}
                 </TouchableOpacity>
               </View>
             </View>
@@ -589,10 +703,21 @@ const styles = StyleSheet.create({
   zoomWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   zoomImg: { height: '100%' },
   imgLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  bottomBar: { paddingVertical: 8, paddingHorizontal: 14, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
-  bottomTitleBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  bottomText: { fontSize: 12, marginLeft: 5 },
-  dlBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  bottomBar: { paddingVertical: 8, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
+  replyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  replyInput: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, fontSize: 14 },
+  replySendBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  reactRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, gap: 8 },
+  reactBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  dlBtnSm: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
+  vidCtrlWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'flex-end', paddingBottom: 10, alignItems: 'center' },
+  vidCenterCtrl: { position: 'absolute', top: '42%', width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)' },
+  vidCtrlRow: { flexDirection: 'row', alignItems: 'center', width: '100%', paddingHorizontal: 12, paddingTop: 10 },
+  vidTime: { color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 38, textAlign: 'center' },
+  vidSeekTrack: { flex: 1, height: 28, justifyContent: 'center', marginHorizontal: 8 },
+  vidSeekTrackBg: { position: 'absolute', left: 0, right: 0, height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.3)' },
+  vidSeekFill: { position: 'absolute', left: 2, height: 3, borderRadius: 2, backgroundColor: '#fff', width: 0 },
+  vidRateBtn: { paddingHorizontal: 6, paddingVertical: 4, borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.14)' },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   menu: { position: 'absolute', right: 12, top: 90, width: SCREEN_W - 60, borderRadius: 16, padding: 14, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
