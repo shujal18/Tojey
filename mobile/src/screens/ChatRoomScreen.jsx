@@ -42,6 +42,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const recListenUnsub = useRef(null);
   const inputRef = useRef(null);
   const kbVisibleRef = useRef(Platform.OS === 'ios');
+  const focusRetryRef = useRef(false);
   const typingTimer = useRef(null);
   const [mediaViewer, setMediaViewer] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
@@ -299,20 +300,39 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // Blur + refocus (with a fallback retry) so the keyboard reliably returns when the
   // user taps the input after dismissing it. Guarded by the visibility flag.
   const reopenKeyboard = () => {
+    if (Platform.OS !== 'android') return;
     const t = inputRef.current;
     if (!t || kbVisibleRef.current) return;
     t.blur();
     setTimeout(() => {
       if (!inputRef.current || inputRef.current !== t) return;
-      t.focus();
+      inputRef.current.focus();
       setTimeout(() => {
         if (kbVisibleRef.current || !inputRef.current || inputRef.current !== t) return;
-        t.blur();
+        inputRef.current.blur();
         setTimeout(() => {
-          if (inputRef.current === t) t.focus();
+          if (inputRef.current === t && !kbVisibleRef.current) inputRef.current.focus();
         }, 60);
-      }, 180);
-    }, 40);
+      }, 220);
+    }, 50);
+  };
+
+  // OPPO/ColorOS safety net: a tap can regain focus without the OS raising the soft
+  // keyboard (stale EditText focus after dismiss). If the keyboard is still hidden a
+  // moment after focus, force one blur+refocus cycle.
+  const ensureKeyboard = () => {
+    if (Platform.OS !== 'android') return;
+    if (focusRetryRef.current) return;
+    focusRetryRef.current = true;
+    setTimeout(() => {
+      focusRetryRef.current = false;
+      const t = inputRef.current;
+      if (!t || kbVisibleRef.current) return;
+      t.blur();
+      setTimeout(() => {
+        if (inputRef.current === t && !kbVisibleRef.current) inputRef.current.focus();
+      }, 50);
+    }, 400);
   };
 
   useEffect(() => {
@@ -1128,7 +1148,8 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 placeholderTextColor={theme.textSecondary}
                 style={[styles.input, { color: theme.text }]}
                 multiline
-                onPress={reopenKeyboard}
+                onPressIn={reopenKeyboard}
+                onFocus={ensureKeyboard}
               />
             </View>
             {text.trim() ? (
