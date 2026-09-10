@@ -10,7 +10,7 @@ import { reactionPopRow } from '../theme';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
 const sheetReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
-import { absUrl, SERVER_URL } from '../config';
+import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
@@ -24,6 +24,67 @@ import {
 } from '../services/voice';
 
 const { width: APP_W, height: APP_H } = Dimensions.get('window');
+
+// WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
+const INCOMING_MESSAGE_COLOR = '#1e2529';
+// Emoji quick-pick strip used by the composer's emoji button (unique set).
+const emojiQuick = ['👍','❤️','😂','😮','😢','🙏','🫂','🎉','🔥','😍','👏','💯','😄','😁','😘','🤗','😅','🙃','🫡','💀','👻','🎂','⚽','🎧','☕','🚗','✌️','🙌','🤝','🥳'];
+
+// Defensive shape guard: every row rendered by MessageRow goes through this, so a
+// single malformed/cached/legacy payload can never crash the whole chat screen.
+function normalizeMessage(m) {
+  const base = (m && typeof m === 'object') ? m : {};
+  let reactions = base.reactions;
+  if (typeof reactions === 'string') {
+    try { reactions = JSON.parse(reactions); } catch (e) { reactions = []; }
+  }
+  if (!Array.isArray(reactions)) reactions = [];
+  return {
+    ...base,
+    id: base.id || `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: base.type || 'TEXT',
+    sender_id: Number(base.sender_id) || 0,
+    content: base.content == null ? null : String(base.content),
+    media_url: base.media_url || '',
+    thumb_url: base.thumb_url || '',
+    file_name: base.file_name || '',
+    media_size: Number(base.media_size) || 0,
+    duration: Number(base.duration) || 0,
+    status: base.status || 'SENT',
+    reactions,
+    created_at: base.created_at || null,
+  };
+}
+
+// Isolates a single failing row so one bad message can't blank the whole chat.
+// Renders a disabled placeholder bubble in its place.
+class RowBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error) {
+    console.error('Chat row render error:', error && error.message);
+  }
+  componentDidUpdate(prev) {
+    if (prev.rowKey !== this.props.rowKey && this.state.failed) this.setState({ failed: false });
+  }
+  render() {
+    if (this.state.failed) {
+      return (
+        <View style={[styles.msgRow, { justifyContent: this.props.isSent ? 'flex-end' : 'flex-start' }]}>
+          <View style={[styles.bubble, { backgroundColor: INCOMING_MESSAGE_COLOR, opacity: 0.55 }]}>
+            <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12 }}>Message could not be displayed</Text>
+          </View>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
@@ -44,6 +105,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [voiceProgress, setVoiceProgress] = useState(0);
   const playingIdRef = useRef(null);
   const [showAttach, setShowAttach] = useState(false);
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [composerH, setComposerH] = useState(0);
+  const [barHeights, setBarHeights] = useState({});
+  const setBarH = (k) => (e) => {
+    const h = Math.round(e.nativeEvent.layout.height);
+    setBarHeights((prev) => (prev[k] === h ? prev : { ...prev, [k]: h }));
+  };
   const [presence, setPresence] = useState(null);
   const listRef = useRef(null);
   const voicePathRef = useRef(null);
@@ -60,6 +128,19 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const atBottomNearRef = useRef(true);
   const scrolledToEndOnMount = useRef(false);
   const uploadTasks = useRef(new Map());
+  const normCache = useRef(new WeakMap());
+  const getNorm = (item) => {
+    if (item && typeof item === 'object') {
+      const hit = normCache.current.get(item);
+      if (hit) return hit;
+      const n = normalizeMessage(item);
+      normCache.current.set(item, n);
+      return n;
+    }
+    return normalizeMessage(item);
+  };
+  const [highlightId, setHighlightId] = useState(null);
+  const highlightTimer = useRef(null);
 
   // Defensive: ensure otherUser has all required properties
   const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
@@ -144,36 +225,73 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const ref = replyIndex.get(id);
     return ref ? replyPreview(ref) : '…';
   }, [replyIndex]);
+  const replyReferentOf = useCallback((id) => replyIndex.get(id) || null, [replyIndex]);
+
+  // Tap on a reply preview → jump to the exact original message (non-animated),
+  // temporarily highlight it, and never crash if it's deleted/not loaded.
+  const jumpToMessage = useCallback((id) => {
+    if (id == null) return;
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    setHighlightId(id);
+    clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 1800);
+    try {
+      listRef.current?.scrollToIndex({ index: idx, viewPosition: 0.3, animated: false });
+    } catch (e) {
+      // On Android, scrollToIndex can throw before rows are measured; the
+      // onScrollToIndexFailed fallback on the FlatList retries safely.
+    }
+  }, [messages]);
+
+  const onScrollToIndexFailed = useCallback(({ index }) => {
+    if (!messages.length) return;
+    try {
+      listRef.current?.scrollToIndex({ index, viewPosition: 0.3, animated: false });
+    } catch (e) {
+      // Still not measured — estimate a non-animated offset; safe even if imprecise.
+      listRef.current?.scrollToOffset({ offset: Math.max(0, index * 64 - 30), animated: false });
+    }
+  }, [messages]);
 
   const renderMessage = useCallback(({ item, index }) => {
-    const isSent = item.sender_id === currentUser.id;
+    const safe = getNorm(item);
+    const isSent = safe.sender_id === currentUser.id;
     const prev = index > 0 ? messages[index - 1] : null;
-    const grouped = !!prev && prev.sender_id === item.sender_id;
+    const grouped = !!prev && (prev.sender_id || 0) === safe.sender_id && !!prev.type && prev.type === safe.type;
     return (
-      <MessageRow
-        message={item}
-        isSent={isSent}
-        grouped={grouped}
-        theme={theme}
-        onLongPress={handleLongPress}
-        onOpenMedia={openMedia}
-        onRetry={retrySendMedia}
-        onReply={setReplyingTo}
-        onDoubleTap={toggleLike}
-        replyPreviewOf={replyPreviewOf}
-        suggestEdit={isSent && item.type === 'TEXT' && !!item.content && !item._pending}
-        onEditRow={(m) => doAction('edit', m)}
-        onCancelUpload={cancelUpload}
-        voicePlaying={playingVoiceId === item.id}
-        voiceProgress={playingVoiceId === item.id ? voiceProgress : 0}
-        onPlayVoice={toggleVoicePlayback}
-        selMode={selMode}
-        selActive={selSet.has(item.id)}
-        onSelectPress={() => toggleSelect(item.id)}
-      />
+      <RowBoundary isSent={isSent} rowKey={String(safe.id)}>
+        <MessageRow
+          message={safe}
+          isSent={isSent}
+          grouped={grouped}
+          theme={theme}
+          receivedBubble={INCOMING_MESSAGE_COLOR}
+          flash={highlightId === safe.id}
+          ownId={currentUser.id}
+          otherName={otherUserName}
+          replyReferentOf={replyReferentOf}
+          onLongPress={handleLongPress}
+          onOpenMedia={openMedia}
+          onRetry={retrySendMedia}
+          onReply={setReplyingTo}
+          onDoubleTap={toggleLike}
+          onJumpToReply={jumpToMessage}
+          replyPreviewOf={replyPreviewOf}
+          suggestEdit={isSent && safe.type === 'TEXT' && !!safe.content && !safe._pending}
+          onEditRow={(m) => doAction('edit', m)}
+          onCancelUpload={cancelUpload}
+          voicePlaying={playingVoiceId === safe.id}
+          voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
+          onPlayVoice={toggleVoicePlayback}
+          selMode={selMode}
+          selActive={selSet.has(safe.id)}
+          onSelectPress={() => toggleSelect(safe.id)}
+        />
+      </RowBoundary>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect]);
 
   const onType = (t) => {
     setText(t);
@@ -715,15 +833,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     Alert.alert(`Delete ${selSet.size} message(s)?`, anyOwn ? 'Delete for everyone?' : 'Delete from this chat?', opts);
   };
 
+  const selectedMsgs = messages.filter((m) => selSet.has(m.id));
+  const selOne = selectedMsgs.length === 1 ? selectedMsgs[0] : null;
+
   const replySelected = () => {
     const last = selectedMsgs[selectedMsgs.length - 1];
     if (last) setReplyingTo(last);
     exitSelect();
   };
-
-  const selOne = selectedMsgs.length === 1 ? selectedMsgs[0] : null;
-
-  const selectedMsgs = messages.filter((m) => selSet.has(m.id));
 
   const sendFile = (asset) => {
     if (!asset || !asset.uri) return;
@@ -1078,6 +1195,13 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
   const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
   const composerBg = hexToRgba(theme.composerBg, 0.94);
+  // Fully measured bottom stack: every bar below the list + the composer height.
+  // The scroll-to-latest FAB floats just above this stack so it never overlaps
+  // the composer/mic or hides the newest message.
+  const fabBottom =
+    (barHeights.sel || 0) + (barHeights.rec || 0) + (barHeights.attach || 0)
+    + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
+    + (composerH || 54) + 8;
 
   return (
     <KeyboardAvoidingView
@@ -1174,12 +1298,22 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Messages */}
-      <FlatList
+      <View style={[styles.msgArea, { backgroundColor: chatBg }]}>
+        {CHAT_BACKGROUND && (
+          <Image
+            source={{ uri: CHAT_BACKGROUND }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="repeat"
+            fadeDuration={0}
+          />
+        )}
+        <FlatList
         ref={listRef}
         data={messages}
         keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
         onContentSizeChange={handleContentSizeChange}
         onScroll={handleScroll}
+        onScrollToIndexFailed={onScrollToIndexFailed}
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
@@ -1190,10 +1324,11 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         removeClippedSubviews={Platform.OS === 'android'}
         renderItem={renderMessage}
         contentContainerStyle={styles.messageList}
-        style={{ backgroundColor: chatBg }}
+        style={{ backgroundColor: 'transparent' }}
       />
+      </View>
 
-      {!atBottomNear && (
+      {!atBottomNear && !selMode && !recording && (
         <TouchableOpacity
           onPress={() => {
             listRef.current?.scrollToEnd({ animated: false });
@@ -1201,15 +1336,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             setAtBottomNear(true);
             setPendingCount(0);
           }}
-          style={[styles.fab, { backgroundColor: theme.primary }]}
-          accessibilityLabel="Scroll to bottom"
+          style={[styles.fab, { backgroundColor: theme.primary, bottom: fabBottom }]}
+          accessibilityLabel="Scroll to latest message"
         >
           {pendingCount > 0 && (
             <View style={[styles.fabBadge, { backgroundColor: theme.danger }]}>
               <Text style={styles.fabBadgeText}>{pendingCount > 99 ? '99+' : pendingCount}</Text>
             </View>
           )}
-          <Icon name="arrow-down" size={22} color="#fff" />
+          <View style={styles.fabChevrons}>
+            <Icon name="chevron-down" size={15} color="#fff" style={{ marginBottom: -7 }} />
+            <Icon name="chevron-down" size={15} color="#fff" />
+          </View>
         </TouchableOpacity>
       )}
 
@@ -1264,7 +1402,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Replying bar */}
       {replyingTo && (
-        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('reply')}>
           <View style={[styles.replyLine, { backgroundColor: theme.primary }]} />
           <View style={{ flex: 1 }}>
             <Text style={[styles.replyTitle, { color: theme.primary }]}>
@@ -1282,7 +1420,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Editing bar */}
       {editing && (
-        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={[styles.replyBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('edit')}>
           <View style={[styles.replyLine, { backgroundColor: theme.primary }]} />
           <View style={{ flex: 1 }}>
             <Text style={[styles.replyTitle, { color: theme.primary }]}>
@@ -1300,7 +1438,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Selection action bar: separate Reply / Edit / Copy / Save / Delete buttons */}
       {selMode && (
-        <View style={[styles.selBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={[styles.selBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('sel')}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.selBarRow}>
             <SelBtn label="Reply" icon="return-down-back-outline" onPress={replySelected} disabled={!selSet.size} theme={theme} />
             {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
@@ -1317,7 +1455,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Recording UI */}
       {recording && !selMode && (
-        <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('rec')}>
           <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
             <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
             <Icon name="mic" size={15} color={theme.danger} />
@@ -1341,23 +1479,47 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
 
       {/* Attach options: Photo · Camera · Files */}
       {showAttach && !recording && !selMode && (
-        <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('attach')}>
           <AttachBtn label="Photo" icon="image-outline" color={theme.primary} onPress={() => pickMedia('photo')} theme={theme} />
           <AttachBtn label="Camera" icon="camera-outline" color={theme.primaryDeep} onPress={() => pickMedia('camera')} theme={theme} />
           <AttachBtn label="Files" icon="folder-open-outline" color={theme.primary} onPress={() => pickMedia('files')} theme={theme} />
         </View>
       )}
 
-      {/* Composer */}
+      {/* Emoji quick-pick strip (WhatsApp-style emoji button) */}
+      {showEmoji && !recording && !selMode && (
+        <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('emoji')}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            {emojiQuick.map((e) => (
+              <TouchableOpacity
+                key={e}
+                style={styles.emojiPickBtn}
+                onPress={() => {
+                  setText((prev) => prev + e);
+                  inputRef.current?.focus();
+                }}
+                accessibilityLabel={`Emoji ${e}`}
+              >
+                <Text style={{ fontSize: 26 }}>{e}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Composer: [emoji] [input…………] [attachment] [camera] [mic/send] */}
       {!recording && !selMode && (
-        <View style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}>
+        <View
+          style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}
+          onLayout={(e) => setComposerH(Math.round(e.nativeEvent.layout.height))}
+        >
           <View style={styles.composerRow}>
             <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
-              onPress={() => { Keyboard.dismiss(); setShowAttach(!showAttach); }}
-              accessibilityLabel="Add attachments"
+              style={[styles.composerBtn, { backgroundColor: showEmoji ? theme.primary : theme.inputBg }]}
+              onPress={() => { if (showAttach) setShowAttach(false); setShowEmoji(!showEmoji); inputRef.current?.focus(); }}
+              accessibilityLabel="Add emoji"
             >
-              <Icon name="add" size={24} color={showAttach ? '#fff' : theme.primary} />
+              <Icon name="happy-outline" size={22} color={showEmoji ? '#fff' : theme.primary} />
             </TouchableOpacity>
             <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
@@ -1372,6 +1534,20 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 onFocus={ensureKeyboard}
               />
             </View>
+            <TouchableOpacity
+              style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
+              onPress={() => { if (showEmoji) setShowEmoji(false); setShowAttach(!showAttach); }}
+              accessibilityLabel="Add attachments"
+            >
+              <Icon name="paperclip" size={20} color={showAttach ? '#fff' : theme.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
+              onPress={() => pickMedia('camera')}
+              accessibilityLabel="Open camera"
+            >
+              <Icon name="camera-outline" size={20} color={theme.primary} />
+            </TouchableOpacity>
             {text.trim() ? (
               <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
                 <Icon name="send" size={18} color="#fff" />
@@ -1538,7 +1714,7 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress }) {
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
@@ -1620,6 +1796,11 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
 
   const replyRevealStyle = isSent ? styles.revealRight : styles.revealLeft;
 
+  const refMsg = message.reply_to && replyReferentOf ? replyReferentOf(message.reply_to) : null;
+  const refName = refMsg
+    ? (refMsg.sender_id === ownId ? 'You' : (refMsg.sender_name || refMsg.sender_username || otherName || 'Message'))
+    : 'Message';
+
   return (
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
@@ -1631,8 +1812,10 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
             <TouchableOpacity
               style={[
                 styles.bubble,
-                isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: theme.receivedBubble, borderColor: theme.border }],
+                emojiOnly && styles.bubbleEmojiOnly,
+                isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: receivedBubble, borderColor: 'rgba(255,255,255,0.07)' }],
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
+                flash && { backgroundColor: 'rgba(124,77,255,0.34)' },
               ]}
               onPress={handlePress}
               onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); }}
@@ -1749,20 +1932,44 @@ function MessageRowFn({ message, isSent, grouped, theme, onLongPress, onOpenMedi
                 </View>
               ) : (
                 <View>
-                  {message.reply_to ? (
-                    <View style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight }]}>
-                      <Text style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : theme.primary }}>Reply</Text>
-                      <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>
-                        {replyPreviewOf ? replyPreviewOf(message.reply_to) : '…'}
+                  {emojiOnly && !message.reply_to ? (
+                    <View style={styles.msgEmojiWrap}>
+                      <Text style={[styles.msgEmoji, flash && { backgroundColor: 'rgba(124,77,255,0.28)', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 3 }]}>
+                        {message.content}
                       </Text>
                     </View>
-                  ) : null}
-                  <Text style={[styles.msgText, { color: isSent ? '#fff' : theme.receivedText }, emojiOnly && styles.msgTextEmoji]}>{message.content}</Text>
+                  ) : (
+                    <View>
+                      {message.reply_to && (
+                        <TouchableOpacity
+                          activeOpacity={0.65}
+                          onPress={() => { if (onJumpToReply) onJumpToReply(message.reply_to); }}
+                          style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)' }]}
+                        >
+                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : '#9C86F5' }}>
+                            {refName}
+                          </Text>
+                          <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
+                            {replyPreviewOf ? replyPreviewOf(message.reply_to) : '…'}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      <Text
+                        style={[
+                          styles.msgText,
+                          { color: isSent ? '#fff' : theme.receivedText },
+                          emojiOnly && styles.msgEmoji,
+                        ]}
+                      >
+                        {message.content}
+                      </Text>
+                    </View>
+                  )}
                 </View>
               )}
 
               {!message.is_deleted_for_everyone && (
-                <View style={styles.msgMeta}>
+                <View style={[styles.msgMeta, emojiOnly && { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
                   {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
                   {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
                   <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
@@ -1883,13 +2090,16 @@ const styles = StyleSheet.create({
   avatarImg: { width: '100%', height: '100%' },
   headerName: { fontSize: 16, fontWeight: '700' },
   headerStatus: { fontSize: 12, marginLeft: 4 },
-  messageList: { padding: 14, paddingBottom: 20 },
+  messageList: { padding: 14, paddingBottom: 18 },
+  msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
   bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
+  bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, paddingHorizontal: 4, paddingVertical: 2, overflow: 'visible' },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
   msgText: { fontSize: 15, lineHeight: 21 },
-  msgTextEmoji: { fontSize: 34, lineHeight: 42 },
+  msgEmojiWrap: { paddingVertical: 2 },
+  msgEmoji: { fontSize: 52, lineHeight: 62, paddingHorizontal: 10, paddingVertical: 4 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
@@ -1914,6 +2124,7 @@ const styles = StyleSheet.create({
   selBtn: { minWidth: 64, alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 8, paddingHorizontal: 10 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  emojiPickBtn: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
   attachBtn: { alignItems: 'center', marginRight: 20 },
   attachIcon: { width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
@@ -1966,7 +2177,8 @@ const styles = StyleSheet.create({
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
-  fab: { position: 'absolute', right: 16, bottom: 84, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+  fab: { position: 'absolute', right: 16, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
+  fabChevrons: { alignItems: 'center', justifyContent: 'center' },
   fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   videoPlayWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 6, alignItems: 'center', justifyContent: 'center' },

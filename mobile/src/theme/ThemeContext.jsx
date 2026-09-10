@@ -38,8 +38,10 @@ export const lightTheme = {
   navBg: '#FFFFFF',
   sentBubble: '#6C3CE9',
   sentText: '#FFFFFF',
-  receivedBubble: '#FFFFFF',
-  receivedText: '#1A1720',
+  // Incoming (received) bubble color is FIXED, WhatsApp-style dark char. Do NOT
+  // tint it with the chat accent color — keep it constant across themes/chats.
+  receivedBubble: '#1e2529',
+  receivedText: '#E8EAEC',
   composerBg: '#FFFFFF',
   danger: '#E53935',
   online: '#7C4DFF',
@@ -60,8 +62,8 @@ export const darkTheme = {
   navBg: '#1C1922',
   sentBubble: '#6C3CE9',
   sentText: '#FFFFFF',
-  receivedBubble: '#2A2733',
-  receivedText: '#F2F0F7',
+  receivedBubble: '#1e2529',
+  receivedText: '#E8EAEC',
   composerBg: '#1C1922',
   danger: '#F2555A',
   online: '#7C4DFF',
@@ -110,7 +112,8 @@ export function ThemeProvider({ children }) {
       ...base,
       sentBubble: chatColor.sent,
       sentText: '#FFFFFF',
-      receivedBubble: hexBlend(base.receivedBubble, chatColor.sent, mode === 'dark' ? 0.16 : 0.09),
+      receivedBubble: '#1e2529',
+      receivedText: '#E8EAEC',
     };
   }, [mode, chatColor]);
 

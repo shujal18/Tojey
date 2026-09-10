@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Clipboard from '@react-native-clipboard/clipboard';
 import { loadSession, logout, fetchUsers } from './src/services/auth';
 import { connect, disconnect } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
@@ -447,9 +448,8 @@ class RootErrorBoundary extends React.Component {
   render() {
     if (!this.state.error) return this.props.children;
     const msg = (this.state.error && (this.state.error.message || this.state.error.name)) || String(this.state.error || 'Unknown error');
-    const stack = (this.state.error && this.state.error.stack)
-      ? String(this.state.error.stack).split('\n').slice(0, 4).join('\n')
-      : '';
+    const full = (this.state.error && this.state.error.stack) ? String(this.state.error.stack) : '';
+    const stack = full.split('\n').slice(0, 8).join('\n');
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: '#6C3CE9', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
         <View style={{ alignItems: 'center', width: '100%' }}>
@@ -462,6 +462,12 @@ class RootErrorBoundary extends React.Component {
               {stack}
             </Text>
           )}
+          <TouchableOpacity
+            onPress={() => Clipboard.setString(`Tojey error\n\n${msg}\n\n${full}`)}
+            style={{ backgroundColor: 'rgba(255,255,255,0.18)', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, marginTop: 8 }}
+          >
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Copy error details</Text>
+          </TouchableOpacity>
           <TouchableOpacity
             onPress={() => this.setState({ error: null })}
             style={{ backgroundColor: '#fff', paddingHorizontal: 26, paddingVertical: 12, borderRadius: 10, marginTop: 8 }}
