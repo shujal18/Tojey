@@ -29,7 +29,7 @@ const { width: APP_W, height: APP_H } = Dimensions.get('window');
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
 // Emoji quick-pick strip used by the composer's emoji button (unique set).
-const emojiQuick = ['👍','❤️','😂','😮','😢','🙏','🫂','🎉','🔥','😍','👏','💯','😄','😁','😘','🤗','😅','🙃','🫡','💀','👻','🎂','⚽','🎧','☕','🚗','✌️','🙌','🤝','🥳'];
+const emojiQuick = ['😁','❤️','😂','😮','😢','🙏','🫂','🎉','🔥','😍','👏','💯','😄','😁','😘','🤗','😅','🙃','🫡','💀','👻','🎂','⚽','🎧','☕','🚗','✌️','🙌','🤝','🥳'];
 
 // Defensive shape guard: every row rendered by MessageRow goes through this, so a
 // single malformed/cached/legacy payload can never crash the whole chat screen.
