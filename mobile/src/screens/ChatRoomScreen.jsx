@@ -1801,8 +1801,8 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
             <TouchableOpacity
               style={[
                 styles.bubble,
-                singleEmoji && styles.bubbleEmojiOnly,
                 isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: receivedBubble, borderColor: 'rgba(255,255,255,0.07)' }],
+                singleEmoji && styles.bubbleEmojiOnly,
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
                 flash && { backgroundColor: 'rgba(124,77,255,0.34)' },
                 selActive && !singleEmoji && { backgroundColor: isSent ? mixWhite(theme.sentBubble, 0.35) : mixWhite(receivedBubble, 0.3) },
