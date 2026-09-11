@@ -11,6 +11,7 @@ import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
 import { canInlineVideoPreview } from '../utils/media';
+import { emojiSpan } from '../utils/emoji';
 import { DrawableImage, DrawingToolbar, DRAW_COLORS, DRAW_SIZES } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -664,7 +665,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <View style={styles.reactionRow}>
                 {quickReactions.map((r) => (
                   <TouchableOpacity key={r} onPress={() => doReact(r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                    <Text style={{ fontSize: 22 }}>{r}</Text>
+                    <Text style={{ fontSize: 22 }}>{emojiSpan(r)}</Text>
                   </TouchableOpacity>
                 ))}
               </View>

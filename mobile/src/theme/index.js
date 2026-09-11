@@ -20,8 +20,8 @@ export const TojeyColors = {
   border: '#E6E2F0',
 };
 
-export const quickReactions = ['❤️', '😂', '😮', '😢', '👍', '👎'];
+export const quickReactions = ['❤️', '😂', '😮', '😢', '👎'];
 
-export const reactionPopRow = ['👍', '❤️', '😂', '😁', '😮', '😢', '🙏', '🫂'];
+export const reactionPopRow = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂'];
 
 export { lightTheme, darkTheme, CHAT_COLORS, hexBlend };

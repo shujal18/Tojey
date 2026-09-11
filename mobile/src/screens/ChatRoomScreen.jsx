@@ -7,9 +7,10 @@ import {
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
+import { emojiSpan } from '../utils/emoji';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
-const sheetReactions = ['👍', '❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
+const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
 import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
@@ -1384,7 +1385,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <View style={styles.reactionRow}>
               {sheetReactions.map((r) => (
                 <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                  <Text style={{ fontSize: 22 }}>{r}</Text>
+                  <Text style={{ fontSize: 22 }}>{emojiSpan(r)}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1409,7 +1410,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 style={styles.reactionPopBtn}
                 accessibilityLabel={`React ${e}`}
               >
-                <Text style={{ fontSize: 23 }}>{e}</Text>
+                <Text style={{ fontSize: 23 }}>{emojiSpan(e)}</Text>
               </TouchableOpacity>
             ))}
             <TouchableOpacity
@@ -1433,7 +1434,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUserName}
             </Text>
             <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
-              {replyPreview(replyingTo)}
+              {emojiSpan(replyPreview(replyingTo))}
             </Text>
           </View>
           <TouchableOpacity onPress={() => setReplyingTo(null)}>
@@ -1507,7 +1508,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 }}
                 accessibilityLabel={`Emoji ${e}`}
               >
-                <Text style={{ fontSize: 26 }}>{e}</Text>
+                <Text style={{ fontSize: 26 }}>{emojiSpan(e)}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -1623,7 +1624,7 @@ function replyPreview(m) {
   if (m.type === 'VIDEO') return '🎬 Video';
   if (m.type === 'VOICE') return 'Voice message';
   if (m.type === 'FILE' || m.type === 'DOCUMENT') return '📄 ' + (m.content || 'File');
-  return m.content || 'Message';
+  return emojiSpan(m.content || 'Message');
 }
 
 function mimeFor(m) {
@@ -1808,7 +1809,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 selActive && !singleEmoji && { backgroundColor: isSent ? mixWhite(theme.sentBubble, 0.35) : mixWhite(receivedBubble, 0.3) },
               ]}
               onPress={handlePress}
-              onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); }}
+              onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); onEnterSelect && onEnterSelect(message); }}
               delayLongPress={350}
             >
               {message.is_deleted_for_everyone ? (
@@ -1922,10 +1923,24 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               ) : (
                 <View>
-                  {singleEmoji && !message.reply_to ? (
+                  {singleEmoji ? (
                     <View style={styles.msgEmojiWrap}>
+                      {message.reply_to && (
+                        <TouchableOpacity
+                          activeOpacity={0.65}
+                          onPress={() => { if (onJumpToReply) onJumpToReply(message.reply_to); }}
+                          style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)' }]}
+                        >
+                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : '#9C86F5' }}>
+                            {refName}
+                          </Text>
+                          <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
+                            {replyPreviewOf ? emojiSpan(replyPreviewOf(message.reply_to)) : '…'}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                       <Text style={[styles.msgEmojiSingle, flash && { backgroundColor: 'rgba(124,77,255,0.28)', borderRadius: 22, paddingHorizontal: 16, paddingVertical: 4 }]}>
-                        {message.content}
+                        {emojiSpan(message.content)}
                       </Text>
                     </View>
                   ) : (
@@ -1940,7 +1955,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                             {refName}
                           </Text>
                           <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
-                            {replyPreviewOf ? replyPreviewOf(message.reply_to) : '…'}
+                            {replyPreviewOf ? emojiSpan(replyPreviewOf(message.reply_to)) : '…'}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -1948,10 +1963,9 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                         style={[
                           styles.msgText,
                           { color: isSent ? '#fff' : theme.receivedText },
-                          singleEmoji && styles.msgEmoji,
                         ]}
                       >
-                        {message.content}
+                        {emojiSpan(message.content)}
                       </Text>
                     </View>
                   )}
@@ -1975,25 +1989,25 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               )}
             </TouchableOpacity>
-          </Animated.View>
 
-        {message.reactions && message.reactions.length > 0 && (
-          <TouchableOpacity
-            onPress={() => onLongPress(message)}
-            style={[
-              styles.reactionBadge,
-              { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
-              isSent ? { right: -8 } : { left: -8 },
-            ]}
-          >
-            {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
-              <View key={i} style={styles.reactionBadgeItem}>
-                <Text style={{ fontSize: 12 }}>{emoji}</Text>
-                {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
-              </View>
-            ))}
-          </TouchableOpacity>
-        )}
+            {message.reactions && message.reactions.length > 0 && (
+              <TouchableOpacity
+                onPress={() => onLongPress(message)}
+                style={[
+                  styles.reactionBadge,
+                  { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
+                  { right: 4 },
+                ]}
+              >
+                {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
+                  <View key={i} style={styles.reactionBadgeItem}>
+                    <Text style={{ fontSize: 12 }}>{emojiSpan(emoji)}</Text>
+                    {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
+                  </View>
+                ))}
+              </TouchableOpacity>
+            )}
+          </Animated.View>
         </View>
       </View>
   );
