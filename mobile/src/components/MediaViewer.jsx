@@ -11,7 +11,7 @@ import { absUrl } from '../config';
 import { quickReactions } from '../theme';
 import RNFetchBlob from 'rn-fetch-blob';
 import { canInlineVideoPreview } from '../utils/media';
-import { emojiSpan } from '../utils/emoji';
+import ColorEmoji from './ColorEmoji';
 import { DrawableImage, DrawingToolbar, DRAW_COLORS, DRAW_SIZES } from './DrawingCanvas';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -489,19 +489,21 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     }
     if (drawMode && m.id === item?.id) {
       return (
-        <DrawableImage
-          key={m.id}
-          uri={uri}
-          drawRef={drawRef}
-          strokes={strokes}
-          strokesRef={strokesRef}
-          setStrokes={setStrokes}
-          setRedoStack={setRedoStack}
-          drawModeRef={drawModeRef}
-          eraserRef={eraserRef}
-          colorRef={colorRef}
-          brushRef={brushRef}
-        />
+        <View style={styles.slide}>
+          <DrawableImage
+            key={m.id}
+            uri={uri}
+            drawRef={drawRef}
+            strokes={strokes}
+            strokesRef={strokesRef}
+            setStrokes={setStrokes}
+            setRedoStack={setRedoStack}
+            drawModeRef={drawModeRef}
+            eraserRef={eraserRef}
+            colorRef={colorRef}
+            brushRef={brushRef}
+          />
+        </View>
       );
     }
     return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
@@ -579,12 +581,11 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <Icon name="color-wand" size={23} color="#fff" />
             </TouchableOpacity>
           )}
-          {drawMode && (
-            <TouchableOpacity onPress={() => { setDrawMode(false); setStrokes([]); setRedoStack([]); setEraser(false); }} style={styles.topBtn} accessibilityLabel="Close drawing">
-              <Icon name="close" size={24} color="#fff" />
+          {drawMode ? (
+            <TouchableOpacity onPress={sendDrawing} disabled={drawingBusy} style={styles.topBtn} accessibilityLabel="Send drawing">
+              {drawingBusy ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="send" size={22} color="#fff" />}
             </TouchableOpacity>
-          )}
-          {!drawMode && (
+          ) : (
             <TouchableOpacity onPress={() => setShowMenu(true)} style={styles.topBtn} accessibilityLabel="More actions">
               <Icon name="ellipsis-horizontal" size={24} color="#fff" />
             </TouchableOpacity>
@@ -638,7 +639,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                     style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
                     accessibilityLabel={`React ${r}`}
                   >
-                    <Text style={{ fontSize: 17 }}>{emojiSpan(r)}</Text>
+                    <ColorEmoji style={{ fontSize: 17 }}>{r}</ColorEmoji>
                   </TouchableOpacity>
                 ))}
                 <TouchableOpacity
@@ -665,7 +666,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <View style={styles.reactionRow}>
                 {quickReactions.map((r) => (
                   <TouchableOpacity key={r} onPress={() => doReact(r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                    <Text style={{ fontSize: 22 }}>{emojiSpan(r)}</Text>
+                    <ColorEmoji style={{ fontSize: 22 }}>{r}</ColorEmoji>
                   </TouchableOpacity>
                 ))}
               </View>

@@ -7,7 +7,7 @@ import {
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
-import { emojiSpan } from '../utils/emoji';
+import ColorEmoji from '../components/ColorEmoji';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
 const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
@@ -1356,12 +1356,13 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       {!atBottomNear && !selMode && !recording && (
         <TouchableOpacity
           onPress={() => {
-            listRef.current?.scrollToEnd({ animated: false });
+            requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
             atBottomRef.current = true;
+            atBottomNearRef.current = true;
             setAtBottomNear(true);
             setPendingCount(0);
           }}
-          style={[styles.fab, { backgroundColor: theme.primary, bottom: fabBottom }]}
+          style={[styles.fab, { backgroundColor: '#23292E', borderColor: 'rgba(255,255,255,0.10)', bottom: fabBottom }]}
           accessibilityLabel="Scroll to latest message"
         >
           {pendingCount > 0 && (
@@ -1385,7 +1386,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <View style={styles.reactionRow}>
               {sheetReactions.map((r) => (
                 <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                  <Text style={{ fontSize: 22 }}>{emojiSpan(r)}</Text>
+                  <ColorEmoji style={{ fontSize: 22 }}>{r}</ColorEmoji>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1396,7 +1397,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       {/* WhatsApp-style floating reaction bar (intelligently kept on-screen) */}
       {reactionPop && (
         <View style={styles.menuOverlay}>
-          <TouchableOpacity style={styles.menuBackdrop} onPress={() => setReactionPop(null)} />
+          <TouchableOpacity style={[styles.menuBackdrop, { backgroundColor: 'transparent' }]} onPress={() => setReactionPop(null)} />
           <View
             style={[
               styles.reactionPop,
@@ -1410,7 +1411,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 style={styles.reactionPopBtn}
                 accessibilityLabel={`React ${e}`}
               >
-                <Text style={{ fontSize: 23 }}>{emojiSpan(e)}</Text>
+                <ColorEmoji style={{ fontSize: 23 }}>{e}</ColorEmoji>
               </TouchableOpacity>
             ))}
             <TouchableOpacity
@@ -1433,9 +1434,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <Text style={[styles.replyTitle, { color: theme.primary }]}>
               Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUserName}
             </Text>
-            <Text numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
-              {emojiSpan(replyPreview(replyingTo))}
-            </Text>
+            <ColorEmoji numberOfLines={1} style={[styles.replyPreview, { color: theme.textSecondary }]}>
+              {replyPreview(replyingTo)}
+            </ColorEmoji>
           </View>
           <TouchableOpacity onPress={() => setReplyingTo(null)}>
             <Icon name="close" size={18} color={theme.textSecondary} />
@@ -1508,7 +1509,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 }}
                 accessibilityLabel={`Emoji ${e}`}
               >
-                <Text style={{ fontSize: 26 }}>{emojiSpan(e)}</Text>
+                <ColorEmoji style={{ fontSize: 26 }}>{e}</ColorEmoji>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -1624,7 +1625,7 @@ function replyPreview(m) {
   if (m.type === 'VIDEO') return '🎬 Video';
   if (m.type === 'VOICE') return 'Voice message';
   if (m.type === 'FILE' || m.type === 'DOCUMENT') return '📄 ' + (m.content || 'File');
-  return emojiSpan(m.content || 'Message');
+  return m.content || 'Message';
 }
 
 function mimeFor(m) {
@@ -1939,13 +1940,13 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                             {refName}
                           </Text>
                           <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
-                            {replyPreviewOf ? emojiSpan(replyPreviewOf(message.reply_to)) : '…'}
+                            {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
                       )}
-                      <Text style={[styles.msgEmojiSingle]}>
-                        {emojiSpan(message.content)}
-                      </Text>
+                      <ColorEmoji style={[styles.msgEmojiSingle]}>
+                        {message.content}
+                      </ColorEmoji>
                     </View>
                   ) : (
                     <View>
@@ -1959,18 +1960,18 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                             {refName}
                           </Text>
                           <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
-                            {replyPreviewOf ? emojiSpan(replyPreviewOf(message.reply_to)) : '…'}
+                            {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
                       )}
-                      <Text
+                      <ColorEmoji
                         style={[
                           styles.msgText,
                           { color: isSent ? '#fff' : theme.receivedText },
                         ]}
                       >
-                        {emojiSpan(message.content)}
-                      </Text>
+                        {message.content}
+                      </ColorEmoji>
                     </View>
                   )}
                 </View>
@@ -2005,7 +2006,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
           >
             {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
               <View key={i} style={styles.reactionBadgeItem}>
-                <Text style={{ fontSize: 12 }}>{emojiSpan(emoji)}</Text>
+                <ColorEmoji style={{ fontSize: 12 }}>{emoji}</ColorEmoji>
                 {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
               </View>
             ))}
@@ -2101,7 +2102,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10,
-    borderBottomWidth: 1,
+    borderBottomWidth: 1, zIndex: 30, elevation: 5,
   },
   backBtn: { marginRight: 8 },
   avatarSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10, overflow: 'hidden' },
@@ -2155,7 +2156,7 @@ headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal:
   replyTitle: { fontWeight: '700', fontSize: 12 },
   replyPreview: { fontSize: 12 },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
-  menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)' },
+  menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
   reactionPop: {
     position: 'absolute',
     flexDirection: 'row',
@@ -2187,7 +2188,7 @@ headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal:
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
-  fab: { position: 'absolute', right: 16, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
+  fab: { position: 'absolute', right: 16, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
   fabChevrons: { alignItems: 'center', justifyContent: 'center' },
   fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },

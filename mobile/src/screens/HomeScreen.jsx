@@ -6,7 +6,7 @@ import { fetchUsers } from '../services/auth';
 import { loadUsers, saveUsers, loadConversations, saveConversations, clearConversationCache } from '../services/cache';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
-import { emojiSpan } from '../utils/emoji';
+import ColorEmoji from '../components/ColorEmoji';
 import { absUrl, SERVER_URL } from '../config';
 import ContactsScreen from './ContactsScreen';
 
@@ -436,7 +436,7 @@ function ConversationRowFn({ contact, isOnline, lastSeen, onPress, onLongPress, 
         <View style={styles.rowPreviewRow}>
           <View style={{ flex: 1 }}>
             <Text numberOfLines={1} style={[styles.rowPreview, { color: theme.textSecondary }]}>
-              {(lastMsg ? emojiSpan(lastMsg) : null) || (isOnline ? 'Online' : 'Tap to say hello')}
+              {lastMsg ? <ColorEmoji>{lastMsg}</ColorEmoji> : (isOnline ? 'Online' : 'Tap to say hello')}
             </Text>
           </View>
           {!!unread && (
