@@ -320,7 +320,7 @@ export function DrawingToolbar({
           accessibilityLabel="Eraser"
           style={[styles.toolBtn, { backgroundColor: eraser ? 'rgba(108,60,233,0.25)' : 'rgba(0,0,0,0.05)' }]}
         >
-          <Icon name="eraser" size={20} color={eraser ? '#6C3CE9' : theme.textSecondary} />
+          <Icon name="backspace-outline" size={20} color={eraser ? '#6C3CE9' : theme.textSecondary} />
         </TouchableOpacity>
         <TouchableOpacity onPress={onClear} accessibilityLabel="Clear drawing" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
           <Icon name="trash-outline" size={20} color={theme.danger} />

@@ -1263,7 +1263,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               style={styles.headerMenuItem}
               onPress={() => {
                 setHeaderMenu(false);
-                Alert.alert('Clear chat', 'Remove all messages on this device?', [
+                Alert.alert('Clear chat', 'Remove all messages from this device only? They stay on the server and for the other person.', [
                   { text: 'Clear', style: 'destructive', onPress: clearChatLocal },
                   { text: 'Cancel', style: 'cancel' },
                 ]);
@@ -1460,7 +1460,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
             <Icon name="mic" size={15} color={theme.danger} />
             <Text style={[styles.recTime, { color: theme.text }]}>
-              0:{String(recordTime).padStart(2, '0')}
+              {fmtDur(recordTime)}
             </Text>
           </View>
           <View style={{ flex: 1 }} />
@@ -1489,7 +1489,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       {/* Emoji quick-pick strip (WhatsApp-style emoji button) */}
       {showEmoji && !recording && !selMode && (
         <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('emoji')}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             {emojiQuick.map((e) => (
               <TouchableOpacity
                 key={e}
@@ -1539,7 +1539,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               onPress={() => { if (showEmoji) setShowEmoji(false); setShowAttach(!showAttach); }}
               accessibilityLabel="Add attachments"
             >
-              <Icon name="paperclip" size={20} color={showAttach ? '#fff' : theme.primary} />
+              <Icon name="attach-outline" size={20} color={showAttach ? '#fff' : theme.primary} />
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
@@ -1879,8 +1879,8 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                       </View>
                       <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
                         {voicePlaying
-                          ? `0:${String(Math.max(0, Math.min(message.duration || 0, Math.floor((voiceProgress || 0) * (message.duration || 0))))).padStart(2, '0')}`
-                          : `0:${String(message.duration || 26).padStart(2, '0')}`} · 1×
+                          ? fmtDur(Math.min(message.duration || 0, (voiceProgress || 0) * (message.duration || 0)))
+                          : fmtDur(message.duration || 26)} · 1×
                       </Text>
                     </View>
                   </View>
@@ -2055,6 +2055,12 @@ function timeOf(t) {
   const d = new Date(t);
   if (isNaN(d.getTime())) return '';
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// Voice durations as m:ss (rolls over at 60s instead of showing "0:61").
+function fmtDur(totalSec) {
+  const s = Math.max(0, Math.floor(Number(totalSec) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function isEmojiOnly(s) {

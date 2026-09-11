@@ -37,20 +37,6 @@ export function extractNotifPayload(remoteMessage) {
   };
 }
 
-async function createNotificationChannel() {
-  try {
-    await messaging().android.createChannel({
-      id: NOTIFICATION_CHANNEL_ID,
-      name: 'Chat notifications',
-      importance: 4, // IMPORTANCE_HIGH
-      sound: 'default',
-      vibration: true,
-    });
-  } catch (e) {
-    console.warn('createNotificationChannel failed:', e.message);
-  }
-}
-
 async function ensureNotifeeChannel() {
   try {
     const existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
@@ -195,7 +181,6 @@ async function registerToken(token, userToken) {
 export async function startPush(userToken) {
   if (Platform.OS !== 'android') return false;
   try {
-    await createNotificationChannel();
     await ensureNotifeeChannel();
     const hasPerm = await requestNotificationPermission();
     try {
