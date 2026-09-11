@@ -1254,6 +1254,47 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         )}
       </View>
 
+      {/* Action toolbar shown while selecting (long-press a message): reply, edit, delete, unsend */}
+      {selMode && (
+        <View style={[styles.selToolbar, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
+          <TouchableOpacity
+            style={[styles.selToolItem, selSet.size !== 1 && styles.selToolItemDisabled]}
+            disabled={selSet.size !== 1}
+            onPress={replySelected}
+            accessibilityLabel="Reply to selected"
+          >
+            <Icon name="arrow-back" size={18} color={theme.primary} />
+            <Text style={[styles.selToolLabel, { color: theme.primary }]}>Reply</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.selToolItem, !(selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && selOne.content && !selOne._pending) && styles.selToolItemDisabled]}
+            disabled={!(selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && selOne.content && !selOne._pending)}
+            onPress={() => { setSelMenu(false); doAction('edit', selOne); exitSelect(); }}
+            accessibilityLabel="Edit selected"
+          >
+            <Icon name="create-outline" size={18} color={theme.primary} />
+            <Text style={[styles.selToolLabel, { color: theme.primary }]}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.selToolItem}
+            onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); }}
+            accessibilityLabel="Delete for me"
+          >
+            <Icon name="trash-outline" size={18} color={theme.danger} />
+            <Text style={[styles.selToolLabel, { color: theme.danger }]}>Delete</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.selToolItem, !selectedMsgs.some((m) => m.sender_id === currentUser.id) && styles.selToolItemDisabled]}
+            disabled={!selectedMsgs.some((m) => m.sender_id === currentUser.id)}
+            onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => { if (m.sender_id === currentUser.id) deleteMessage(m, 'everyone'); }); exitSelect(); }}
+            accessibilityLabel="Unsend for everyone"
+          >
+            <Icon name="archive-outline" size={18} color={theme.danger} />
+            <Text style={[styles.selToolLabel, { color: theme.danger }]}>Unsend</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {selMenu && (
         <View style={styles.headerMenuOverlay}>
           <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setSelMenu(false)} accessibilityLabel="Close menu" />
@@ -1989,25 +2030,25 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               )}
             </TouchableOpacity>
-
-            {message.reactions && message.reactions.length > 0 && (
-              <TouchableOpacity
-                onPress={() => onLongPress(message)}
-                style={[
-                  styles.reactionBadge,
-                  { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
-                  { right: 4 },
-                ]}
-              >
-                {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
-                  <View key={i} style={styles.reactionBadgeItem}>
-                    <Text style={{ fontSize: 12 }}>{emojiSpan(emoji)}</Text>
-                    {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
-                  </View>
-                ))}
-              </TouchableOpacity>
-            )}
           </Animated.View>
+
+        {message.reactions && message.reactions.length > 0 && (
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => onLongPress(message)}
+            style={[
+              styles.reactionBadge,
+              { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
+            ]}
+          >
+            {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
+              <View key={i} style={styles.reactionBadgeItem}>
+                <Text style={{ fontSize: 12 }}>{emojiSpan(emoji)}</Text>
+                {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
+              </View>
+            ))}
+          </TouchableOpacity>
+        )}
         </View>
       </View>
   );
@@ -2106,6 +2147,10 @@ const styles = StyleSheet.create({
   avatarImg: { width: '100%', height: '100%' },
   headerName: { fontSize: 16, fontWeight: '700' },
   headerStatus: { fontSize: 12, marginLeft: 4 },
+  selToolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 6, borderBottomWidth: 1 },
+  selToolItem: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 4, minWidth: 64 },
+  selToolItemDisabled: { opacity: 0.35 },
+  selToolLabel: { fontSize: 11, marginTop: 2, fontWeight: '600' },
   messageList: { padding: 14, paddingBottom: 18 },
   msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
@@ -2121,7 +2166,7 @@ const styles = StyleSheet.create({
   msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
-  reactionBadge: { position: 'absolute', bottom: -8, borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+  reactionBadge: { alignSelf: 'flex-end', marginTop: -8, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
   reactionBadgeItem: { flexDirection: 'row', alignItems: 'center' },
   reactionBadgeCount: { fontSize: 10, marginLeft: 2 },
   headerIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
