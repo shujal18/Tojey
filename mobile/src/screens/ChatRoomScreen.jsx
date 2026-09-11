@@ -1254,47 +1254,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         )}
       </View>
 
-      {/* Action toolbar shown while selecting (long-press a message): reply, edit, delete, unsend */}
-      {selMode && (
-        <View style={[styles.selToolbar, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
-          <TouchableOpacity
-            style={[styles.selToolItem, selSet.size !== 1 && styles.selToolItemDisabled]}
-            disabled={selSet.size !== 1}
-            onPress={replySelected}
-            accessibilityLabel="Reply to selected"
-          >
-            <Icon name="arrow-back" size={18} color={theme.primary} />
-            <Text style={[styles.selToolLabel, { color: theme.primary }]}>Reply</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.selToolItem, !(selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && selOne.content && !selOne._pending) && styles.selToolItemDisabled]}
-            disabled={!(selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && selOne.content && !selOne._pending)}
-            onPress={() => { setSelMenu(false); doAction('edit', selOne); exitSelect(); }}
-            accessibilityLabel="Edit selected"
-          >
-            <Icon name="create-outline" size={18} color={theme.primary} />
-            <Text style={[styles.selToolLabel, { color: theme.primary }]}>Edit</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.selToolItem}
-            onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); }}
-            accessibilityLabel="Delete for me"
-          >
-            <Icon name="trash-outline" size={18} color={theme.danger} />
-            <Text style={[styles.selToolLabel, { color: theme.danger }]}>Delete</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.selToolItem, !selectedMsgs.some((m) => m.sender_id === currentUser.id) && styles.selToolItemDisabled]}
-            disabled={!selectedMsgs.some((m) => m.sender_id === currentUser.id)}
-            onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => { if (m.sender_id === currentUser.id) deleteMessage(m, 'everyone'); }); exitSelect(); }}
-            accessibilityLabel="Unsend for everyone"
-          >
-            <Icon name="archive-outline" size={18} color={theme.danger} />
-            <Text style={[styles.selToolLabel, { color: theme.danger }]}>Unsend</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
       {selMenu && (
         <View style={styles.headerMenuOverlay}>
           <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setSelMenu(false)} accessibilityLabel="Close menu" />
@@ -1849,9 +1808,9 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
               style={[
                 styles.bubble,
                 isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: receivedBubble, borderColor: 'rgba(255,255,255,0.07)' }],
+                singleEmoji && styles.bubbleEmojiOnly,
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
-                flash && { backgroundColor: 'rgba(124,77,255,0.34)' },
-                selActive && !singleEmoji && { backgroundColor: isSent ? mixWhite(theme.sentBubble, 0.35) : mixWhite(receivedBubble, 0.3) },
+                flash && { backgroundColor: 'rgba(255,255,255,0.08)' },
               ]}
               onPress={handlePress}
               onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); onEnterSelect && onEnterSelect(message); }}
@@ -1984,7 +1943,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                           </Text>
                         </TouchableOpacity>
                       )}
-                      <Text style={[styles.msgEmojiSingle, flash && { backgroundColor: 'rgba(124,77,255,0.28)', borderRadius: 22, paddingHorizontal: 16, paddingVertical: 4 }]}>
+                      <Text style={[styles.msgEmojiSingle]}>
                         {emojiSpan(message.content)}
                       </Text>
                     </View>
@@ -2023,7 +1982,6 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                   singleEmoji && { justifyContent: isSent ? 'flex-end' : 'flex-start' },
                   singleEmoji && styles.msgMetaPill,
                   singleEmoji && { alignSelf: isSent ? 'flex-end' : 'flex-start' },
-                  singleEmoji && selActive && { backgroundColor: 'rgba(124,77,255,0.45)' },
                 ]}>
                   {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
                   {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
@@ -2042,7 +2000,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
             onPress={() => onLongPress(message)}
             style={[
               styles.reactionBadge,
-              { backgroundColor: selMode ? 'rgba(255,255,255,0.5)' : theme.card, borderColor: theme.border },
+              { backgroundColor: theme.card, borderColor: theme.border },
             ]}
           >
             {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
@@ -2151,14 +2109,11 @@ const styles = StyleSheet.create({
   avatarImg: { width: '100%', height: '100%' },
   headerName: { fontSize: 16, fontWeight: '700' },
   headerStatus: { fontSize: 12, marginLeft: 4 },
-  selToolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 6, borderBottomWidth: 1 },
-  selToolItem: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 4, minWidth: 64 },
-  selToolItemDisabled: { opacity: 0.35 },
-  selToolLabel: { fontSize: 11, marginTop: 2, fontWeight: '600' },
   messageList: { padding: 14, paddingBottom: 18 },
   msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
   bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
+  bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, paddingHorizontal: 4, paddingVertical: 4, overflow: 'visible' },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
   msgText: { fontSize: 15, lineHeight: 21 },

@@ -631,14 +631,14 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                 </TouchableOpacity>
               </View>
               <View style={[styles.reactRow, { borderTopColor: theme.border }]}>
-                {['❤️', '😂', '🙂'].map((r) => (
+                {quickReactions.map((r) => (
                   <TouchableOpacity
                     key={r}
                     onPress={() => doReact(r)}
                     style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
                     accessibilityLabel={`React ${r}`}
                   >
-                    <Text style={{ fontSize: 17 }}>{r}</Text>
+                    <Text style={{ fontSize: 17 }}>{emojiSpan(r)}</Text>
                   </TouchableOpacity>
                 ))}
                 <TouchableOpacity
