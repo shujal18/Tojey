@@ -1507,7 +1507,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </View>
       )}
 
-      {/* Composer: [emoji] [input…………] [attachment] [camera] [mic/send] */}
+      {/* Composer: [emoji] [input…………] [attachment] [mic/send] (camera lives in the attachment menu) */}
       {!recording && !selMode && (
         <View
           style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}
@@ -1540,13 +1540,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               accessibilityLabel="Add attachments"
             >
               <Icon name="attach-outline" size={20} color={showAttach ? '#fff' : theme.primary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: theme.inputBg }]}
-              onPress={() => pickMedia('camera')}
-              accessibilityLabel="Open camera"
-            >
-              <Icon name="camera-outline" size={20} color={theme.primary} />
             </TouchableOpacity>
             {text.trim() ? (
               <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
