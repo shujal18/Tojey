@@ -8,6 +8,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import ColorEmoji from '../components/ColorEmoji';
 import { absUrl, SERVER_URL } from '../config';
+import { fs } from '../utils/size';
 import ContactsScreen from './ContactsScreen';
 
 export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
@@ -330,7 +331,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               }}
             >
               <Icon name="notifications-outline" size={18} color={theme.primary} />
-              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: 15 }}>Send Notification</Text>
+              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Send Notification</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.actionOption, { backgroundColor: theme.inputBg, marginTop: 10 }]}
@@ -340,13 +341,13 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               }}
             >
               <Icon name="trash-outline" size={18} color={theme.danger} />
-              <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 12, fontSize: 15 }}>Clear Messages</Text>
+              <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Clear Messages</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => setActionTarget(null)}
               style={{ alignSelf: 'center', marginTop: 16, paddingHorizontal: 18, paddingVertical: 8 }}
             >
-              <Text style={{ color: theme.textSecondary, fontWeight: '600', fontSize: 14 }}>Cancel</Text>
+              <Text style={{ color: theme.textSecondary, fontWeight: '600', fontSize: fs(14) }}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -368,7 +369,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               style={[styles.notifInput, { backgroundColor: theme.inputBg, color: theme.text }]}
             />
             {notifResult && (
-              <Text style={{ color: notifResult.error ? theme.danger : theme.online, fontSize: 13, marginTop: 10 }}>
+              <Text style={{ color: notifResult.error ? theme.danger : theme.online, fontSize: fs(13), marginTop: 10 }}>
                 {notifResult.error || notifResult.text}
               </Text>
             )}
@@ -446,7 +447,7 @@ function ConversationRowFn({ contact, isOnline, lastSeen, onPress, onLongPress, 
           )}
           <View style={[styles.onlineChip, { backgroundColor: theme.primaryLight }]}>
             <Icon name={isOnline ? 'radio-button-on' : 'radio-button-off'} size={12} color={isOnline ? theme.online : theme.textSecondary} />
-            <Text style={{ fontSize: 11, color: isOnline ? theme.online : theme.textSecondary, marginLeft: 3 }}>
+            <Text style={{ fontSize: fs(11), color: isOnline ? theme.online : theme.textSecondary, marginLeft: 3 }}>
               {isOnline ? 'Online' : presenceText(lastSeen)}
             </Text>
 </View>
@@ -508,51 +509,51 @@ const styles = StyleSheet.create({
   screenWrap: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10,
+    paddingHorizontal: fs(16), paddingTop: fs(14), paddingBottom: fs(10),
   },
-  title: { fontSize: 26, fontWeight: '800' },
+  title: { fontSize: fs(26), fontWeight: '800' },
   headerBtn: { padding: 6 },
   searchBox: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    marginHorizontal: 16, marginBottom: 8, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9,
+    marginHorizontal: fs(16), marginBottom: 8, borderRadius: fs(12), paddingHorizontal: fs(12), paddingVertical: fs(9),
   },
-  searchInput: { flex: 1, fontSize: 14, padding: 0 },
+  searchInput: { flex: 1, fontSize: fs(14), padding: 0 },
   list: { paddingVertical: 4 },
-  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10 },
-  avatarWrap: { position: 'relative', marginRight: 12 },
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(10) },
+  avatarWrap: { position: 'relative', marginRight: fs(12) },
   avatar: {
-    width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+    width: fs(50), height: fs(50), borderRadius: fs(25), alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   avatarImg: { width: '100%', height: '100%' },
-  avatarText: { color: '#fff', fontSize: 20, fontWeight: '700' },
+  avatarText: { color: '#fff', fontSize: fs(20), fontWeight: '700' },
   onlineDot: {
-    position: 'absolute', bottom: 0, right: 0, width: 13, height: 13, borderRadius: 7,
+    position: 'absolute', bottom: 0, right: 0, width: fs(13), height: fs(13), borderRadius: 7,
     backgroundColor: '#7C4DFF', borderWidth: 2, borderColor: '#F8F7FC',
   },
   rowBody: { flex: 1 },
   rowTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  rowName: { fontSize: 16, fontWeight: '600' },
-  rowTime: { fontSize: 12 },
+  rowName: { fontSize: fs(16), fontWeight: '600' },
+  rowTime: { fontSize: fs(12) },
   rowPreviewRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3, gap: 8 },
-  rowPreview: { fontSize: 13 },
-  onlineChip: { flexDirection: 'row', alignItems: 'center', borderRadius: 10, paddingHorizontal: 6, paddingVertical: 2 },
-  unreadBadge: { minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
-  unreadBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  rowPreview: { fontSize: fs(13) },
+  onlineChip: { flexDirection: 'row', alignItems: 'center', borderRadius: fs(10), paddingHorizontal: 6, paddingVertical: 2 },
+  unreadBadge: { minWidth: fs(20), height: fs(20), borderRadius: fs(10), alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  unreadBadgeText: { color: '#fff', fontSize: fs(11), fontWeight: '700' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', marginTop: 14 },
-  emptySub: { fontSize: 13, marginTop: 8, textAlign: 'center' },
+  emptyTitle: { fontSize: fs(18), fontWeight: '700', marginTop: 14 },
+  emptySub: { fontSize: fs(13), marginTop: 8, textAlign: 'center' },
   nav: {
-    flexDirection: 'row', borderTopWidth: 1, paddingVertical: 8, paddingBottom: 16,
+    flexDirection: 'row', borderTopWidth: 1, paddingVertical: fs(8), paddingBottom: fs(16),
   },
   tab: { flex: 1, alignItems: 'center', gap: 3 },
-  tabLabel: { fontSize: 11 },
+  tabLabel: { fontSize: fs(11) },
   tabLabelActive: { fontWeight: '700' },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  modalCard: { borderRadius: 16, padding: 22, width: '100%', maxWidth: 340 },
-  modalTitle: { fontSize: 17, fontWeight: '700' },
-  actionOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 13 },
-  notifInput: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, marginTop: 14, minHeight: 48, maxHeight: 120, textAlignVertical: 'top' },
-  modalSub: { fontSize: 13, marginTop: 8, lineHeight: 19 },
+  modalCard: { borderRadius: fs(16), padding: fs(22), width: '100%', maxWidth: 340 },
+  modalTitle: { fontSize: fs(17), fontWeight: '700' },
+  actionOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: fs(12), paddingVertical: fs(13) },
+  notifInput: { borderRadius: fs(12), paddingHorizontal: fs(12), paddingVertical: fs(10), fontSize: fs(15), marginTop: 14, minHeight: 48, maxHeight: 120, textAlignVertical: 'top' },
+  modalSub: { fontSize: fs(13), marginTop: 8, lineHeight: fs(19) },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
-  modalBtn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10 },
+  modalBtn: { paddingHorizontal: fs(18), paddingVertical: fs(10), borderRadius: fs(10) },
 });

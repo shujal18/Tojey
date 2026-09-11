@@ -8,6 +8,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
 import ColorEmoji from '../components/ColorEmoji';
+import { fs } from '../utils/size';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
 const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
@@ -78,7 +79,7 @@ class RowBoundary extends React.Component {
       return (
         <View style={[styles.msgRow, { justifyContent: this.props.isSent ? 'flex-end' : 'flex-start' }]}>
           <View style={[styles.bubble, { backgroundColor: INCOMING_MESSAGE_COLOR, opacity: 0.55 }]}>
-            <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12 }}>Message could not be displayed</Text>
+            <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: fs(12) }}>Message could not be displayed</Text>
           </View>
         </View>
       );
@@ -97,8 +98,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [reactionMenu, setReactionMenu] = useState(null);
   const [reactionPop, setReactionPop] = useState(null);
   const [headerMenu, setHeaderMenu] = useState(false);
-  const [selMode, setSelMode] = useState(false);
-  const [selSet, setSelSet] = useState(new Set());
   const [selMenu, setSelMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
@@ -285,15 +284,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           voicePlaying={playingVoiceId === safe.id}
           voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
           onPlayVoice={toggleVoicePlayback}
-          selMode={selMode}
-          selActive={selSet.has(safe.id)}
-          onSelectPress={() => toggleSelect(safe.id)}
-          onEnterSelect={() => enterSelect(safe)}
         />
       </RowBoundary>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect, enterSelect]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback]);
 
   const onType = (t) => {
     setText(t);
@@ -789,61 +784,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     else if (action === 'save') { if (message && message.media_url) downloadAndOpen(message); }
   };
 
-  const exitSelect = () => { setSelMode(false); setSelSet(new Set()); };
-
-  const toggleSelect = useCallback((id) => {
-    setSelSet((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  // Tap-to-select: single tap on a TEXT message enters selection mode with it selected.
-  const enterSelect = useCallback((m) => {
-    setSelMode(true);
-    if (m && m.id) {
-      setSelSet((prev) => {
-        if (prev.has(m.id)) return prev;
-        const next = new Set(prev);
-        next.add(m.id);
-        return next;
-      });
-    }
-  }, []);
-
-  // Leave selection mode automatically once nothing is selected.
-  useEffect(() => {
-    if (selMode && selSet.size === 0) setSelMode(false);
-  }, [selMode, selSet]);
-
   const clearChatLocal = () => {
     setMessages([]);
     setReplyingTo(null);
     setEditing(null);
     setText('');
     clearConversationCache(currentUser.id, otherUserId);
-    setSelMode(false);
-    setSelSet(new Set());
-  };
-
-  const copySelected = () => {
-    const parts = messages
-      .filter((m) => selSet.has(m.id) && m.type === 'TEXT' && m.content)
-      .map((m) => m.content)
-      .join('\n');
-    if (parts) Clipboard.setString(parts);
-    exitSelect();
-  };
-
-  const selectedMsgs = messages.filter((m) => selSet.has(m.id));
-  const selOne = selectedMsgs.length === 1 ? selectedMsgs[0] : null;
-
-  const replySelected = () => {
-    const last = selectedMsgs[selectedMsgs.length - 1];
-    if (last) setReplyingTo(last);
-    exitSelect();
+    setReactionPop(null);
+    setSelMenu(false);
   };
 
   const sendFile = (asset) => {
@@ -1214,86 +1162,78 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
     >
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
-        {selMode ? (
-          <>
-            <TouchableOpacity onPress={exitSelect} style={styles.backBtn} accessibilityLabel="Cancel selection">
-              <Icon name="close" size={26} color={theme.primary} />
-            </TouchableOpacity>
-            <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>
-              {selSet.size} selected
+        <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+          <Icon name="chevron-back" size={28} color={theme.primary} />
+        </TouchableOpacity>
+        <View style={[styles.avatarSmall, { backgroundColor: otherUserId === 1 ? theme.primary : theme.primaryDeep }]}>
+          {otherUserAvatar ? (
+            <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarImg} />
+          ) : (
+            <Text style={styles.avatarSmallText}>{otherUserName[0].toUpperCase()}</Text>
+          )}
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.headerName, { color: theme.text }]}>{otherUserName}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {typing && <Icon name="pulse" size={12} color={theme.primary} />}
+            <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
+              {headerStatus}
             </Text>
-            <TouchableOpacity onPress={() => setSelMenu((v) => !v)} style={styles.headerIconBtn} accessibilityLabel="Selected messages options">
-              <Icon name="ellipsis-vertical" size={22} color={theme.text} />
-            </TouchableOpacity>
-          </>
-        ) : (
-          <>
-            <TouchableOpacity onPress={onBack} style={styles.backBtn}>
-              <Icon name="chevron-back" size={28} color={theme.primary} />
-            </TouchableOpacity>
-            <View style={[styles.avatarSmall, { backgroundColor: otherUserId === 1 ? theme.primary : theme.primaryDeep }]}>
-              {otherUserAvatar ? (
-                <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarImg} />
-              ) : (
-                <Text style={styles.avatarSmallText}>{otherUserName[0].toUpperCase()}</Text>
-              )}
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.headerName, { color: theme.text }]}>{otherUserName}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                {typing && <Icon name="pulse" size={12} color={theme.primary} />}
-                <Text style={[styles.headerStatus, { color: typing ? theme.primary : (isOnline ? theme.online : theme.textSecondary) }]}>
-                  {headerStatus}
-                </Text>
-              </View>
-            </View>
-            <TouchableOpacity onPress={() => setHeaderMenu((v) => !v)} style={styles.headerIconBtn} accessibilityLabel="Chat options">
-              <Icon name="ellipsis-vertical" size={22} color={theme.text} />
-            </TouchableOpacity>
-          </>
-        )}
+          </View>
+        </View>
+        <TouchableOpacity
+          onPress={() => { if (reactionPop) { setSelMenu(true); } else { setHeaderMenu((v) => !v); } }}
+          style={styles.headerIconBtn}
+          accessibilityLabel={reactionPop ? 'Message options' : 'Chat options'}
+        >
+          <Icon name="ellipsis-vertical" size={22} color={theme.text} />
+        </TouchableOpacity>
       </View>
 
-      {selMenu && (
+      {selMenu && reactionPop && (
         <View style={styles.headerMenuOverlay}>
-          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setSelMenu(false)} accessibilityLabel="Close menu" />
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => { setSelMenu(false); setReactionPop(null); }} accessibilityLabel="Close menu" />
           <View style={[styles.headerMenu, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); replySelected(); }} accessibilityLabel="Reply to selected">
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReplyingTo(reactionPop.msg); setReactionPop(null); }} accessibilityLabel="Reply to message">
               <Icon name="return-down-back-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: 15 }}>Reply</Text>
+              <Text style={{ color: theme.text, fontSize: fs(15) }}>Reply</Text>
             </TouchableOpacity>
-            {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
-              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); doAction('edit', selOne); exitSelect(); }} accessibilityLabel="Edit selected">
+            {!!reactionPop.msg && reactionPop.msg.sender_id === currentUser.id && reactionPop.msg.type === 'TEXT' && !reactionPop.msg.is_deleted_for_everyone && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); doAction('edit', reactionPop.msg); }} accessibilityLabel="Edit message">
                 <Icon name="create-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-                <Text style={{ color: theme.text, fontSize: 15 }}>Edit</Text>
+                <Text style={{ color: theme.text, fontSize: fs(15) }}>Edit</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); copySelected(); }} accessibilityLabel="Copy selected">
-              <Icon name="copy-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: 15 }}>Copy</Text>
-            </TouchableOpacity>
-            {selOne && selOne.media_url && (
-              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); downloadAndOpen(selOne); exitSelect(); }} accessibilityLabel="Save selected">
+            {!!reactionPop.msg && !!reactionPop.msg.content && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); Clipboard.setString(reactionPop.msg.content); }} accessibilityLabel="Copy message">
+                <Icon name="copy-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: fs(15) }}>Copy</Text>
+              </TouchableOpacity>
+            )}
+            {!!reactionPop.msg && !!reactionPop.msg.media_url && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); downloadAndOpen(reactionPop.msg); }} accessibilityLabel="Save message">
                 <Icon name="download-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-                <Text style={{ color: theme.text, fontSize: 15 }}>Save</Text>
+                <Text style={{ color: theme.text, fontSize: fs(15) }}>Save</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity
-              style={styles.headerMenuItem}
-              onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); }}
-              accessibilityLabel="Delete for me"
-            >
-              <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.danger, fontSize: 15 }}>Delete for me</Text>
-            </TouchableOpacity>
-            {selectedMsgs.some((m) => m.sender_id === currentUser.id) && (
+            {!!reactionPop.msg && !reactionPop.msg.is_deleted_for_everyone && (
               <TouchableOpacity
                 style={styles.headerMenuItem}
-                onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => { if (m.sender_id === currentUser.id) deleteMessage(m, 'everyone'); }); exitSelect(); }}
+                onPress={() => { setSelMenu(false); setReactionPop(null); deleteMessage(reactionPop.msg, 'me'); }}
+                accessibilityLabel="Delete for me"
+              >
+                <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.danger, fontSize: fs(15) }}>Delete for me</Text>
+              </TouchableOpacity>
+            )}
+            {!!reactionPop.msg && reactionPop.msg.sender_id === currentUser.id && !reactionPop.msg.is_deleted_for_everyone && (
+              <TouchableOpacity
+                style={styles.headerMenuItem}
+                onPress={() => { setSelMenu(false); setReactionPop(null); deleteMessage(reactionPop.msg, 'everyone'); }}
                 accessibilityLabel="Unsend for everyone"
               >
                 <Icon name="arrow-undo-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
-                <Text style={{ color: theme.danger, fontSize: 15 }}>Unsend</Text>
+                <Text style={{ color: theme.danger, fontSize: fs(15) }}>Unsend</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -1316,7 +1256,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               accessibilityLabel="Clear chat"
             >
               <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.danger, fontSize: 15 }}>Clear chat</Text>
+              <Text style={{ color: theme.danger, fontSize: fs(15) }}>Clear chat</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1353,7 +1293,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       />
       </View>
 
-      {!atBottomNear && !selMode && !recording && (
+      {!atBottomNear  && !recording && (
         <TouchableOpacity
           onPress={() => {
             requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
@@ -1386,7 +1326,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <View style={styles.reactionRow}>
               {sheetReactions.map((r) => (
                 <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                  <ColorEmoji style={{ fontSize: 22 }}>{r}</ColorEmoji>
+                  <ColorEmoji style={{ fontSize: fs(22) }}>{r}</ColorEmoji>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1411,7 +1351,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 style={styles.reactionPopBtn}
                 accessibilityLabel={`React ${e}`}
               >
-                <ColorEmoji style={{ fontSize: 23 }}>{e}</ColorEmoji>
+                <ColorEmoji style={{ fontSize: fs(23) }}>{e}</ColorEmoji>
               </TouchableOpacity>
             ))}
             <TouchableOpacity
@@ -1463,7 +1403,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Recording UI */}
-      {recording && !selMode && (
+      {recording  && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('rec')}>
           <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
             <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
@@ -1487,7 +1427,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Attach options: Photo · Camera · Files */}
-      {showAttach && !recording && !selMode && (
+      {showAttach && !recording  && (
         <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('attach')}>
           <AttachBtn label="Photo" icon="image-outline" color={theme.primary} onPress={() => pickMedia('photo')} theme={theme} />
           <AttachBtn label="Camera" icon="camera-outline" color={theme.primaryDeep} onPress={() => pickMedia('camera')} theme={theme} />
@@ -1496,7 +1436,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Emoji quick-pick strip (WhatsApp-style emoji button) */}
-      {showEmoji && !recording && !selMode && (
+      {showEmoji && !recording  && (
         <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('emoji')}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             {emojiQuick.map((e) => (
@@ -1509,7 +1449,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 }}
                 accessibilityLabel={`Emoji ${e}`}
               >
-                <ColorEmoji style={{ fontSize: 26 }}>{e}</ColorEmoji>
+                <ColorEmoji style={{ fontSize: fs(26) }}>{e}</ColorEmoji>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -1517,7 +1457,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Composer: [emoji] [input…………] [attachment] [mic/send] (camera lives in the attachment menu) */}
-      {!recording && !selMode && (
+      {!recording  && (
         <View
           style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}
           onLayout={(e) => setComposerH(Math.round(e.nativeEvent.layout.height))}
@@ -1700,7 +1640,7 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress, onEnterSelect }) {
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const revealOpacity = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
@@ -1757,10 +1697,6 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   const lastTap = useRef(0);
   const singleTimer = useRef(null);
   const handlePress = () => {
-    if (selMode) {
-      onSelectPress && onSelectPress(message);
-      return;
-    }
     const now = Date.now();
     if (now - lastTap.current < 300) {
       clearTimeout(singleTimer.current);
@@ -1782,11 +1718,6 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     }
     if (m.type === 'IMAGE' || m.type === 'VIDEO' || m.type === 'FILE' || m.type === 'DOCUMENT') {
       onOpenMedia(m);
-      return;
-    }
-    // Single tap on a TEXT message enters selection mode (media keeps tap-to-open).
-    if (m.type === 'TEXT' && onEnterSelect) {
-      onEnterSelect(m);
     }
   };
 
@@ -1814,7 +1745,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 flash && { backgroundColor: 'rgba(255,255,255,0.08)' },
               ]}
               onPress={handlePress}
-              onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); onEnterSelect && onEnterSelect(message); }}
+              onLongPress={() => { clearTimeout(singleTimer.current); onLongPress(message); }}
               delayLongPress={350}
             >
               {message.is_deleted_for_everyone ? (
@@ -1845,7 +1776,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                       onPress={() => (onRetry ? onRetry(message) : null)}
                     >
                       <Icon name="alert-circle-outline" size={26} color="#fff" />
-                      <Text style={{ color: '#fff', fontSize: 12, marginTop: 4, fontWeight: '600' }}>
+                      <Text style={{ color: '#fff', fontSize: fs(12), marginTop: 4, fontWeight: '600' }}>
                         Tap to retry
                       </Text>
                     </TouchableOpacity>
@@ -1873,7 +1804,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                       <View style={{ height: 2, marginTop: 5, borderRadius: 1, overflow: 'hidden', backgroundColor: isSent ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.12)' }}>
                         <View style={{ width: voicePct, height: 2, backgroundColor: isSent ? '#fff' : theme.primary }} />
                       </View>
-                      <Text style={{ marginTop: 5, fontSize: 11, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
+                      <Text style={{ marginTop: 5, fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
                         {voicePlaying
                           ? fmtDur(Math.min(message.duration || 0, (voiceProgress || 0) * (message.duration || 0)))
                           : fmtDur(message.duration || 26)} · 1×
@@ -1883,13 +1814,13 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                   {message._uploading && (
                     <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center' }}>
                       <ArcProgress size={28} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
-                      <Text style={{ marginLeft: 6, fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
+                      <Text style={{ marginLeft: 6, fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
                         {Math.round((message._uploadProgress || 0) * 100)}%
                       </Text>
                     </View>
                   )}
                   {message._uploadError && (
-                    <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 4 }}>
+                    <Text style={{ fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 4 }}>
                       Upload failed · tap to retry
                     </Text>
                   )}
@@ -1900,16 +1831,16 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                     <Icon name="document" size={18} color="#fff" />
                   </View>
                   <View style={{ marginLeft: 10, flex: 1 }}>
-                    <Text numberOfLines={1} style={{ fontSize: 13, fontWeight: '600', color: isSent ? '#fff' : theme.receivedText, maxWidth: 150 }}>
+                    <Text numberOfLines={1} style={{ fontSize: fs(13), fontWeight: '600', color: isSent ? '#fff' : theme.receivedText, maxWidth: 150 }}>
                       {(message.file_name || message.content || 'Document')}
                     </Text>
-                    <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary, marginTop: 2 }}>
+                    <Text style={{ fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary, marginTop: 2 }}>
                       {formatBytes(message.media_size || 0) || 'File'}
                     </Text>
                     {message._uploading ? (
                       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
                         <ArcProgress size={30} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
-                        <Text style={{ fontSize: 10, marginLeft: 6, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
+                        <Text style={{ fontSize: fs(10), marginLeft: 6, color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
                           {Math.round((message._uploadProgress || 0) * 100)}%
                         </Text>
                         {onCancelUpload && (
@@ -1920,7 +1851,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                       </View>
                     ) : null}
                     {message._uploadError && (
-                      <Text style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 2 }}>
+                      <Text style={{ fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 2 }}>
                         Upload failed · tap to retry
                       </Text>
                     )}
@@ -1936,10 +1867,10 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                           onPress={() => { if (onJumpToReply) onJumpToReply(message.reply_to); }}
                           style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)' }]}
                         >
-                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : '#9C86F5' }}>
+                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: fs(11), color: isSent ? '#fff' : '#9C86F5' }}>
                             {refName}
                           </Text>
-                          <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
+                          <Text numberOfLines={2} style={{ fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
                             {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
@@ -1956,10 +1887,10 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                           onPress={() => { if (onJumpToReply) onJumpToReply(message.reply_to); }}
                           style={[styles.replyRef, { backgroundColor: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)' }]}
                         >
-                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: 11, color: isSent ? '#fff' : '#9C86F5' }}>
+                          <Text numberOfLines={1} style={{ fontWeight: '700', fontSize: fs(11), color: isSent ? '#fff' : '#9C86F5' }}>
                             {refName}
                           </Text>
-                          <Text numberOfLines={2} style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
+                          <Text numberOfLines={2} style={{ fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
                             {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
@@ -2006,7 +1937,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
           >
             {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
               <View key={i} style={styles.reactionBadgeItem}>
-                <ColorEmoji style={{ fontSize: 12 }}>{emoji}</ColorEmoji>
+                <ColorEmoji style={{ fontSize: fs(12) }}>{emoji}</ColorEmoji>
                 {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
               </View>
             ))}
@@ -2101,67 +2032,67 @@ function mixWhite(hex, amt) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
-    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(12), paddingVertical: fs(9),
     borderBottomWidth: 1, zIndex: 30, elevation: 5,
   },
-  backBtn: { marginRight: 8 },
-  avatarSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 10, overflow: 'hidden' },
-  avatarSmallText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  backBtn: { marginRight: fs(6) },
+  avatarSmall: { width: fs(40), height: fs(40), borderRadius: fs(20), alignItems: 'center', justifyContent: 'center', marginRight: fs(10), overflow: 'hidden' },
+  avatarSmallText: { color: '#fff', fontSize: fs(16), fontWeight: '700' },
   avatarImg: { width: '100%', height: '100%' },
-  headerName: { fontSize: 16, fontWeight: '700' },
-  headerStatus: { fontSize: 12, marginLeft: 4 },
-  messageList: { padding: 14, paddingBottom: 18 },
+  headerName: { fontSize: fs(16), fontWeight: '700' },
+  headerStatus: { fontSize: fs(12), marginLeft: 4 },
+  messageList: { padding: fs(14), paddingBottom: fs(18) },
   msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
-  bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, overflow: 'hidden' },
+  bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14), overflow: 'hidden' },
   bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, paddingHorizontal: 4, paddingVertical: 4, overflow: 'visible' },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
-  msgText: { fontSize: 15, lineHeight: 21 },
+  msgText: { fontSize: fs(15), lineHeight: fs(21) },
   msgEmojiWrap: { paddingVertical: 2 },
-  msgEmoji: { fontSize: 30, lineHeight: 36, paddingHorizontal: 10, paddingVertical: 4 },
-  msgEmojiSingle: { fontSize: 30, lineHeight: 36, paddingHorizontal: 4, opacity: 1 },
+  msgEmoji: { fontSize: fs(30), lineHeight: fs(36), paddingHorizontal: fs(10), paddingVertical: 4 },
+  msgEmojiSingle: { fontSize: fs(30), lineHeight: fs(36), paddingHorizontal: 4, opacity: 1 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
-  msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2 },
-  metaText: { fontSize: 10, color: '#9B96A8' },
+  msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: fs(10), paddingHorizontal: fs(7), paddingVertical: 2 },
+  metaText: { fontSize: fs(10), color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
-  reactionBadge: { alignSelf: 'flex-end', marginTop: -8, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+  reactionBadge: { alignSelf: 'flex-end', marginTop: -8, borderRadius: fs(12), paddingHorizontal: fs(8), paddingVertical: 3, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
   reactionBadgeItem: { flexDirection: 'row', alignItems: 'center' },
-  reactionBadgeCount: { fontSize: 10, marginLeft: 2 },
-  headerIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
+  reactionBadgeCount: { fontSize: fs(10), marginLeft: 2 },
+  headerIconBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
   headerMenuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, justifyContent: 'flex-start' },
-  headerMenu: { alignSelf: 'flex-end', marginTop: 62, marginRight: 8, borderRadius: 14, minWidth: 200, paddingVertical: 6, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
-headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
-  composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
-  composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  emojiPickBtn: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 1 },
-  attachBtn: { alignItems: 'center', marginRight: 20 },
-  attachIcon: { width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  attachLabel: { fontSize: 12, marginTop: 6 },
-  inputWrap: { flex: 1, borderRadius: 22, paddingHorizontal: 12, maxHeight: 100, justifyContent: 'center' },
-  input: { fontSize: 14, paddingVertical: 8, maxHeight: 100 },
-  sendBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-  micBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-  micBtnRec: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: '#E53935', shadowOpacity: 0.35, shadowRadius: 7, shadowOffset: { width: 0, height: 3 } },
-  recBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1 },
-  recCancel: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(229,57,53,0.08)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
-  recSend: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  recPill: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
+  headerMenu: { alignSelf: 'flex-end', marginTop: fs(62), marginRight: 8, borderRadius: fs(14), minWidth: fs(200), paddingVertical: 6, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
+  headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(12) },
+  composer: { borderTopWidth: 1, padding: fs(10), paddingBottom: Platform.OS === 'ios' ? fs(20) : fs(12) },
+  composerRow: { flexDirection: 'row', alignItems: 'center', gap: fs(6) },
+  composerBtn: { width: fs(40), height: fs(40), borderRadius: fs(20), alignItems: 'center', justifyContent: 'center' },
+  emojiPickBtn: { width: fs(44), height: fs(44), borderRadius: fs(12), alignItems: 'center', justifyContent: 'center' },
+  attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(14), borderTopWidth: 1 },
+  attachBtn: { alignItems: 'center', marginRight: fs(20) },
+  attachIcon: { width: fs(52), height: fs(52), borderRadius: fs(16), alignItems: 'center', justifyContent: 'center' },
+  attachLabel: { fontSize: fs(12), marginTop: 6 },
+  inputWrap: { flex: 1, borderRadius: fs(22), paddingHorizontal: fs(12), maxHeight: 100, justifyContent: 'center' },
+  input: { fontSize: fs(14), paddingVertical: 8, maxHeight: 100 },
+  sendBtn: { width: fs(42), height: fs(42), borderRadius: fs(21), alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
+  micBtn: { width: fs(42), height: fs(42), borderRadius: fs(21), alignItems: 'center', justifyContent: 'center', elevation: 4, shadowColor: '#6C3CE9', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
+  micBtnRec: { width: fs(46), height: fs(46), borderRadius: fs(23), alignItems: 'center', justifyContent: 'center', elevation: 5, shadowColor: '#E53935', shadowOpacity: 0.35, shadowRadius: 7, shadowOffset: { width: 0, height: 3 } },
+  recBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(14), paddingVertical: fs(10), borderTopWidth: 1 },
+  recCancel: { width: fs(38), height: fs(38), borderRadius: fs(19), backgroundColor: 'rgba(229,57,53,0.08)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  recSend: { width: fs(38), height: fs(38), borderRadius: fs(19), alignItems: 'center', justifyContent: 'center' },
+  recPill: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: fs(14), paddingVertical: fs(8) },
   recDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  recTime: { fontSize: 14, fontWeight: '700', marginLeft: 6, fontVariant: ['tabular-nums'] },
-  replyBar: { flexDirection: 'row', alignItems: 'center', padding: 10, borderTopWidth: 1 },
-  replyLine: { width: 3, height: 32, borderRadius: 2, marginRight: 10 },
-  replyTitle: { fontWeight: '700', fontSize: 12 },
-  replyPreview: { fontSize: 12 },
+  recTime: { fontSize: fs(14), fontWeight: '700', marginLeft: 6, fontVariant: ['tabular-nums'] },
+  replyBar: { flexDirection: 'row', alignItems: 'center', padding: fs(10), borderTopWidth: 1 },
+  replyLine: { width: 3, height: fs(32), borderRadius: 2, marginRight: fs(10) },
+  replyTitle: { fontWeight: '700', fontSize: fs(12) },
+  replyPreview: { fontSize: fs(12) },
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
   reactionPop: {
     position: 'absolute',
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 28,
+    borderRadius: fs(28),
     paddingHorizontal: 7,
     paddingVertical: 6,
     borderWidth: StyleSheet.hairlineWidth,
@@ -2171,7 +2102,7 @@ headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal:
     shadowOffset: { width: 0, height: 6 },
     elevation: 12,
   },
-  reactionPopBtn: { width: 38, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 21 },
+  reactionPopBtn: { width: fs(38), height: fs(42), alignItems: 'center', justifyContent: 'center', borderRadius: fs(21) },
   reactionPopCaret: {
     position: 'absolute',
     bottom: -6,
@@ -2181,23 +2112,23 @@ headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal:
     borderRightWidth: StyleSheet.hairlineWidth,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
-  menuTitle: { fontSize: 13, fontWeight: '700' },
-  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, marginVertical: 12 },
-  reactionBtn: { borderRadius: 14, width: 48, height: 44, alignItems: 'center', justifyContent: 'center' },
+  menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: fs(14), shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
+  menuTitle: { fontSize: fs(13), fontWeight: '700' },
+  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, marginVertical: fs(12) },
+  reactionBtn: { borderRadius: fs(14), width: fs(48), height: fs(44), alignItems: 'center', justifyContent: 'center' },
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
-  fab: { position: 'absolute', right: 16, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', elevation: 6, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
+  fab: { position: 'absolute', right: fs(16), width: fs(46), height: fs(46), borderRadius: fs(23), alignItems: 'center', justifyContent: 'center', elevation: 6, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
   fabChevrons: { alignItems: 'center', justifyContent: 'center' },
-  fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
-  fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: fs(20), height: fs(20), borderRadius: fs(10), alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  fabBadgeText: { color: '#fff', fontSize: fs(11), fontWeight: '700' },
   videoPlayWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 6, alignItems: 'center', justifyContent: 'center' },
-  videoPlay: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
+  videoPlay: { width: fs(48), height: fs(48), borderRadius: fs(24), alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
   mediaError: { alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginBottom: 4 },
-  voicePlay: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  docIcon: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  swipeReveal: { position: 'absolute', top: 6, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', zIndex: 0 },
+  voicePlay: { width: fs(34), height: fs(34), borderRadius: fs(17), alignItems: 'center', justifyContent: 'center' },
+  docIcon: { width: fs(36), height: fs(36), borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  swipeReveal: { position: 'absolute', top: fs(6), width: fs(28), height: fs(28), borderRadius: fs(14), alignItems: 'center', justifyContent: 'center', zIndex: 0 },
   revealLeft: { left: 2 },
   revealRight: { right: 2 },
 });

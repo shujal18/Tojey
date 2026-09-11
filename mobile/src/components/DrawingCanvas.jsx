@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, StyleSheet, Image, PanResponder, ActivityIndicator, Dimensions, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, Image, PanResponder, ActivityIndicator, Dimensions, TouchableOpacity, ScrollView } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { Icon } from './AppIcon';
+import { fs } from '../utils/size';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -287,7 +288,12 @@ export function DrawingToolbar({
 }) {
   return (
     <View style={[styles.toolbar, { backgroundColor: theme.card }, style]}>
-      <View style={styles.toolRow}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.toolRow}
+      >
         {onCancel && (
           <TouchableOpacity onPress={onCancel} accessibilityLabel="Exit drawing" style={[styles.toolBtn, { backgroundColor: 'rgba(0,0,0,0.05)' }]}>
             <Icon name="close" size={20} color={theme.danger} />
@@ -331,11 +337,11 @@ export function DrawingToolbar({
             </TouchableOpacity>
           ))}
         </View>
-        <View style={{ flex: 1 }} />
+        <View style={{ width: 4 }} />
         <TouchableOpacity onPress={onDone} disabled={busy} accessibilityLabel="Apply drawing" style={[styles.doneBtn, { backgroundColor: accent || theme.primary }]}>
           {busy ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="checkmark" size={20} color="#fff" />}
         </TouchableOpacity>
-      </View>
+      </ScrollView>
     </View>
   );
 }
@@ -343,13 +349,13 @@ export function DrawingToolbar({
 const styles = StyleSheet.create({
   canvasWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   imgLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  toolbar: { paddingVertical: 8, paddingHorizontal: 10, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
+  toolbar: { paddingVertical: fs(8), paddingHorizontal: fs(10), borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
   toolRow: { flexDirection: 'row', alignItems: 'center' },
-  toolBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  colorRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginHorizontal: 8 },
-  colorSwatch: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: 'rgba(0,0,0,0.15)' },
+  toolBtn: { width: fs(34), height: fs(34), borderRadius: fs(17), alignItems: 'center', justifyContent: 'center', marginRight: 6 },
+  colorRow: { flexDirection: 'row', alignItems: 'center', gap: fs(6), marginHorizontal: fs(8) },
+  colorSwatch: { width: fs(26), height: fs(26), borderRadius: fs(13), borderWidth: 2, borderColor: 'rgba(0,0,0,0.15)' },
   colorSwatchActive: { borderWidth: 3, borderColor: '#6C3CE9' },
-  sizeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  sizeDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
-  doneBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  sizeRow: { flexDirection: 'row', alignItems: 'center', gap: fs(8) },
+  sizeDot: { width: fs(26), height: fs(26), borderRadius: fs(13), alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.05)' },
+  doneBtn: { width: fs(40), height: fs(40), borderRadius: fs(20), alignItems: 'center', justifyContent: 'center' },
 });

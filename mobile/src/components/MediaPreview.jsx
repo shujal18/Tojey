@@ -9,6 +9,7 @@ import { captureRef } from 'react-native-view-shot';
 import { Icon } from './AppIcon';
 import { canInlineVideoPreview } from '../utils/media';
 import { DrawableImage, DrawingToolbar } from './DrawingCanvas';
+import { fs } from '../utils/size';
 
 const MAX_OUT = 1440;
 const MAX_IMGVIEW_PX = 8000000;
@@ -190,11 +191,10 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       const dy = e.nativeEvent.locationY - gs.sy;
       const boxC = g.contained;
       if (gs.mode === 'resize') {
-        const ratio = gs.cw / gs.ch;
         const freeW = boxC.iw - (gs.cx - boxC.ox);
         const freeH = boxC.ih - (gs.cy - boxC.oy);
-        let nw = Math.max(MIN_CROP, Math.min(gs.cw + dx, Math.min(freeW, freeH * ratio)));
-        let nh = nw / ratio;
+        const nw = Math.max(MIN_CROP, Math.min(gs.cw + dx, freeW));
+        const nh = Math.max(MIN_CROP, Math.min(gs.ch + dy, freeH));
         setCrop({ cx: gs.cx, cy: gs.cy, cw: nw, ch: nh });
       } else {
         const ncx = Math.max(boxC.ox, Math.min(gs.cx + dx, boxC.ox + boxC.iw - g.crop.cw));
@@ -349,10 +349,10 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
           {!previewSafe || videoErr ? (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
               <Icon name="alert-circle-outline" size={46} color="rgba(255,255,255,0.85)" />
-              <Text style={{ color: 'rgba(255,255,255,0.9)', marginTop: 12, textAlign: 'center', fontSize: 14 }}>
+              <Text style={{ color: 'rgba(255,255,255,0.9)', marginTop: 12, textAlign: 'center', fontSize: fs(14) }}>
                 {videoErr ? 'Unable to load video' : 'This video could not be previewed here.'}
               </Text>
-              <Text style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12, marginTop: 4 }}>
+              <Text style={{ color: 'rgba(255,255,255,0.55)', fontSize: fs(12), marginTop: 4 }}>
                 {videoErr ? 'Check the file and try again.' : 'You can still send it.'}
               </Text>
               {videoErr && (
@@ -362,7 +362,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
                   accessibilityLabel="Retry video"
                 >
                   <Icon name="refresh" size={18} color="#fff" />
-                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14, marginLeft: 8 }}>Retry</Text>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: fs(14), marginLeft: 8 }}>Retry</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -410,7 +410,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
           <View style={{ position: 'absolute', bottom: 170, alignSelf: 'center' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 8 }}>
               <Icon name="alert-circle-outline" size={16} color="#FFB4AB" />
-              <Text style={{ color: '#FFB4AB', fontSize: 12, fontWeight: '600', marginLeft: 6 }}>Could not preview this image — you can still send it</Text>
+              <Text style={{ color: '#FFB4AB', fontSize: fs(12), fontWeight: '600', marginLeft: 6 }}>Could not preview this image — you can still send it</Text>
             </View>
           </View>
         )}
@@ -514,11 +514,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
             <View style={[styles.toolbar, { backgroundColor: 'rgba(0,0,0,0.88)' }]}>
               <View style={styles.toolbarRow}>
                 <ToolBtn icon="close" label="Cancel" onPress={() => setMode('view')} light />
-                <Text style={{ flex: 1, textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
+                <Text style={{ flex: 1, textAlign: 'center', fontSize: fs(13), color: 'rgba(255,255,255,0.7)' }}>
                   Drag to move · handle to resize
                 </Text>
                 <TouchableOpacity onPress={applyCrop} style={[styles.primaryBarBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Apply crop">
-                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Crop</Text>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: fs(14) }}>Crop</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -547,38 +547,38 @@ const styles = StyleSheet.create({
   modalRoot: { flex: 1, backgroundColor: '#000' },
   body: { flex: 1 },
   bodyCenter: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  topBar: { position: 'absolute', top: 0, left: 0, right: 0, paddingBottom: 10, backgroundColor: 'rgba(0,0,0,0.45)' },
+topBar: { position: 'absolute', top: 0, left: 0, right: 0, paddingBottom: fs(10), backgroundColor: 'rgba(0,0,0,0.45)' },
   topBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8 },
-  topBarTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  overlayBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.16)' },
+  topBarTitle: { color: '#fff', fontSize: fs(16), fontWeight: '700' },
+  overlayBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center', borderRadius: fs(20), backgroundColor: 'rgba(255,255,255,0.16)' },
   bottomPanel: {
     position: 'absolute', left: 0, right: 0,
-    paddingTop: 10, paddingHorizontal: 12,
-    paddingBottom: Platform.OS === 'ios' ? 26 : 16,
+    paddingTop: fs(10), paddingHorizontal: fs(12),
+    paddingBottom: Platform.OS === 'ios' ? 26 : fs(16),
     backgroundColor: 'rgba(0,0,0,0.55)',
   },
   toolRow: { flexDirection: 'row', marginBottom: 10 },
-  toolBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 22, marginRight: 10 },
+  toolBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(14), paddingVertical: fs(9), borderRadius: fs(22), marginRight: 10 },
   toolBtnDim: { backgroundColor: 'rgba(255,255,255,0.18)' },
   toolBtnLight: { backgroundColor: 'rgba(255,255,255,0.14)' },
-  toolBtnText: { fontWeight: '700', fontSize: 13, marginLeft: 6 },
+  toolBtnText: { fontWeight: '700', fontSize: fs(13), marginLeft: 6 },
   captionRow: { flexDirection: 'row', alignItems: 'center' },
-  caption: { flex: 1, borderRadius: 22, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, color: '#fff', backgroundColor: 'rgba(255,255,255,0.14)', marginRight: 10 },
-  sendBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  caption: { flex: 1, borderRadius: fs(22), paddingHorizontal: fs(14), paddingVertical: fs(10), fontSize: fs(14), color: '#fff', backgroundColor: 'rgba(255,255,255,0.14)', marginRight: 10 },
+  sendBtn: { width: fs(44), height: fs(44), borderRadius: fs(22), alignItems: 'center', justifyContent: 'center' },
   modeBarWrap: { position: 'absolute', left: 0, right: 0 },
-  toolbar: { paddingVertical: 8, paddingHorizontal: 10 },
+  toolbar: { paddingVertical: fs(8), paddingHorizontal: fs(10) },
   toolbarRow: { flexDirection: 'row', alignItems: 'center' },
-  primaryBarBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 18 },
+  primaryBarBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(10), borderRadius: fs(18) },
   cropOverlay: { position: 'absolute', backgroundColor: 'rgba(255,255,255,0.06)' },
   gridH: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,0.6)' },
   gridV: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,0.6)' },
-  handle: { position: 'absolute', left: 0, top: 0, width: 24, height: 24, borderLeftWidth: 3, borderTopWidth: 3, borderColor: '#fff' },
-  handleAlt: { position: 'absolute', right: 0, top: 0, width: 24, height: 24, borderRightWidth: 3, borderTopWidth: 3, borderColor: '#fff' },
-  handleAlt2: { position: 'absolute', left: 0, bottom: 0, width: 24, height: 24, borderLeftWidth: 3, borderBottomWidth: 3, borderColor: '#fff' },
-  handleBR: { position: 'absolute', right: 0, bottom: 0, width: 30, height: 30, borderRightWidth: 4, borderBottomWidth: 4, borderColor: '#fff' },
+  handle: { position: 'absolute', left: 0, top: 0, width: fs(24), height: fs(24), borderLeftWidth: 3, borderTopWidth: 3, borderColor: '#fff' },
+  handleAlt: { position: 'absolute', right: 0, top: 0, width: fs(24), height: fs(24), borderRightWidth: 3, borderTopWidth: 3, borderColor: '#fff' },
+  handleAlt2: { position: 'absolute', left: 0, bottom: 0, width: fs(24), height: fs(24), borderLeftWidth: 3, borderBottomWidth: 3, borderColor: '#fff' },
+  handleBR: { position: 'absolute', right: 0, bottom: 0, width: fs(30), height: fs(30), borderRightWidth: 4, borderBottomWidth: 4, borderColor: '#fff' },
   dim: { position: 'absolute', left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.55)' },
   dimSide: { position: 'absolute', backgroundColor: 'rgba(0,0,0,0.55)' },
   centerDim: { backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' },
-  processingPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 24 },
-  videoPreviewBtn: { flexDirection: 'row', alignItems: 'center', borderRadius: 24, paddingHorizontal: 20, paddingVertical: 12 },
+  processingPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: fs(18), paddingVertical: fs(12), borderRadius: fs(24) },
+  videoPreviewBtn: { flexDirection: 'row', alignItems: 'center', borderRadius: fs(24), paddingHorizontal: fs(20), paddingVertical: fs(12) },
 });

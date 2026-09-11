@@ -9,6 +9,7 @@ import { Icon } from './AppIcon';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { absUrl } from '../config';
 import { quickReactions } from '../theme';
+import { fs } from '../utils/size';
 import RNFetchBlob from 'rn-fetch-blob';
 import { canInlineVideoPreview } from '../utils/media';
 import ColorEmoji from './ColorEmoji';
@@ -120,11 +121,11 @@ function ZoomableImage({ uri, style, onExternal }) {
         {failed ? (
           <View style={styles.imgError}>
             <Icon name="alert-circle-outline" size={40} color="#fff" />
-            <Text style={{ color: '#fff', marginTop: 10, fontSize: 13 }}>Could not load this image</Text>
+            <Text style={{ color: '#fff', marginTop: 10, fontSize: fs(13) }}>Could not load this image</Text>
             {onExternal && (
               <TouchableOpacity onPress={onExternal} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
                 <Icon name="open-outline" size={18} color="#fff" />
-                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open externally</Text>
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: fs(13), fontWeight: '600' }}>Open externally</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -360,10 +361,10 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           {failed ? (
             <View style={styles.vidError}>
               <Icon name="alert-circle-outline" size={44} color="#fff" />
-              <Text style={{ color: '#fff', marginTop: 10, fontSize: 14 }}>Video unavailable</Text>
+              <Text style={{ color: '#fff', marginTop: 10, fontSize: fs(14) }}>Video unavailable</Text>
               <TouchableOpacity onPress={() => playExternal(m, 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
                 <Icon name="open-outline" size={18} color="#fff" />
-                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: fs(13), fontWeight: '600' }}>Open in video app</Text>
               </TouchableOpacity>
             </View>
           ) : (!active && safeFormat) ? (
@@ -390,7 +391,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               )}
               <TouchableOpacity onPress={() => playExternal(m, m.mime_type || 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
                 <Icon name="open-outline" size={18} color="#fff" />
-                <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+                <Text style={{ color: '#fff', marginLeft: 6, fontSize: fs(13), fontWeight: '600' }}>Open in video app</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -400,10 +401,10 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               fallback={
                 <View style={styles.vidError}>
                   <Icon name="alert-circle-outline" size={44} color="#fff" />
-                  <Text style={{ color: '#fff', marginTop: 10, fontSize: 14 }}>Video could not load here</Text>
+                  <Text style={{ color: '#fff', marginTop: 10, fontSize: fs(14) }}>Video could not load here</Text>
                   <TouchableOpacity onPress={() => playExternal(m, 'video/mp4')} style={[styles.vidFallback, { backgroundColor: 'rgba(255,255,255,0.18)' }]}>
                     <Icon name="open-outline" size={18} color="#fff" />
-                    <Text style={{ color: '#fff', marginLeft: 6, fontSize: 13, fontWeight: '600' }}>Open in video app</Text>
+                    <Text style={{ color: '#fff', marginLeft: 6, fontSize: fs(13), fontWeight: '600' }}>Open in video app</Text>
                   </TouchableOpacity>
                 </View>
               }
@@ -639,7 +640,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                     style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
                     accessibilityLabel={`React ${r}`}
                   >
-                    <ColorEmoji style={{ fontSize: 17 }}>{r}</ColorEmoji>
+                    <ColorEmoji style={{ fontSize: fs(17) }}>{r}</ColorEmoji>
                   </TouchableOpacity>
                 ))}
                 <TouchableOpacity
@@ -666,7 +667,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <View style={styles.reactionRow}>
                 {quickReactions.map((r) => (
                   <TouchableOpacity key={r} onPress={() => doReact(r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                    <ColorEmoji style={{ fontSize: 22 }}>{r}</ColorEmoji>
+                    <ColorEmoji style={{ fontSize: fs(22) }}>{r}</ColorEmoji>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -674,7 +675,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
                 {actionMenu.map((a) => (
                   <TouchableOpacity key={a.key} onPress={a.onPress} style={[styles.menuItem, { backgroundColor: theme.primaryLight }]}>
                     <Icon name={a.icon} size={16} color={a.danger ? theme.danger : theme.primary} />
-                    <Text style={{ color: a.danger ? theme.danger : theme.primary, fontWeight: '600', fontSize: 13, marginLeft: 6 }}>{a.label}</Text>
+                    <Text style={{ color: a.danger ? theme.danger : theme.primary, fontWeight: '600', fontSize: fs(13), marginLeft: 6 }}>{a.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -689,11 +690,11 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
 const styles = StyleSheet.create({
   container: { flex: 1 },
   topBar: {
-    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingTop: 44, paddingBottom: 10,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(10), paddingTop: fs(44), paddingBottom: fs(10),
   },
-  topBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  topTitle: { color: '#fff', fontSize: 15, fontWeight: '700', maxWidth: SCREEN_W - 140 },
-  topSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
+  topBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center' },
+  topTitle: { color: '#fff', fontSize: fs(15), fontWeight: '700', maxWidth: SCREEN_W - fs(140) },
+  topSub: { color: 'rgba(255,255,255,0.7)', fontSize: fs(12), marginTop: 2 },
   slide: { width: SCREEN_W, height: '100%', alignItems: 'center', justifyContent: 'center' },
   video: { width: SCREEN_W, height: SCREEN_H - 180 },
   vidError: { alignItems: 'center', justifyContent: 'center' },
@@ -707,7 +708,7 @@ const styles = StyleSheet.create({
   imgLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
   bottomBar: { paddingVertical: 8, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
   replyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  replyInput: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, fontSize: 14 },
+  replyInput: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, fontSize: fs(14) },
   replySendBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   reactRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, gap: 8 },
   reactBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
@@ -715,7 +716,7 @@ const styles = StyleSheet.create({
   vidCtrlWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'flex-end', paddingBottom: 10, alignItems: 'center' },
   vidCenterCtrl: { position: 'absolute', top: '42%', width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)' },
   vidCtrlRow: { flexDirection: 'row', alignItems: 'center', width: '100%', paddingHorizontal: 12, paddingTop: 10 },
-  vidTime: { color: '#fff', fontSize: 11, fontVariant: ['tabular-nums'], minWidth: 38, textAlign: 'center' },
+  vidTime: { color: '#fff', fontSize: fs(11), fontVariant: ['tabular-nums'], minWidth: 38, textAlign: 'center' },
   vidSeekTrack: { flex: 1, height: 28, justifyContent: 'center', marginHorizontal: 8 },
   vidSeekTrackBg: { position: 'absolute', left: 0, right: 0, height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.3)' },
   vidSeekFill: { position: 'absolute', left: 2, height: 3, borderRadius: 2, backgroundColor: '#fff', width: 0 },
@@ -723,7 +724,7 @@ const styles = StyleSheet.create({
   menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
   menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   menu: { position: 'absolute', right: 12, top: 90, width: SCREEN_W - 60, borderRadius: 16, padding: 14, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
-  menuTitle: { fontSize: 13, fontWeight: '700', marginBottom: 8 },
+  menuTitle: { fontSize: fs(13), fontWeight: '700', marginBottom: 8 },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 14 },
   reactionBtn: { borderRadius: 14, width: 44, height: 40, alignItems: 'center', justifyContent: 'center' },
   menuItem: { flexDirection: 'row', alignItems: 'center', borderRadius: 9, paddingVertical: 9, paddingHorizontal: 12 },
