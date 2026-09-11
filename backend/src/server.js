@@ -678,6 +678,19 @@ io.on('connection', async (socket) => {
       socket.to(`user:${otherUserId}`).emit('typing:stop', { userId: dbUser.userId });
     });
 
+    // Nudge / "vibrate" ping: tells the other person's device to vibrate.
+    socket.on('nudge', async ({ otherUserId }) => {
+      if (!otherUserId || String(otherUserId) === String(dbUser.userId)) return;
+      socket.to(`user:${otherUserId}`).emit('nudge', {
+        from: {
+          userId: dbUser.userId,
+          username: dbUser.username,
+          displayName: dbUser.displayName,
+          profilePic: dbUser.profile_pic_url || '',
+        },
+      });
+    });
+
     socket.on('message:edit', async ({ messageId, content }) => {
       try {
         await pool.query(

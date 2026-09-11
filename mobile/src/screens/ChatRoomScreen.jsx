@@ -2,13 +2,18 @@ import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from '
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
-  Animated, PanResponder, Dimensions, ScrollView,
+  Animated, PanResponder, Dimensions, ScrollView, AppState,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
 import ColorEmoji from '../components/ColorEmoji';
 import { fs } from '../utils/size';
+import Toast from '../components/Toast';
+import { playNudgeVibration } from '../services/nudge';
+import {
+  getChatHeadEnabled, showChatHead, hideChatHead,
+} from '../services/chatHead';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
 const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
@@ -99,6 +104,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [reactionPop, setReactionPop] = useState(null);
   const [headerMenu, setHeaderMenu] = useState(false);
   const [selMenu, setSelMenu] = useState(false);
+  const [nudgeToast, setNudgeToast] = useState('');
+  const chatHeadOnRef = useRef(false);
+  const appVisibleRef = useRef(true);
+  const headUnreadRef = useRef(0);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
@@ -338,6 +347,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         return [...prev, { ...message, _local: message.sender_id === currentUser.id }];
       });
       if (message.sender_id !== currentUser.id) {
+        if (!appVisibleRef.current) {
+          headUnreadRef.current += 1;
+          updateChatHead();
+        }
         if (!atBottomRef.current) {
           setPendingCount((n) => n + 1);
         } else {
@@ -374,6 +387,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:reaction', hReaction);
     const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); clearConversationCache(currentUser.id, otherUserId); };
     socket.on('conversation:cleared', hCleared);
+    const hNudge = ({ from }) => {
+      headUnreadRef.current += 1;
+      if (!appVisibleRef.current) updateChatHead();
+      playNudgeVibration();
+      const who = (from && (from.displayName || from.username)) || 'Someone';
+      setNudgeToast(`${who} nudged you`);
+    };
+    socket.on('nudge', hNudge);
     const hPresence = ({ userId, isOnline, lastSeen }) => {
       if (userId === otherUserId) setPresence({ isOnline, lastSeen });
     };
@@ -400,11 +421,52 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('message:deleted', hDeleted);
       socket.off('message:reaction', hReaction);
       socket.off('conversation:cleared', hCleared);
+      socket.off('nudge', hNudge);
       socket.off('presence:update', hPresence);
       socket.off('connect', onReconnect);
       socket.io?.off('reconnect', onReconnect);
     };
   }, [socket, otherUserId, currentUser.id]);
+
+  // Chat Head: show a floating bubble of the other person while the app is in the
+  // background (only when enabled in Settings). Hidden + unread reset on foreground.
+  const updateChatHead = () => {
+    if (!chatHeadOnRef.current) return;
+    showChatHead(safeOtherUser.profile_pic_url ? otherUserName[0].toUpperCase() : '💬', otherUserName, headUnreadRef.current);
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    getChatHeadEnabled().then((enabled) => {
+      if (mounted) chatHeadOnRef.current = enabled;
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    appVisibleRef.current = AppState.currentState === 'active';
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appVisibleRef.current = nextState === 'active';
+      if (nextState === 'active') {
+        headUnreadRef.current = 0;
+        hideChatHead();
+      } else if (nextState === 'background') {
+        updateChatHead();
+      }
+    });
+    return () => {
+      sub.remove();
+      hideChatHead();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const sendNudge = () => {
+    if (socket && otherUserId) {
+      socket.emit('nudge', { otherUserId });
+      setNudgeToast(`You nudged ${otherUserName}`);
+    }
+  };
 
   // Persist messages to offline cache whenever meaningful state changes.
   // Upload progress (_uploadProgress) ticks ~8x/sec; skip those to avoid
@@ -1198,6 +1260,10 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <Icon name="return-down-back-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
               <Text style={{ color: theme.text, fontSize: fs(15) }}>Reply</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); sendNudge(); }} accessibilityLabel="Nudge">
+              <Icon name="hand-left-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: fs(15) }}>Nudge</Text>
+            </TouchableOpacity>
             {!!reactionPop.msg && reactionPop.msg.sender_id === currentUser.id && reactionPop.msg.type === 'TEXT' && !reactionPop.msg.is_deleted_for_everyone && (
               <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); doAction('edit', reactionPop.msg); }} accessibilityLabel="Edit message">
                 <Icon name="create-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
@@ -1248,8 +1314,15 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               style={styles.headerMenuItem}
               onPress={() => {
                 setHeaderMenu(false);
-                Alert.alert('Clear chat', 'Remove all messages from this device only? They stay on the server and for the other person.', [
-                  { text: 'Clear', style: 'destructive', onPress: clearChatLocal },
+                Alert.alert('Clear chat', 'Delete all messages in this chat for BOTH of you? They will also be removed from the server.', [
+                  {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: () => {
+                      if (socket && otherUserId) socket.emit('conversation:clear', { otherUserId });
+                      clearChatLocal();
+                    },
+                  },
                   { text: 'Cancel', style: 'cancel' },
                 ]);
               }}
@@ -1530,6 +1603,8 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           onSend={handlePreviewSend}
         />
       )}
+
+      <Toast message={nudgeToast} bottom={(barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 6} />
     </KeyboardAvoidingView>
   );
 }

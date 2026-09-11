@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
   Platform,
@@ -11,6 +11,11 @@ import { Icon } from '../components/AppIcon';
 import { SERVER_URL, absUrl } from '../config';
 import { ensureMediaPermission } from '../services/permissions';
 import RNFetchBlob from 'rn-fetch-blob';
+import {
+  supportsChatHead, getChatHeadEnabled, setChatHeadEnabled,
+  canDrawOverlay, openOverlaySettings,
+  getNudgeVibrationEnabled, setNudgeVibrationEnabled,
+} from '../services/chatHead';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
   const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
@@ -21,6 +26,36 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [saving, setSaving] = useState(false);
   const [appLockPINEntry, setAppLockPINEntry] = useState('');
   const [confirmingPIN, setConfirmingPIN] = useState(false);
+  const [chatHead, setChatHead] = useState(false);
+  const [nudgeVib, setNudgeVib] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const [ch, nv] = await Promise.all([getChatHeadEnabled(), getNudgeVibrationEnabled()]);
+      if (mounted) {
+        setChatHead(ch);
+        setNudgeVib(nv);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const toggleChatHead = async (enabled) => {
+    if (enabled) {
+      if (!supportsChatHead()) {
+        alert('Chat Head is only available in the installed Tojey app.');
+        return;
+      }
+      if (!canDrawOverlay()) {
+        openOverlaySettings();
+        alert('Allow "Display over other apps" for Tojey, then turn Chat Head on again.');
+        return;
+      }
+    }
+    setChatHead(enabled);
+    await setChatHeadEnabled(enabled);
+  };
 
   const profilePic = user.profilePic || '';
 
@@ -236,9 +271,24 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <SettingRow label="Sound" icon="volume-high-outline" theme={theme}>
           <Switch value={sound} onValueChange={setSound} trackColor={{ true: theme.primary }} />
         </SettingRow>
-        <SettingRow label="Vibration" icon="vibrate-outline" theme={theme}>
+        <SettingRow label="Vibration" icon="finger-print-outline" theme={theme}>
           <Switch value={vibration} onValueChange={setVibration} trackColor={{ true: theme.primary }} />
         </SettingRow>
+      </Section>
+
+      <Section title="Chat Head & Nudge" theme={theme}>
+        <SettingRow label="Chat Head" icon="chatbubbles-outline" theme={theme}>
+          <Switch value={chatHead} onValueChange={toggleChatHead} trackColor={{ true: theme.primary }} />
+        </SettingRow>
+        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+          Shows a floating bubble of the person you are chatting with when you leave the app. Tap it to come back.
+        </Text>
+        <SettingRow label="Nudge Vibration" icon="hand-left-outline" theme={theme}>
+          <Switch value={nudgeVib} onValueChange={async (v) => { setNudgeVib(v); await setNudgeVibrationEnabled(v); }} trackColor={{ true: theme.primary }} />
+        </SettingRow>
+        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+          Vibrates when someone nudges you (from the chat menu or long-press in chats).
+        </Text>
       </Section>
 
       <Section title="App Lock" theme={theme}>
@@ -357,6 +407,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   rowLabel: { flex: 1, fontSize: 14 },
+  helperText: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
   themeRow: { flexDirection: 'row', gap: 8, padding: 14, borderBottomWidth: 1 },
   chatColorRow: { flexDirection: 'row', flexWrap: 'wrap', padding: 14, gap: 12 },
   chatColorItem: { alignItems: 'center', width: 56, borderWidth: 2, borderRadius: 12, paddingVertical: 8 },

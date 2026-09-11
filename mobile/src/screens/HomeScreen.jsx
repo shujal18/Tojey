@@ -7,6 +7,8 @@ import { loadUsers, saveUsers, loadConversations, saveConversations, clearConver
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import ColorEmoji from '../components/ColorEmoji';
+import Toast from '../components/Toast';
+import { playNudgeVibration } from '../services/nudge';
 import { absUrl, SERVER_URL } from '../config';
 import { fs } from '../utils/size';
 import ContactsScreen from './ContactsScreen';
@@ -25,6 +27,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
   const [notifMsg, setNotifMsg] = useState('');
   const [notifSending, setNotifSending] = useState(false);
   const [notifResult, setNotifResult] = useState(null);
+  const [nudgeToast, setNudgeToast] = useState('');
 
   useEffect(() => {
     if (!user?.id) return;
@@ -108,6 +111,12 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
           return next;
         });
       });
+      const hNudge = ({ from }) => {
+        playNudgeVibration();
+        const who = (from && (from.displayName || from.username)) || 'Someone';
+        setNudgeToast(`${who} nudged you`);
+      };
+      socket.on('nudge', hNudge);
 
       refreshList();
       socket.on('connect', refreshList);
@@ -117,6 +126,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         socket.off('presence:update');
         socket.off('message:receive');
         socket.off('conversation:cleared');
+        socket.off('nudge', hNudge);
         socket.off('connect', refreshList);
       };
     }
@@ -204,6 +214,14 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
     } finally {
       setNotifSending(false);
     }
+  };
+
+  const sendNudge = (contact) => {
+    if (socket && contact) {
+      socket.emit('nudge', { otherUserId: contact.id });
+      setNudgeToast(`You nudged ${contact.display_name || contact.username}`);
+    }
+    setActionTarget(null);
   };
 
   const filtered = users.filter(
@@ -344,6 +362,13 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Clear Messages</Text>
             </TouchableOpacity>
             <TouchableOpacity
+              style={[styles.actionOption, { backgroundColor: theme.primaryLight, marginTop: 10 }]}
+              onPress={() => sendNudge(actionTarget)}
+            >
+              <Icon name="hand-left-outline" size={18} color={theme.primary} />
+              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Nudge</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
               onPress={() => setActionTarget(null)}
               style={{ alignSelf: 'center', marginTop: 16, paddingHorizontal: 18, paddingVertical: 8 }}
             >
@@ -410,6 +435,8 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         <TabBtn label="Contacts" active={tab === 'contacts'} onPress={() => setTab('contacts')} icon="people-outline" theme={theme} activeIcon="people" />
         <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
       </View>
+
+      <Toast message={nudgeToast} bottom={92} />
     </View>
   );
 }

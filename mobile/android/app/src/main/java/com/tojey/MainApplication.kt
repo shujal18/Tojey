@@ -15,10 +15,11 @@ class MainApplication : Application(), ReactApplication {
 
   override val reactNativeHost: ReactNativeHost =
       object : DefaultReactNativeHost(this) {
-        override fun getPackages(): List<ReactPackage> =
-            PackageList(this).packages.apply {
-              // Packages included via autolinking.
-            }
+        override fun getPackages(): List<ReactPackage> {
+          val list = PackageList(this).packages.toMutableList()
+          list.add(TojeyChatHeadPackage())
+          return list
+        }
 
         override fun getJSMainModuleName(): String = "index"
 

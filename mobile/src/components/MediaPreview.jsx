@@ -176,8 +176,14 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       if (!g.contained || !g.crop) return;
       const { locationX, locationY } = e.nativeEvent;
       const c = g.crop;
+      let corner = null;
+      if (locationX < 40 && locationY < 40) corner = 'tl';
+      else if (locationX > c.cw - 40 && locationY < 40) corner = 'tr';
+      else if (locationX < 40 && locationY > c.ch - 40) corner = 'bl';
+      else if (locationX > c.cw - 40 && locationY > c.ch - 40) corner = 'br';
       gestureStart.current = {
-        mode: locationX > c.cw - 40 && locationY > c.ch - 40 ? 'resize' : 'move',
+        mode: corner ? 'resize' : 'move',
+        corner,
         sx: locationX,
         sy: locationY,
         cx: c.cx, cy: c.cy, cw: c.cw, ch: c.ch,
@@ -191,11 +197,32 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       const dy = e.nativeEvent.locationY - gs.sy;
       const boxC = g.contained;
       if (gs.mode === 'resize') {
-        const freeW = boxC.iw - (gs.cx - boxC.ox);
-        const freeH = boxC.ih - (gs.cy - boxC.oy);
-        const nw = Math.max(MIN_CROP, Math.min(gs.cw + dx, freeW));
-        const nh = Math.max(MIN_CROP, Math.min(gs.ch + dy, freeH));
-        setCrop({ cx: gs.cx, cy: gs.cy, cw: nw, ch: nh });
+        // Freeform: each corner independently resizes its own dimension(s).
+        let { cx, cy, cw, ch } = gs;
+        const leftEdge = boxC.ox;
+        const topEdge = boxC.oy;
+        const rightEdge = boxC.ox + boxC.iw;
+        const bottomEdge = boxC.oy + boxC.ih;
+        const corner = gs.corner || 'br';
+        if (corner.includes('r')) {
+          const nw = Math.max(MIN_CROP, Math.min(cw + dx, rightEdge - cx));
+          cw = nw;
+        }
+        if (corner.includes('l')) {
+          const nw = Math.max(MIN_CROP, Math.min(cw - dx, cx - leftEdge));
+          cx += cw - nw;
+          cw = nw;
+        }
+        if (corner.includes('b')) {
+          const nh = Math.max(MIN_CROP, Math.min(ch + dy, bottomEdge - cy));
+          ch = nh;
+        }
+        if (corner.includes('t')) {
+          const nh = Math.max(MIN_CROP, Math.min(ch - dy, cy - topEdge));
+          cy += ch - nh;
+          ch = nh;
+        }
+        setCrop({ cx, cy, cw, ch });
       } else {
         const ncx = Math.max(boxC.ox, Math.min(gs.cx + dx, boxC.ox + boxC.iw - g.crop.cw));
         const ncy = Math.max(boxC.oy, Math.min(gs.cy + dy, boxC.oy + boxC.ih - g.crop.ch));
@@ -515,7 +542,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               <View style={styles.toolbarRow}>
                 <ToolBtn icon="close" label="Cancel" onPress={() => setMode('view')} light />
                 <Text style={{ flex: 1, textAlign: 'center', fontSize: fs(13), color: 'rgba(255,255,255,0.7)' }}>
-                  Drag to move · handle to resize
+                  Drag to move · corners to resize freeform
                 </Text>
                 <TouchableOpacity onPress={applyCrop} style={[styles.primaryBarBtn, { backgroundColor: theme.primary }]} accessibilityLabel="Apply crop">
                   <Text style={{ color: '#fff', fontWeight: '700', fontSize: fs(14) }}>Crop</Text>
