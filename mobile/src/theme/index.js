@@ -22,6 +22,6 @@ export const TojeyColors = {
 
 export const quickReactions = ['❤️', '😂', '😮', '😢', '👍', '👎'];
 
-export const reactionPopRow = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂'];
+export const reactionPopRow = ['👍', '❤️', '😂', '😁', '😮', '😢', '🙏', '🫂'];
 
 export { lightTheme, darkTheme, CHAT_COLORS, hexBlend };

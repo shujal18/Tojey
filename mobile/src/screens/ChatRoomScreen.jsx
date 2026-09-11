@@ -9,7 +9,7 @@ import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
-const sheetReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
+const sheetReactions = ['👍', '❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
 import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
@@ -2102,7 +2102,7 @@ const styles = StyleSheet.create({
   msgText: { fontSize: 15, lineHeight: 21 },
   msgEmojiWrap: { paddingVertical: 2 },
   msgEmoji: { fontSize: 52, lineHeight: 62, paddingHorizontal: 10, paddingVertical: 4 },
-  msgEmojiSingle: { fontSize: 72, lineHeight: 84, paddingHorizontal: 6, opacity: 1 },
+  msgEmojiSingle: { fontSize: 68, lineHeight: 80, paddingHorizontal: 6, opacity: 1 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2 },
   metaText: { fontSize: 10, color: '#9B96A8' },

@@ -297,7 +297,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       return (
         <View style={styles.body}>
           <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
-            <Image source={{ uri: displayUri }} style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]} resizeMode="contain" />
+            <Image source={{ uri: displayUri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
           </View>
           {contained && crop && (
             <View style={[styles.cropOverlay, { borderWidth: 1, borderColor: '#fff', left: crop.cx, top: crop.cy, width: crop.cw, height: crop.ch }]} {...cropPan.panHandlers}>
@@ -395,7 +395,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
         <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
           <Image
             source={{ uri: displayUri }}
-            style={[StyleSheet.absoluteFill, { width: box?.w, height: box?.h }]}
+            style={StyleSheet.absoluteFill}
             resizeMode="contain"
             onLoad={() => setImgReady(true)}
             onError={() => setImgErr(true)}

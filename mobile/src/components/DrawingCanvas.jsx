@@ -121,7 +121,6 @@ export function DrawableImage({
   const pointsRef = useRef([]);
   const eraserPtsRef = useRef([]);
   const lastFlushRef = useRef(0);
-  const originRef = useRef({ x: 0, y: 0 });
   const readyRef = useRef(false);
   const drawingRef = useRef(false);
 
@@ -154,8 +153,11 @@ export function DrawableImage({
   }, [srcSize, layout.w, layout.h]);
 
   const localPoint = (e) => ({
-    x: e.nativeEvent.pageX - originRef.current.x,
-    y: e.nativeEvent.pageY - originRef.current.y,
+    // Relative to the drawing surface itself (the pan overlay exactly covers
+    // the image), so no window measurement is needed and strokes can never
+    // offset from the finger.
+    x: e.nativeEvent.locationX,
+    y: e.nativeEvent.locationY,
   });
 
   const paintActive = () => {
@@ -197,28 +199,16 @@ export function DrawableImage({
     onStartShouldSetPanResponder: () => !!drawModeRef.current,
     onMoveShouldSetPanResponder: () => !!drawModeRef.current,
     onPanResponderGrant: (e) => {
-      const node = drawRef.current;
       readyRef.current = false;
       pointsRef.current = [];
       eraserPtsRef.current = [];
       lastFlushRef.current = 0;
-      const grantX = e.nativeEvent.pageX;
-      const grantY = e.nativeEvent.pageY;
-      const init = (x, y) => {
-        originRef.current = { x, y };
-        const p = { x: grantX - x, y: grantY - y };
-        const bucket = eraserRef.current ? eraserPtsRef : pointsRef;
-        bucket.current = [p];
-        lastFlushRef.current = 0;
-        readyRef.current = true;
-        drawingRef.current = true;
-        paintActive();
-      };
-      if (node && typeof node.measureInWindow === 'function') {
-        node.measureInWindow((x, y) => init(x, y));
-      } else {
-        init(originRef.current.x, originRef.current.y);
-      }
+      const p = localPoint(e);
+      const bucket = eraserRef.current ? eraserPtsRef : pointsRef;
+      bucket.current = [p];
+      readyRef.current = true;
+      drawingRef.current = true;
+      paintActive();
     },
     onPanResponderMove: (e) => {
       if (!readyRef.current) return;
@@ -245,12 +235,6 @@ export function DrawableImage({
       onLayout={(e) => {
         const { width, height } = e.nativeEvent.layout;
         setLayout({ w: width, h: maxHeight ? Math.min(height, maxHeight) : height });
-        const node = drawRef.current;
-        if (node && typeof node.measureInWindow === 'function') {
-          node.measureInWindow((x, y) => {
-            originRef.current = { x, y };
-          });
-        }
       }}
     >
       <View collapsable={false} ref={drawRef} style={{ width: box.dw, height: box.dh }}>
