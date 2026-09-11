@@ -1742,6 +1742,7 @@ function dedupeReactions(reactions) {
 
 function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress, onEnterSelect }) {
   const translateX = useRef(new Animated.Value(0)).current;
+  const revealOpacity = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
   const replied = useRef(false);
@@ -1754,6 +1755,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     onPanResponderMove: (_, g) => {
       let v = swipeDirection === 1 ? Math.max(0, g.dx) : Math.min(0, g.dx);
       translateX.setValue(Math.max(-110, Math.min(110, v)));
+      revealOpacity.setValue(1);
     },
     onPanResponderRelease: (_, g) => {
       const trigger = swipeDirection === 1 ? g.dx > 70 : g.dx < -70;
@@ -1763,13 +1765,16 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
           swipeAction(message);
           replied.current = false;
           Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+          Animated.timing(revealOpacity, { toValue: 0, duration: 150, useNativeDriver: true }).start();
         });
       } else {
         Animated.spring(translateX, { toValue: 0, useNativeDriver: true, bounciness: 0, speed: 30 }).start();
+        Animated.timing(revealOpacity, { toValue: 0, duration: 150, useNativeDriver: true }).start();
       }
     },
     onPanResponderTerminate: () => {
       Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+      Animated.timing(revealOpacity, { toValue: 0, duration: 120, useNativeDriver: true }).start();
     },
   })).current;
 
@@ -1836,9 +1841,9 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
         {/* Swipe affordance revealed behind the bubble (reply, or edit for your own text) */}
-        <View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)' }]}>
+        <Animated.View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)', opacity: revealOpacity }]}>
           <Icon name={suggestEdit ? 'create-outline' : 'arrow-back'} size={14} color="#fff" />
-        </View>
+        </Animated.View>
         <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
             <TouchableOpacity
               style={[
