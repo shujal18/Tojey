@@ -96,9 +96,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [reactionMenu, setReactionMenu] = useState(null);
   const [reactionPop, setReactionPop] = useState(null);
   const [headerMenu, setHeaderMenu] = useState(false);
-  const [contactInfo, setContactInfo] = useState(false);
   const [selMode, setSelMode] = useState(false);
   const [selSet, setSelSet] = useState(new Set());
+  const [selMenu, setSelMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
@@ -287,11 +287,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           selMode={selMode}
           selActive={selSet.has(safe.id)}
           onSelectPress={() => toggleSelect(safe.id)}
+          onEnterSelect={() => enterSelect(safe)}
         />
       </RowBoundary>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect]);
+  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback, selMode, selSet, toggleSelect, enterSelect]);
 
   const onType = (t) => {
     setText(t);
@@ -798,6 +799,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   }, []);
 
+  // Tap-to-select: single tap on a TEXT message enters selection mode with it selected.
+  const enterSelect = useCallback((m) => {
+    setSelMode(true);
+    if (m && m.id) {
+      setSelSet((prev) => {
+        if (prev.has(m.id)) return prev;
+        const next = new Set(prev);
+        next.add(m.id);
+        return next;
+      });
+    }
+  }, []);
+
+  // Leave selection mode automatically once nothing is selected.
+  useEffect(() => {
+    if (selMode && selSet.size === 0) setSelMode(false);
+  }, [selMode, selSet]);
+
   const clearChatLocal = () => {
     setMessages([]);
     setReplyingTo(null);
@@ -815,22 +834,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       .join('\n');
     if (parts) Clipboard.setString(parts);
     exitSelect();
-  };
-
-  const deleteSelected = () => {
-    if (!selSet.size) return;
-    const anyOwn = selectedMsgs.some((m) => m.sender_id === currentUser.id);
-    const opts = [
-      { text: 'For me', onPress: () => { selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); } },
-    ];
-    if (anyOwn) {
-      opts.push({
-        text: 'For everyone', style: 'destructive',
-        onPress: () => { selectedMsgs.forEach((m) => m.sender_id === currentUser.id && deleteMessage(m, 'everyone')); exitSelect(); },
-      });
-    }
-    opts.push({ text: 'Cancel', style: 'cancel' });
-    Alert.alert(`Delete ${selSet.size} message(s)?`, anyOwn ? 'Delete for everyone?' : 'Delete from this chat?', opts);
   };
 
   const selectedMsgs = messages.filter((m) => selSet.has(m.id));
@@ -1199,7 +1202,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   // The scroll-to-latest FAB floats just above this stack so it never overlaps
   // the composer/mic or hides the newest message.
   const fabBottom =
-    (barHeights.sel || 0) + (barHeights.rec || 0) + (barHeights.attach || 0)
+    (barHeights.rec || 0) + (barHeights.attach || 0)
     + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
     + (composerH || 54) + 8;
 
@@ -1218,6 +1221,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             <Text style={[styles.headerName, { color: theme.text, marginLeft: 4, flex: 1 }]}>
               {selSet.size} selected
             </Text>
+            <TouchableOpacity onPress={() => setSelMenu((v) => !v)} style={styles.headerIconBtn} accessibilityLabel="Selected messages options">
+              <Icon name="ellipsis-vertical" size={22} color={theme.text} />
+            </TouchableOpacity>
           </>
         ) : (
           <>
@@ -1247,18 +1253,56 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         )}
       </View>
 
+      {selMenu && (
+        <View style={styles.headerMenuOverlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setSelMenu(false)} accessibilityLabel="Close menu" />
+          <View style={[styles.headerMenu, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); replySelected(); }} accessibilityLabel="Reply to selected">
+              <Icon name="return-down-back-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Reply</Text>
+            </TouchableOpacity>
+            {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); doAction('edit', selOne); exitSelect(); }} accessibilityLabel="Edit selected">
+                <Icon name="create-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: 15 }}>Edit</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); copySelected(); }} accessibilityLabel="Copy selected">
+              <Icon name="copy-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.text, fontSize: 15 }}>Copy</Text>
+            </TouchableOpacity>
+            {selOne && selOne.media_url && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); downloadAndOpen(selOne); exitSelect(); }} accessibilityLabel="Save selected">
+                <Icon name="download-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: 15 }}>Save</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={styles.headerMenuItem}
+              onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => deleteMessage(m, 'me')); exitSelect(); }}
+              accessibilityLabel="Delete for me"
+            >
+              <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
+              <Text style={{ color: theme.danger, fontSize: 15 }}>Delete for me</Text>
+            </TouchableOpacity>
+            {selectedMsgs.some((m) => m.sender_id === currentUser.id) && (
+              <TouchableOpacity
+                style={styles.headerMenuItem}
+                onPress={() => { setSelMenu(false); selectedMsgs.forEach((m) => { if (m.sender_id === currentUser.id) deleteMessage(m, 'everyone'); }); exitSelect(); }}
+                accessibilityLabel="Unsend for everyone"
+              >
+                <Icon name="arrow-undo-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.danger, fontSize: 15 }}>Unsend</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      )}
+
       {headerMenu && (
         <View style={styles.headerMenuOverlay}>
           <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setHeaderMenu(false)} accessibilityLabel="Close menu" />
           <View style={[styles.headerMenu, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setHeaderMenu(false); setContactInfo(true); }} accessibilityLabel="Contact info">
-              <Icon name="person-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: 15 }}>Contact info</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { Keyboard.dismiss(); setShowAttach(false); setHeaderMenu(false); setSelMode(true); }} accessibilityLabel="Select messages">
-              <Icon name="checkmark-done-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: 15 }}>Select messages</Text>
-            </TouchableOpacity>
             <TouchableOpacity
               style={styles.headerMenuItem}
               onPress={() => {
@@ -1273,26 +1317,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <Icon name="trash-outline" size={18} color={theme.danger} style={{ marginRight: 12 }} />
               <Text style={{ color: theme.danger, fontSize: 15 }}>Clear chat</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
-      {contactInfo && (
-        <View style={styles.headerMenuOverlay}>
-          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setContactInfo(false)} accessibilityLabel="Close contact info" />
-          <View style={[styles.contactSheet, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <View style={[styles.avatarLarge, { backgroundColor: theme.primaryDeep }]}>
-              {otherUserAvatar ? <Image source={{ uri: absUrl(otherUserAvatar) }} style={styles.avatarLgImg} /> : <Text style={styles.avatarLargeText}>{otherUserName[0].toUpperCase()}</Text>}
-            </View>
-            <Text style={[styles.contactName, { color: theme.text }]}>{otherUserName}</Text>
-            <Text style={{ color: theme.textSecondary, fontSize: 13, marginTop: 2 }}>@{otherUsername}</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
-              <Icon name={isOnline ? 'radio-button-on' : 'time-outline'} size={14} color={isOnline ? theme.online : theme.textSecondary} />
-              <Text style={{ color: theme.textSecondary, fontSize: 13, marginLeft: 5 }}>{headerStatus}</Text>
-            </View>
-            {!!otherUserBio && (
-              <Text style={{ color: theme.text, fontSize: 14, marginTop: 14, textAlign: 'center' }}>{otherUserBio}</Text>
-            )}
           </View>
         </View>
       )}
@@ -1436,23 +1460,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         </View>
       )}
 
-      {/* Selection action bar: separate Reply / Edit / Copy / Save / Delete buttons */}
-      {selMode && (
-        <View style={[styles.selBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('sel')}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.selBarRow}>
-            <SelBtn label="Reply" icon="return-down-back-outline" onPress={replySelected} disabled={!selSet.size} theme={theme} />
-            {selOne && selOne.sender_id === currentUser.id && selOne.type === 'TEXT' && (
-              <SelBtn label="Edit" icon="create-outline" onPress={() => { doAction('edit', selOne); exitSelect(); }} theme={theme} />
-            )}
-            <SelBtn label="Copy" icon="copy-outline" onPress={copySelected} disabled={!selSet.size} theme={theme} />
-            {selOne && selOne.media_url && (
-              <SelBtn label="Save" icon="download-outline" onPress={() => { downloadAndOpen(selOne); exitSelect(); }} theme={theme} />
-            )}
-            <SelBtn label="Delete" icon="trash-outline" onPress={deleteSelected} disabled={!selSet.size} theme={theme} danger />
-          </ScrollView>
-        </View>
-      )}
-
       {/* Recording UI */}
       {recording && !selMode && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('rec')}>
@@ -1585,22 +1592,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   );
 }
 
-function SelBtn({ label, icon, onPress, theme, danger, disabled }) {
-  return (
-    <TouchableOpacity
-      onPress={onPress}
-      disabled={disabled}
-      style={[styles.selBtn, { backgroundColor: danger ? 'rgba(229,57,53,0.12)' : theme.primaryLight }]}
-      accessibilityLabel={label}
-    >
-      <Icon name={icon} size={17} color={disabled ? theme.textSecondary : (danger ? theme.danger : theme.primary)} />
-      <Text style={{ color: disabled ? theme.textSecondary : (danger ? theme.danger : theme.primary), fontWeight: '700', fontSize: 12, marginTop: 2 }}>
-        {label}
-      </Text>
-    </TouchableOpacity>
-  );
-}
-
 function AttachBtn({ label, icon, color, onPress, theme }) {
   return (
     <TouchableOpacity onPress={onPress} style={styles.attachBtn}>
@@ -1707,7 +1698,7 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress }) {
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, selMode, selActive, onSelectPress, onEnterSelect }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
@@ -1747,7 +1738,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
       ? 'checkmark-done' : 'checkmark';
   const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
 
-  const emojiOnly = message.type === 'TEXT' && isEmojiOnly(message.content);
+  const singleEmoji = message.type === 'TEXT' && isSingleEmoji(message.content);
   const mediaBase = Math.min(APP_W * 0.62, 250);
   const mw = message.media_width;
   const mh = message.media_height;
@@ -1784,6 +1775,11 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     }
     if (m.type === 'IMAGE' || m.type === 'VIDEO' || m.type === 'FILE' || m.type === 'DOCUMENT') {
       onOpenMedia(m);
+      return;
+    }
+    // Single tap on a TEXT message enters selection mode (media keeps tap-to-open).
+    if (m.type === 'TEXT' && onEnterSelect) {
+      onEnterSelect(m);
     }
   };
 
@@ -1805,10 +1801,11 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
             <TouchableOpacity
               style={[
                 styles.bubble,
-                emojiOnly && styles.bubbleEmojiOnly,
+                singleEmoji && styles.bubbleEmojiOnly,
                 isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: receivedBubble, borderColor: 'rgba(255,255,255,0.07)' }],
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
                 flash && { backgroundColor: 'rgba(124,77,255,0.34)' },
+                selActive && !singleEmoji && { backgroundColor: isSent ? mixWhite(theme.sentBubble, 0.35) : mixWhite(receivedBubble, 0.3) },
               ]}
               onPress={handlePress}
               onLongPress={() => { if (selMode) return; clearTimeout(singleTimer.current); onLongPress(message); }}
@@ -1925,9 +1922,9 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               ) : (
                 <View>
-                  {emojiOnly && !message.reply_to ? (
+                  {singleEmoji && !message.reply_to ? (
                     <View style={styles.msgEmojiWrap}>
-                      <Text style={[styles.msgEmoji, flash && { backgroundColor: 'rgba(124,77,255,0.28)', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 3 }]}>
+                      <Text style={[styles.msgEmojiSingle, flash && { backgroundColor: 'rgba(124,77,255,0.28)', borderRadius: 22, paddingHorizontal: 16, paddingVertical: 4 }]}>
                         {message.content}
                       </Text>
                     </View>
@@ -1951,7 +1948,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                         style={[
                           styles.msgText,
                           { color: isSent ? '#fff' : theme.receivedText },
-                          emojiOnly && styles.msgEmoji,
+                          singleEmoji && styles.msgEmoji,
                         ]}
                       >
                         {message.content}
@@ -1962,10 +1959,16 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
               )}
 
               {!message.is_deleted_for_everyone && (
-                <View style={[styles.msgMeta, emojiOnly && { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
+                <View style={[
+                  styles.msgMeta,
+                  singleEmoji && { justifyContent: isSent ? 'flex-end' : 'flex-start' },
+                  singleEmoji && styles.msgMetaPill,
+                  singleEmoji && { alignSelf: isSent ? 'flex-end' : 'flex-start' },
+                  singleEmoji && selActive && { backgroundColor: 'rgba(124,77,255,0.45)' },
+                ]}>
                   {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
                   {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
-                  <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }]}>
+                  <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }, singleEmoji && !isSent && { color: 'rgba(255,255,255,0.85)' }]}>
                     {message.created_at ? timeOf(message.created_at) : ''}
                   </Text>
                   {isSent && <Icon name={statusIcon} size={13} color={statusColor} />}
@@ -1990,19 +1993,6 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
               </View>
             ))}
           </TouchableOpacity>
-        )}
-        {selMode && (
-          <View
-            style={[
-              styles.selDot,
-              isSent ? styles.selDotSent : styles.selDotRecv,
-              { borderColor: selActive ? theme.primary : theme.border },
-              selActive ? { backgroundColor: theme.primary } : { backgroundColor: 'rgba(0,0,0,0.35)' },
-            ]}
-            pointerEvents="none"
-          >
-            {selActive ? <Icon name="checkmark" size={11} color="#fff" /> : null}
-          </View>
         )}
         </View>
       </View>
@@ -2056,16 +2046,18 @@ function fmtDur(totalSec) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-function isEmojiOnly(s) {
+// True only for a SINGLE emoji (WhatsApp-style big-emoji message). Multi-emoji
+// or text+emoji falls back to the normal bubble at default text size.
+// Hermes-safe: no \p{...} property escapes, just mark-stripping + code-point count.
+function isSingleEmoji(s) {
   if (!s || typeof s !== 'string') return false;
   const t = s.trim();
-  if (!t.length || t.length > 12) return false;
-  // Must contain at least one non-ASCII character and no ASCII alphanumerics.
-  if (!/[^\x00-\x7F]/.test(t)) return false;
-  if (/[A-Za-z0-9]/.test(t)) return false;
-  // Reject if it looks like normal text with a stray unicode char.
-  const words = t.split(/\s+/);
-  return words.length <= 4;
+  if (!t || /[A-Za-z0-9]/.test(t)) return false;
+  const stripped = t
+    .replace(/[\uFE0F\u200D]/g, '')
+    .replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '')
+    .replace(/\u20E3/g, '');
+  return Array.from(stripped).length === 1 && /[^\x00-\x7F]/.test(stripped);
 }
 
 function hexToRgba(hex, alpha) {
@@ -2075,6 +2067,17 @@ function hexToRgba(hex, alpha) {
   if (h.length !== 6) return hex;
   const n = parseInt(h, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+// Lighten a hex color toward white (used for the selection highlight tint).
+function mixWhite(hex, amt) {
+  if (!hex || typeof hex !== 'string') return hex;
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length !== 6) return hex;
+  const n = parseInt(h, 16);
+  const m = (c) => Math.round(c + (255 - c) * amt);
+  return `rgb(${m((n >> 16) & 255)}, ${m((n >> 8) & 255)}, ${m(n & 255)})`;
 }
 
 const styles = StyleSheet.create({
@@ -2099,28 +2102,19 @@ const styles = StyleSheet.create({
   msgText: { fontSize: 15, lineHeight: 21 },
   msgEmojiWrap: { paddingVertical: 2 },
   msgEmoji: { fontSize: 52, lineHeight: 62, paddingHorizontal: 10, paddingVertical: 4 },
+  msgEmojiSingle: { fontSize: 72, lineHeight: 84, paddingHorizontal: 6, opacity: 1 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
+  msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2 },
   metaText: { fontSize: 10, color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
   reactionBadge: { position: 'absolute', bottom: -8, borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
   reactionBadgeItem: { flexDirection: 'row', alignItems: 'center' },
   reactionBadgeCount: { fontSize: 10, marginLeft: 2 },
-  selDot: { position: 'absolute', top: 8, width: 22, height: 22, borderRadius: 11, borderWidth: 2, alignItems: 'center', justifyContent: 'center', zIndex: 6 },
-  selDotSent: { right: -12 },
-  selDotRecv: { left: -12 },
   headerIconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
   headerMenuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, justifyContent: 'flex-start' },
   headerMenu: { alignSelf: 'flex-end', marginTop: 62, marginRight: 8, borderRadius: 14, minWidth: 200, paddingVertical: 6, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
-  headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
-  contactSheet: { alignSelf: 'center', marginTop: 90, marginHorizontal: 40, borderRadius: 20, paddingVertical: 26, paddingHorizontal: 24, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, shadowOffset: { width: 0, height: 8 }, elevation: 12 },
-  avatarLarge: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  avatarLgImg: { width: '100%', height: '100%' },
-  avatarLargeText: { color: '#fff', fontSize: 32, fontWeight: '700' },
-  contactName: { fontSize: 18, fontWeight: '700', marginTop: 14 },
+headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
   composer: { borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === 'ios' ? 20 : 12 },
-  selBar: { borderTopWidth: 1, paddingVertical: 10, paddingHorizontal: 8 },
-  selBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  selBtn: { minWidth: 64, alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingVertical: 8, paddingHorizontal: 10 },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   composerBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   emojiPickBtn: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
