@@ -5,7 +5,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
-const { sendPush, deactivateTokens } = require('./fcm');
+const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
 const path = require('path');
 const { upload } = require('./media');
 
@@ -481,6 +481,19 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
 // for the REST /api/users listing. NOTE: this is in-memory and single-instance (see render.yaml).
 const socketUserMap = new Map();
 
+// Per-user "app is actually on the screen" state, reported by the clients when the mobile
+// app backgrounds/foregrounds (socket event app:foreground / app:background). A user whose
+// app is MINIMIZED still has a live socket, but they must get a real system notification via
+// FCM - routing by socket presence alone misses exactly the backgrounded case.
+const userActivityMap = new Map(); // userId -> true(foreground) | false(background)
+
+// True when the recipient should render in their open chat UI (socket) instead of a
+// system notification. Unknown state defaults to foreground for backward compatibility.
+function isUserForeground(userId) {
+  const act = userActivityMap.get(userId);
+  return act !== false;
+}
+
 function userSockets(userId) {
   return socketUserMap.get(userId) || new Set();
 }
@@ -538,6 +551,16 @@ io.on('connection', async (socket) => {
 
     socket.emit('connected:ack', { userId: dbUser.userId, displayName: dbUser.displayName });
 
+    // App foreground/background state (drives FCM vs Socket.IO routing for messages).
+    socket.on('app:foreground', () => {
+      userActivityMap.set(dbUser.userId, true);
+    });
+    socket.on('app:background', () => {
+      // Any live socket stopping means the UI is no longer on screen -> needs real
+      // notifications. Only ever downgrade; a foreground report wins if it arrived late.
+      if (userActivityMap.get(dbUser.userId) !== true) userActivityMap.set(dbUser.userId, false);
+    });
+
     socket.on('conversation:open', async ({ otherUserId }) => {
       try {
         const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
@@ -584,59 +607,72 @@ io.on('connection', async (socket) => {
         message.reactions = [];
         const dbProfilePic = dbUser.profile_pic_url || '';
 
+        // Always deliver the message itself over the socket (both foreground AND
+        // background clients; background clients persist it for when the UI returns).
         socket.to(`user:${otherUserId}`).emit('message:receive', {
           message,
           sender: { userId: dbUser.userId, displayName: dbUser.displayName, profilePic: dbProfilePic },
           conversationId: convo.id,
         });
 
-        const deliverTo = userSockets(otherUserId).size > 0;
-        if (deliverTo) {
+        // Delivery decision: socket-only when the recipient is ONLINE AND on-screen
+        // (foreground). When they are backgrounded/minimized OR fully offline, fall back
+        // to a real FCM system notification - a live socket in the background must NOT
+        // suppress the notification, that is the bug that made minimized chat silent.
+        const hasSocket = userSockets(otherUserId).size > 0;
+        const receiverForeground = isUserForeground(otherUserId);
+        const needFcm = !hasSocket || !receiverForeground;
+
+        // Always emit over the socket too: when the client is backgrounded the message is
+        // persisted by JS and is already there the moment the UI returns (no duplicate UI
+        // notification is created for socket-delivered messages in the JS foreground path).
+        if (hasSocket) {
           setTimeout(() => {
             io.to(`user:${dbUser.userId}`).emit('message:delivered', {
               messageId: message.id,
               userId: dbUser.userId,
             });
           }, 300);
-        } else {
-          // Receiver has no active socket (background/terminated/minimized): send a
-          // real FCM notification+data push so Android's own client renders the tray
-          // notification. Never fall back to JS-wake-up-rendered pushes.
-          try {
-            const tokensRes = await pool.query(
-              `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-              [otherUserId]
-            );
-            const tokens = tokensRes.rows.map((r) => r.fcm_token);
-            if (tokens.length) {
-              const banner = messageSummary(message);
-              const push = await sendPush({
-                tokens,
-                notification: {
-                  title: dbUser.displayName || dbUser.username,
-                  body: banner,
-                },
-                data: {
-                  type: 'tojey_notification',
-                  notificationId: String(message.id),
-                  id: String(message.id),
-                  senderId: String(dbUser.userId),
-                  senderUsername: dbUser.username,
-                  senderName: dbUser.displayName || dbUser.username,
-                  receiverId: String(otherUserId),
-                  conversationId: String(convo.id),
-                  body: banner,
-                },
-              });
-              console.log(`[FCM] chat push for offline user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-              if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-            } else {
-              console.log(`[FCM] offline user ${otherUserId} has no registered tokens - skipping push`);
-            }
-          } catch (pushErr) {
-            // Never break message delivery because the push failed.
-            console.error('[FCM] chat push failed:', pushErr.message);
+        }
+        if (!needFcm) return callback({ ok: true, message });
+
+        // Receiver has no active socket OR is backgrounded/minimized: send a proper FCM
+        // notification+data push so Android's own client renders the tray notification.
+        try {
+          const tokensRes = await pool.query(
+            `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+            [otherUserId]
+          );
+          const tokens = tokensRes.rows.map((r) => r.fcm_token);
+          console.log(`[FCM] message to user ${otherUserId}: sockets=${userSockets(otherUserId).size} foreground=${receiverForeground} -> fcm + ${tokens.length} token(s)`);
+          if (tokens.length) {
+            const banner = messageSummary(message);
+            const push = await sendPush({
+              tokens,
+              notification: {
+                title: dbUser.displayName || dbUser.username,
+                body: banner,
+              },
+              data: {
+                type: 'tojey_notification',
+                notificationId: String(message.id),
+                id: String(message.id),
+                senderId: String(dbUser.userId),
+                senderUsername: dbUser.username,
+                senderName: dbUser.displayName || dbUser.username,
+                receiverId: String(otherUserId),
+                conversationId: String(convo.id),
+                body: banner,
+              },
+            });
+            console.log(`[FCM] chat push for ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+          } else {
+            console.log(`[FCM] user ${otherUserId} has no registered tokens - skipping push`);
           }
+        } catch (pushErr) {
+          // Never break message delivery because the push failed.
+          console.error('[FCM] chat push failed:', pushErr.message);
         }
 
         callback({ ok: true, message });
@@ -691,7 +727,11 @@ io.on('connection', async (socket) => {
       };
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
 
-      if (userSockets(otherUserId).size > 0) return;
+      // Only recipients who are online AND on-screen get the socket nudge alone.
+      // Backgrounded/offline users get a real FCM notification (with vibration).
+      const hasSocket = userSockets(otherUserId).size > 0;
+      const receiverForeground = isUserForeground(otherUserId);
+      if (hasSocket && receiverForeground) return;
 
       try {
         const tokensRes = await pool.query(
@@ -941,6 +981,7 @@ initDB().then(() => {
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🟣 Tojey backend running on port ${PORT}`);
+    console.log(`[FCM] firebase-admin ${fcmEnabled() ? 'ENABLED' : 'DISABLED'} (set FIREBASE_SERVICE_ACCOUNT_B64 to enable push)`);
   });
 }).catch(err => {
   console.error('Failed to init DB:', err);

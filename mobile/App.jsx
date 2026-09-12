@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions } from 'react-native';
+import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { loadSession, logout, fetchUsers } from './src/services/auth';
-import { connect, disconnect } from './src/services/socket';
+import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { Icon } from './src/components/AppIcon';
 import LoginScreen from './src/screens/LoginScreen';
@@ -174,6 +174,33 @@ function Shell() {
     })();
     return () => { mounted = false; };
   }, []);
+
+  // Tell the server whether this app is on-screen or minimized. The backend decides
+  // between Socket.IO (foreground -> live chat UI) and FCM (background -> real Android
+  // system notification) based on this. Without it, a backgrounded-but-connected app
+  // was treated as "online" and no notification was ever sent.
+  useEffect(() => {
+    if (!session) return undefined;
+    const emitAppState = () => {
+      const s = getSocket();
+      if (!s) return;
+      const active = AppState.currentState === 'active';
+      s.emit(active ? 'app:foreground' : 'app:background');
+    };
+    const sendToServer = () => setTimeout(emitAppState, 600);
+    const onConnect = () => {
+      emitAppState();
+    };
+    const sub = AppState.addEventListener('change', emitAppState);
+    const so = getSocket();
+    if (so) so.on('connect', onConnect);
+    const t = sendToServer();
+    return () => {
+      clearTimeout(t);
+      sub.remove();
+      if (so) so.off('connect', onConnect);
+    };
+  }, [session, socket]);
 
   // Online delivery over the socket (no FCM when connected) + foreground push -> in-app banner.
   useEffect(() => {

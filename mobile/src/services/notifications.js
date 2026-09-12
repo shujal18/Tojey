@@ -39,7 +39,10 @@ export function extractNotifPayload(remoteMessage) {
 
 async function ensureNotifeeChannel() {
   try {
-    const existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
+    let existing = null;
+    try {
+      existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
+    } catch (e) {}
     if (!existing) {
       await notifee.createChannel({
         id: NOTIFICATION_CHANNEL_ID,
@@ -49,6 +52,10 @@ async function ensureNotifeeChannel() {
         vibration: true,
         visibility: AndroidVisibility.PUBLIC,
       });
+      existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
+      console.log(`[FCM] channel '${NOTIFICATION_CHANNEL_ID}' created (importance=${existing && existing.importance}, vibration=${existing && existing.vibration})`);
+    } else {
+      console.log(`[FCM] channel '${NOTIFICATION_CHANNEL_ID}' already exists (importance=${existing.importance})`);
     }
   } catch (e) {
     console.warn('ensureNotifeeChannel failed:', e.message);
@@ -197,7 +204,8 @@ export async function startPush(userToken) {
     const token = await messaging().getToken();
     console.log(`[FCM] token obtained: ${maskToken(token)}`);
     await registerToken(token, userToken);
-    console.log('[FCM] token registered with backend');
+    console.log(`[FCM] token registered with backend: ${maskToken(token)}`);
+    console.log(`[FCM] POST_NOTIFICATIONS ${hasPerm ? 'GRANTED' : 'DENIED'} on Android ${Platform.Version}`);
 
     // Refresh tokens as soon as Firebase issues them.
     tokenUnsub = messaging().onTokenRefresh(async (t) => {
