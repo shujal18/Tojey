@@ -9,6 +9,7 @@ import { Icon } from '../components/AppIcon';
 import ColorEmoji from '../components/ColorEmoji';
 import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
+import { getNudgeVibrationEnabled } from '../services/chatHead';
 import { absUrl, SERVER_URL } from '../config';
 import { fs } from '../utils/size';
 import ContactsScreen from './ContactsScreen';
@@ -224,6 +225,15 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
     setActionTarget(null);
   };
 
+  const [nudgeVisible, setNudgeVisible] = useState(true);
+
+  // Long-press on a conversation: open the action modal. The Nudge option is only
+  // offered when the "Nudge Vibration" setting is enabled (fresh read at open time).
+  const openChatActions = async (contact) => {
+    setNudgeVisible(await getNudgeVibrationEnabled());
+    setActionTarget(contact);
+  };
+
   const filtered = users.filter(
     (u) => !query || u.display_name.toLowerCase().includes(query.toLowerCase())
   );
@@ -281,7 +291,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
                     unread={unread[item.id]}
                     theme={theme}
                     onPress={() => openChat(contact)}
-                    onLongPress={() => setActionTarget(contact)}
+                    onLongPress={() => openChatActions(contact)}
                   />
                 );
               }}
@@ -318,7 +328,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
                     unread={unread[normalizedContact.id]}
                     theme={theme}
                     onPress={() => openChat(normalizedContact)}
-                    onLongPress={() => setActionTarget(normalizedContact)}
+                    onLongPress={() => openChatActions(normalizedContact)}
                   />
                 );
               }}
@@ -361,13 +371,15 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               <Icon name="trash-outline" size={18} color={theme.danger} />
               <Text style={{ color: theme.danger, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Clear Messages</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.actionOption, { backgroundColor: theme.primaryLight, marginTop: 10 }]}
-              onPress={() => sendNudge(actionTarget)}
-            >
-              <Icon name="hand-left-outline" size={18} color={theme.primary} />
-              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Nudge</Text>
-            </TouchableOpacity>
+            {nudgeVisible && (
+              <TouchableOpacity
+                style={[styles.actionOption, { backgroundColor: theme.primaryLight, marginTop: 10 }]}
+                onPress={() => sendNudge(actionTarget)}
+              >
+                <Icon name="hand-left-outline" size={18} color={theme.primary} />
+                <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Nudge</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               onPress={() => setActionTarget(null)}
               style={{ alignSelf: 'center', marginTop: 16, paddingHorizontal: 18, paddingVertical: 8 }}

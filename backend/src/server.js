@@ -679,16 +679,51 @@ io.on('connection', async (socket) => {
     });
 
     // Nudge / "vibrate" ping: tells the other person's device to vibrate.
+    // Works online (socket) AND offline (real FCM push so the tray notification
+    // vibrates even when the app is closed).
     socket.on('nudge', async ({ otherUserId }) => {
       if (!otherUserId || String(otherUserId) === String(dbUser.userId)) return;
-      socket.to(`user:${otherUserId}`).emit('nudge', {
-        from: {
-          userId: dbUser.userId,
-          username: dbUser.username,
-          displayName: dbUser.displayName,
-          profilePic: dbUser.profile_pic_url || '',
-        },
-      });
+      const from = {
+        userId: dbUser.userId,
+        username: dbUser.username,
+        displayName: dbUser.displayName,
+        profilePic: dbUser.profile_pic_url || '',
+      };
+      socket.to(`user:${otherUserId}`).emit('nudge', { from });
+
+      if (userSockets(otherUserId).size > 0) return;
+
+      try {
+        const tokensRes = await pool.query(
+          `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+          [otherUserId]
+        );
+        const tokens = tokensRes.rows.map((r) => r.fcm_token);
+        if (!tokens.length) return;
+        const banner = '👋 nudged you!';
+        const push = await sendPush({
+          tokens,
+          notification: {
+            title: dbUser.displayName || dbUser.username,
+            body: banner,
+          },
+          data: {
+            type: 'tojey_notification',
+            id: `nudge-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+            senderId: String(dbUser.userId),
+            senderUsername: dbUser.username,
+            senderName: dbUser.displayName || dbUser.username,
+            receiverId: String(otherUserId),
+            conversationId: '0',
+            body: banner,
+            nudge: '1',
+          },
+        });
+        console.log(`[FCM] nudge push for offline user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+        if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+      } catch (pushErr) {
+        console.error('[FCM] nudge push failed:', pushErr.message);
+      }
     });
 
     socket.on('message:edit', async ({ messageId, content }) => {

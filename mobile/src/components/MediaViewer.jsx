@@ -305,23 +305,15 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     try {
       const url = absUrl(item.media_url);
       const isVideo = item.type === 'VIDEO';
+      const isMedia = item.type === 'IMAGE' || isVideo;
       const ext = isVideo ? '.mp4' : '.jpg';
       const base = sanitizeFileName(item.file_name) || ('tojey_media_' + item.id);
       const name = /\.[a-zA-Z0-9]{2,5}$/.test(base) ? base : base + ext;
       const { dirs } = RNFetchBlob.fs;
-      const dlPath = `${dirs.DownloadDir}/${name}`;
-      const res = await RNFetchBlob.config({
-        fileCache: false,
-        path: dlPath,
-        addAndroidDownloads: {
-          useDownloadManager: true,
-          notification: true,
-          path: dlPath,
-          description: 'Tojey media',
-          mime: isVideo ? 'video/mp4' : 'image/jpeg',
-        },
-      }).fetch('GET', url);
-      Alert.alert('Saved', `Downloaded to ${res.path()}`);
+      const dlPath = isMedia ? `${dirs.DCIMDir}/Tojey/${name}` : `${dirs.DownloadDir}/${name}`;
+      await RNFetchBlob.config({ fileCache: false, path: dlPath }).fetch('GET', url);
+      Promise.resolve(RNFetchBlob.fs.scanFile([dlPath])).catch(() => {});
+      Alert.alert('Saved', isMedia ? `Saved to Gallery (DCIM/Tojey/${name})` : `Downloaded to Download/${name}`);
     } catch (e) {
       console.error('download failed', e);
       Alert.alert('Download failed', e.message || 'Could not save media');

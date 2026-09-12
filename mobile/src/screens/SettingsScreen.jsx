@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
-  Platform,
+  Platform, AppState,
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -27,6 +27,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [appLockPINEntry, setAppLockPINEntry] = useState('');
   const [confirmingPIN, setConfirmingPIN] = useState(false);
   const [chatHead, setChatHead] = useState(false);
+  const [chatHeadPending, setChatHeadPending] = useState(false);
   const [nudgeVib, setNudgeVib] = useState(true);
 
   useEffect(() => {
@@ -41,20 +42,47 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
     return () => { mounted = false; };
   }, []);
 
+  // If the user toggled Chat Head on before granting "Display over other apps",
+  // watch for the app to come back from the system overlay settings screen and
+  // finish enabling it automatically (or revert if they didn't grant it).
+  useEffect(() => {
+    if (!chatHeadPending) return;
+    const sub = AppState.addEventListener('change', async (state) => {
+      if (state !== 'active') return;
+      if (canDrawOverlay()) {
+        setChatHeadPending(false);
+        setChatHead(true);
+        await setChatHeadEnabled(true);
+      } else {
+        setChatHeadPending(false);
+        setChatHead(false);
+        await setChatHeadEnabled(false);
+      }
+    });
+    return () => sub.remove();
+  }, [chatHeadPending]);
+
   const toggleChatHead = async (enabled) => {
-    if (enabled) {
-      if (!supportsChatHead()) {
-        alert('Chat Head is only available in the installed Tojey app.');
-        return;
-      }
-      if (!canDrawOverlay()) {
-        openOverlaySettings();
-        alert('Allow "Display over other apps" for Tojey, then turn Chat Head on again.');
-        return;
-      }
+    if (!enabled) {
+      setChatHeadPending(false);
+      setChatHead(false);
+      await setChatHeadEnabled(false);
+      return;
     }
-    setChatHead(enabled);
-    await setChatHeadEnabled(enabled);
+    if (!supportsChatHead()) {
+      alert('Chat Head is only available in the installed Tojey app.');
+      return;
+    }
+    if (!canDrawOverlay()) {
+      setChatHead(true);
+      setChatHeadPending(true);
+      await setChatHeadEnabled(false);
+      openOverlaySettings();
+      alert('Grant "Display over other apps" for Tojey. When you come back, Chat Head turns on automatically.');
+      return;
+    }
+    setChatHead(true);
+    await setChatHeadEnabled(true);
   };
 
   const profilePic = user.profilePic || '';

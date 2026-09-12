@@ -174,7 +174,7 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     onPanResponderGrant: (e) => {
       const g = geomRef.current;
       if (!g.contained || !g.crop) return;
-      const { locationX, locationY } = e.nativeEvent;
+      const { locationX, locationY, pageX, pageY } = e.nativeEvent;
       const c = g.crop;
       let corner = null;
       if (locationX < 40 && locationY < 40) corner = 'tl';
@@ -184,8 +184,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       gestureStart.current = {
         mode: corner ? 'resize' : 'move',
         corner,
-        sx: locationX,
-        sy: locationY,
+        px: pageX,
+        py: pageY,
         cx: c.cx, cy: c.cy, cw: c.cw, ch: c.ch,
       };
     },
@@ -193,8 +193,11 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
       const gs = gestureStart.current;
       const g = geomRef.current;
       if (!gs || !g.contained || !g.crop) return;
-      const dx = e.nativeEvent.locationX - gs.sx;
-      const dy = e.nativeEvent.locationY - gs.sy;
+      // Track the finger via screen coordinates (pageX/pageY). locationX/locationY
+      // get recomputed as the crop view re-lays out every frame, which causes the
+      // rectangle to lag and shake - this is exact and stable.
+      const dx = e.nativeEvent.pageX - gs.px;
+      const dy = e.nativeEvent.pageY - gs.py;
       const boxC = g.contained;
       if (gs.mode === 'resize') {
         // Freeform: each corner independently resizes its own dimension(s).

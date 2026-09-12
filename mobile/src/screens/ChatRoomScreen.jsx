@@ -12,7 +12,7 @@ import { fs } from '../utils/size';
 import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
 import {
-  getChatHeadEnabled, showChatHead, hideChatHead,
+  getChatHeadEnabled, showChatHead, hideChatHead, canDrawOverlay, getNudgeVibrationEnabled,
 } from '../services/chatHead';
 
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
@@ -105,6 +105,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [headerMenu, setHeaderMenu] = useState(false);
   const [selMenu, setSelMenu] = useState(false);
   const [nudgeToast, setNudgeToast] = useState('');
+  const [nudgeMenuVisible, setNudgeMenuVisible] = useState(false);
   const chatHeadOnRef = useRef(false);
   const appVisibleRef = useRef(true);
   const headUnreadRef = useRef(0);
@@ -429,10 +430,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   }, [socket, otherUserId, currentUser.id]);
 
   // Chat Head: show a floating bubble of the other person while the app is in the
-  // background (only when enabled in Settings). Hidden + unread reset on foreground.
+  // background (only when enabled in Settings and overlay permission granted).
+  // Hidden + unread reset on foreground.
   const updateChatHead = () => {
     if (!chatHeadOnRef.current) return;
-    showChatHead(safeOtherUser.profile_pic_url ? otherUserName[0].toUpperCase() : '💬', otherUserName, headUnreadRef.current);
+    if (!canDrawOverlay()) return;
+    const pic = safeOtherUser.profile_pic_url ? absUrl(safeOtherUser.profile_pic_url) : otherUserName[0].toUpperCase();
+    showChatHead(pic, otherUserName, headUnreadRef.current);
   };
 
   useEffect(() => {
@@ -1204,6 +1208,28 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
+  // WhatsApp-style download: photos/videos go straight into the Gallery (DCIM/Tojey)
+  // via a media scan so they appear in the Photos app; documents go to Download/.
+  const saveToGallery = useCallback(async (message) => {
+    if (!message || !message.media_url) return;
+    const isMedia = message.type === 'IMAGE' || message.type === 'VIDEO';
+    const mime = mimeFor(message);
+    let name = sanitizeFileName(message.file_name) || sanitizeFileName(fileNameFromUrl(message.media_url)) || `tojey_media_${Date.now()}`;
+    if (!/\.[a-zA-Z0-9]{2,5}$/.test(name) && mime !== 'application/octet-stream') {
+      name = `${name}.${extForMime(mime)}`;
+    }
+    const { dirs } = RNFetchBlob.fs;
+    const path = isMedia ? `${dirs.DCIMDir}/Tojey/${name}` : `${dirs.DownloadDir}/${name}`;
+    try {
+      await RNFetchBlob.config({ fileCache: false, path }).fetch('GET', absUrl(message.media_url));
+      Promise.resolve(RNFetchBlob.fs.scanFile([path])).catch(() => {});
+      Alert.alert('Saved', isMedia ? `Saved to Gallery (DCIM/Tojey/${name})` : `Downloaded to Download/${name}`);
+    } catch (e) {
+      console.error('saveToGallery failed:', e);
+      alert('Could not save file: ' + (e.message || 'Unknown error'));
+    }
+  }, []);
+
 const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
@@ -1244,7 +1270,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
           </View>
         </View>
         <TouchableOpacity
-          onPress={() => { if (reactionPop) { setSelMenu(true); } else { setHeaderMenu((v) => !v); } }}
+          onPress={() => { if (reactionPop) { setNudgeMenuVisible(false); getNudgeVibrationEnabled().then(setNudgeMenuVisible); setSelMenu(true); } else { setHeaderMenu((v) => !v); } }}
           style={styles.headerIconBtn}
           accessibilityLabel={reactionPop ? 'Message options' : 'Chat options'}
         >
@@ -1260,10 +1286,12 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <Icon name="return-down-back-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
               <Text style={{ color: theme.text, fontSize: fs(15) }}>Reply</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); sendNudge(); }} accessibilityLabel="Nudge">
-              <Icon name="hand-left-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-              <Text style={{ color: theme.text, fontSize: fs(15) }}>Nudge</Text>
-            </TouchableOpacity>
+            {nudgeMenuVisible && (
+              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); sendNudge(); }} accessibilityLabel="Nudge">
+                <Icon name="hand-left-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
+                <Text style={{ color: theme.text, fontSize: fs(15) }}>Nudge</Text>
+              </TouchableOpacity>
+            )}
             {!!reactionPop.msg && reactionPop.msg.sender_id === currentUser.id && reactionPop.msg.type === 'TEXT' && !reactionPop.msg.is_deleted_for_everyone && (
               <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); doAction('edit', reactionPop.msg); }} accessibilityLabel="Edit message">
                 <Icon name="create-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
@@ -1276,10 +1304,22 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
                 <Text style={{ color: theme.text, fontSize: fs(15) }}>Copy</Text>
               </TouchableOpacity>
             )}
-            {!!reactionPop.msg && !!reactionPop.msg.media_url && (
-              <TouchableOpacity style={styles.headerMenuItem} onPress={() => { setSelMenu(false); setReactionPop(null); downloadAndOpen(reactionPop.msg); }} accessibilityLabel="Save message">
+            {!!reactionPop.msg && !!reactionPop.msg.media_url && reactionPop.msg.type !== 'VOICE' && (
+              <TouchableOpacity
+                style={styles.headerMenuItem}
+                onPress={() => {
+                  const m = reactionPop.msg;
+                  setSelMenu(false);
+                  setReactionPop(null);
+                  if (m.type === 'IMAGE' || m.type === 'VIDEO') saveToGallery(m);
+                  else downloadAndOpen(m);
+                }}
+                accessibilityLabel="Save message"
+              >
                 <Icon name="download-outline" size={18} color={theme.primary} style={{ marginRight: 12 }} />
-                <Text style={{ color: theme.text, fontSize: fs(15) }}>Save</Text>
+                <Text style={{ color: theme.text, fontSize: fs(15) }}>
+                  {reactionPop.msg.type === 'IMAGE' || reactionPop.msg.type === 'VIDEO' ? 'Save' : 'Download'}
+                </Text>
               </TouchableOpacity>
             )}
             {!!reactionPop.msg && !reactionPop.msg.is_deleted_for_everyone && (

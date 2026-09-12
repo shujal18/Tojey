@@ -2,25 +2,35 @@ package com.tojey
 
 import android.app.Service
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
+import androidx.core.graphics.drawable.RoundedBitmapDrawableFactory
+import java.net.HttpURLConnection
+import java.net.URL
 
 class ChatHeadService : Service() {
 
   private var wm: WindowManager? = null
   private var head: FrameLayout? = null
   private var avatarTv: TextView? = null
+  private var avatarImg: ImageView? = null
   private var badgeTv: TextView? = null
+  private var avatarUrl: String? = null
   private var params: WindowManager.LayoutParams? = null
   private var closeZone: View? = null
   private var overClose = false
@@ -134,6 +144,7 @@ class ChatHeadService : Service() {
     p.y = dp(120f)
     params = p
 
+    // Letter/emoji fallback (shown until a profile picture loads, or when there is none).
     val av = TextView(this)
     av.text = if (avatar.isNullOrEmpty()) "👤" else avatar
     av.textSize = 26f
@@ -147,6 +158,20 @@ class ChatHeadService : Service() {
     )
     avatarTv = av
 
+    // Real profile picture (circular), loaded from URL, drawn on top of the letter.
+    val img = ImageView(this)
+    img.scaleType = ImageView.ScaleType.CENTER_CROP
+    img.visibility = View.GONE
+    h.addView(
+      img,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT
+      )
+    )
+    avatarImg = img
+
+    // Small red badge with the unread count (Messenger-style), top-right over the avatar.
     val badge = TextView(this)
     badge.setTextColor(Color.WHITE)
     badge.textSize = 11f
@@ -216,9 +241,50 @@ class ChatHeadService : Service() {
     }
   }
 
+  // Fetch the profile picture off the main thread and show it as a circular avatar.
+  private fun loadAvatar(url: String) {
+    val me = this
+    Thread {
+      var bmp: Bitmap? = null
+      try {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 8000
+        conn.readTimeout = 8000
+        conn.instanceFollowRedirects = true
+        val ins = conn.inputStream
+        bmp = BitmapFactory.decodeStream(ins)
+        ins.close()
+        conn.disconnect()
+      } catch (ignored: Exception) {
+      }
+      Handler(Looper.getMainLooper()).post {
+        if (me.head == null) return@post
+        if (url != me.avatarUrl) return@post
+        if (bmp != null) {
+          val d = RoundedBitmapDrawableFactory.create(resources, bmp)
+          d.isCircular = true
+          avatarImg?.setImageDrawable(d)
+          avatarImg?.visibility = View.VISIBLE
+          avatarTv?.visibility = View.INVISIBLE
+        }
+      }
+    }.start()
+  }
+
   private fun updateHead(avatar: String?, unread: Int) {
-    val h = head ?: return
-    if (avatarTv != null && !avatar.isNullOrEmpty()) avatarTv?.text = avatar
+    if (head == null) return
+    if (avatar != null) {
+      if (avatar.startsWith("http")) {
+        avatarUrl = avatar
+        avatarTv?.visibility = View.INVISIBLE
+        loadAvatar(avatar)
+      } else {
+        avatarUrl = null
+        avatarImg?.visibility = View.GONE
+        avatarTv?.visibility = View.VISIBLE
+        avatarTv?.text = avatar
+      }
+    }
     val badge = badgeTv ?: return
     if (unread > 0) {
       badge.text = if (unread > 99) "99+" else unread.toString()
@@ -230,12 +296,14 @@ class ChatHeadService : Service() {
 
   private fun removeHead() {
     val h = head ?: return
+    avatarUrl = null
     try {
       wm?.removeView(h)
     } catch (ignored: Exception) {
     }
     head = null
     avatarTv = null
+    avatarImg = null
     badgeTv = null
   }
 
