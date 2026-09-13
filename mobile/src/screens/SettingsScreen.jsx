@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
   Platform, AppState,
@@ -62,7 +62,37 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
     return () => sub.remove();
   }, [chatHeadPending]);
 
+  // If the user granted "Display over other apps" directly from the system settings
+  // (without toggling the in-app switch first), pick that up and enable Chat Head
+  // automatically next time the app is foregrounded. An explicit in-app toggle-off is
+  // always respected and will not be undone.
+  const chatHeadOffManually = useRef(false);
+  useEffect(() => {
+    let mounted = true;
+    const sync = async () => {
+      if (!mounted || chatHeadOffManually.current) return;
+      const stored = await getChatHeadEnabled();
+      const over = canDrawOverlay();
+      if (over && !stored) {
+        await setChatHeadEnabled(true);
+        if (mounted) setChatHead(true);
+      } else if (!over && stored) {
+        await setChatHeadEnabled(false);
+        if (mounted) setChatHead(false);
+      }
+    };
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') sync();
+    });
+    sync();
+    return () => {
+      mounted = false;
+      sub.remove();
+    };
+  }, []);
+
   const toggleChatHead = async (enabled) => {
+    chatHeadOffManually.current = !enabled;
     if (!enabled) {
       setChatHeadPending(false);
       setChatHead(false);
