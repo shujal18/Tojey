@@ -4,6 +4,8 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
 import android.net.Uri
 
@@ -12,12 +14,38 @@ class TojeyChatHeadModule(private val reactContext: ReactApplicationContext) : R
   override fun getName() = "TojeyChatHead"
 
   @ReactMethod
-  fun canDrawOverlay(): Boolean {
-    return try {
-      Settings.canDrawOverlays(reactContext)
-    } catch (e: Exception) {
-      false
+  fun canDrawOverlay(promise: com.facebook.react.bridge.Promise) {
+    val ctx = reactContext
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      promise.resolve(true)
+      return
     }
+    var can = try { Settings.canDrawOverlays(ctx) } catch (ignored: Exception) { false }
+    if (!can) {
+      can = try {
+        ctx.packageManager.checkPermission(
+          android.Manifest.permission.SYSTEM_ALERT_WINDOW,
+          ctx.packageName
+        ) == PackageManager.PERMISSION_GRANTED
+      } catch (ignored: Exception) {
+        false
+      }
+    }
+    if (!can) {
+      can = try {
+        val appOps = ctx.getSystemService(android.content.Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        @Suppress("DEPRECATION")
+        appOps.checkOpNoThrow(
+          android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+          android.os.Process.myUid(),
+          ctx.packageName
+        ) == android.app.AppOpsManager.MODE_ALLOWED
+      } catch (ignored: Exception) {
+        false
+      }
+    }
+    android.util.Log.w("TojeyChatHead", "canDrawOverlay=$can pkg=${ctx.packageName}")
+    promise.resolve(can)
   }
 
   @ReactMethod

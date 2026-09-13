@@ -432,9 +432,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // Chat Head: show a floating bubble of the other person while the app is in the
   // background (only when enabled in Settings and overlay permission granted).
   // Hidden + unread reset on foreground.
-  const updateChatHead = () => {
+  const updateChatHead = async () => {
     if (!chatHeadOnRef.current) return;
-    if (!canDrawOverlay()) return;
+    if (!(await canDrawOverlay())) return;
     const pic = safeOtherUser.profile_pic_url ? absUrl(safeOtherUser.profile_pic_url) : otherUserName[0].toUpperCase();
     showChatHead(pic, otherUserName, headUnreadRef.current);
   };

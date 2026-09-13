@@ -25,9 +25,10 @@ export async function setChatHeadEnabled(enabled) {
   if (!enabled) hideChatHead();
 }
 
-export function canDrawOverlay() {
+export async function canDrawOverlay() {
   try {
-    return Mod ? !!Mod.canDrawOverlay() : false;
+    if (!Mod) return false;
+    return !!(await Mod.canDrawOverlay());
   } catch (e) {
     return false;
   }

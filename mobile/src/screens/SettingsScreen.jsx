@@ -49,7 +49,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
     if (!chatHeadPending) return;
     const sub = AppState.addEventListener('change', async (state) => {
       if (state !== 'active') return;
-      if (canDrawOverlay()) {
+      if (await canDrawOverlay()) {
         setChatHeadPending(false);
         setChatHead(true);
         await setChatHeadEnabled(true);
@@ -72,7 +72,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
     const sync = async () => {
       if (!mounted || chatHeadOffManually.current) return;
       const stored = await getChatHeadEnabled();
-      const over = canDrawOverlay();
+      const over = await canDrawOverlay();
       if (over && !stored) {
         await setChatHeadEnabled(true);
         if (mounted) setChatHead(true);
@@ -103,7 +103,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
       alert('Chat Head is only available in the installed Tojey app.');
       return;
     }
-    if (!canDrawOverlay()) {
+    if (!(await canDrawOverlay())) {
       setChatHead(true);
       setChatHeadPending(true);
       await setChatHeadEnabled(false);
