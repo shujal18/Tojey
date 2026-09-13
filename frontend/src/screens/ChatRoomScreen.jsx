@@ -8,7 +8,7 @@ import { quickReactions, wallpapers } from '../theme';
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
-  const { conversation, presence, openConversation, sendMessage, setConversation } = useChat();
+  const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation } = useChat();
   const { messages, typing, wallpaper } = conversation;
 
   useEffect(() => {
@@ -163,6 +163,19 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           </div>
         </div>
         <button style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}><Search size={20} /></button>
+        <button
+          title="Nudge"
+          onClick={() => sendNudge(otherUser.id, otherUser.display_name)}
+          style={{
+            color: '#7C4DFF',
+            padding: 6,
+            fontSize: 22,
+            lineHeight: 1,
+            animation: conversation.nudgePulse && Date.now() - conversation.nudgePulse < 800 ? 'nudgeShake 0.5s ease' : 'none',
+          }}
+        >
+          👋
+        </button>
       </div>
 
       {/* Messages */}

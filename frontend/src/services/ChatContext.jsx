@@ -1,6 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { vibrateNudge, askNotifyPermission, showSystemNotification } from './nudge';
 
 const ChatContext = createContext();
+
+const NUDGE_COLORS = ['#7C4DFF', '#FF5252', '#FFB300', '#00C853', '#40C4FF', '#FF4081'];
 
 export function ChatProvider({ socket, currentUser, children }) {
   const [users, setUsers] = useState([]);
@@ -8,14 +11,26 @@ export function ChatProvider({ socket, currentUser, children }) {
   const [presence, setPresence] = useState({});
   const [conversations, setConversations] = useState([]);
   const [wallpaper, setWallpaper] = useState(null);
+  const [toast, setToast] = useState(null);
   const socketRef = useRef(socket);
   socketRef.current = socket;
+  const toastTimer = useRef(null);
+
+  function showToast(msg) {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }
 
   useEffect(() => {
     if (!socket) return;
     fetchUsers();
     socket.emit('conversation:list');
   }, [socket]);
+
+  useEffect(() => {
+    askNotifyPermission();
+  }, []);
 
   const fetchUsers = useCallback(async () => {
     const API = import.meta.env.VITE_API_URL || '';
@@ -61,6 +76,19 @@ export function ChatProvider({ socket, currentUser, children }) {
         if (socket) socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
         return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
       });
+      if (!isMine) {
+        const sender = users.find(u => u.id === message.sender_id);
+        const senderName = sender?.display_name || sender?.username || 'Someone';
+        const preview = message.type === 'VOICE' ? '🎤 Voice message' : (message.content || 'Media message');
+        showSystemNotification(senderName, preview);
+      }
+    });
+
+    socket.on('nudge', ({ from }) => {
+      const name = from?.displayName || from?.username || 'Someone';
+      vibrateNudge();
+      showToast(`${name} nudged you`);
+      showSystemNotification('Tojey', `${name} nudged you 👋`);
     });
 
     socket.on('message:delivered', ({ messageId }) => {
@@ -115,6 +143,7 @@ export function ChatProvider({ socket, currentUser, children }) {
       socket.off('typing:start');
       socket.off('typing:stop');
       socket.off('message:receive');
+      socket.off('nudge');
       socket.off('message:delivered');
       socket.off('message:read');
       socket.off('message:edited');
@@ -123,7 +152,7 @@ export function ChatProvider({ socket, currentUser, children }) {
       socket.off('messages:history');
       socket.off('conversation:opened');
     };
-  }, [socket, currentUser?.id]);
+  }, [socket, currentUser?.id, users]);
 
   function openConversation(otherUser) {
     setConversation({ id: null, other: otherUser, messages: [], typing: false });
@@ -146,6 +175,13 @@ export function ChatProvider({ socket, currentUser, children }) {
     });
   }
 
+  function sendNudge(otherUserId, otherName) {
+    if (!socket) return;
+    socket.emit('nudge', { otherUserId });
+    setConversation(prev => ({ ...prev, nudgePulse: Date.now() }));
+    showToast(`You nudged ${otherName || 'them'} 👋`);
+  }
+
   function clearConversation(otherId) {
     if (!socket) return;
     socket.emit('conversation:clear', { otherUserId: otherId });
@@ -153,8 +189,32 @@ export function ChatProvider({ socket, currentUser, children }) {
   }
 
   return (
-    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, clearConversation, setConversation, fetchUsers }}>
+    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast }}>
       {children}
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          bottom: 110,
+          zIndex: 2000,
+          maxWidth: 'min(92vw, 380px)',
+          background: 'rgba(20,16,30,0.92)',
+          color: '#fff',
+          border: '1px solid rgba(124,77,255,0.45)',
+          boxShadow: '0 10px 34px rgba(0,0,0,0.45)',
+          padding: '11px 18px',
+          borderRadius: 14,
+          fontSize: 14,
+          fontWeight: 600,
+          textAlign: 'center',
+          animation: 'nudgeToastPop 0.28s cubic-bezier(.2,1.4,.4,1)',
+          backdropFilter: 'blur(8px)',
+          pointerEvents: 'none',
+        }}>
+          {toast}
+        </div>
+      )}
     </ChatContext.Provider>
   );
 }

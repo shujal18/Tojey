@@ -71,6 +71,19 @@ input, textarea {
   50% { transform: scale(1.1); opacity: 1; }
 }
 
+@keyframes nudgeToastPop {
+  0% { opacity: 0; transform: translate(-50%, 16px) scale(0.9); }
+  100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+@keyframes nudgeShake {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(-18deg); }
+  40% { transform: rotate(14deg); }
+  60% { transform: rotate(-10deg); }
+  80% { transform: rotate(6deg); }
+}
+
 .message-enter {
   animation: slideInUp 0.25s ease forwards;
 }
