@@ -118,6 +118,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [showEmoji, setShowEmoji] = useState(false);
   const [composerH, setComposerH] = useState(0);
   const [barHeights, setBarHeights] = useState({});
+  const [kbOpen, setKbOpen] = useState(false);
   const setBarH = (k) => (e) => {
     const h = Math.round(e.nativeEvent.layout.height);
     setBarHeights((prev) => (prev[k] === h ? prev : { ...prev, [k]: h }));
@@ -494,11 +495,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   useEffect(() => {
     const show = () => {
       kbVisibleRef.current = true;
+      setKbOpen(true);
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 140);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 320);
     };
     const hide = () => {
       if (Platform.OS !== 'ios') kbVisibleRef.current = false;
+      setKbOpen(false);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
     };
     const subs = [
@@ -1242,6 +1246,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
     (barHeights.rec || 0) + (barHeights.attach || 0)
     + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
     + (composerH || 54) + 8;
+  // Full height of everything below the message list (reply/edit/rec/attach/emoji
+  // bars + composer). When the keyboard is open the message list needs at least this
+  // much bottom padding so the newest message can be scrolled completely above the
+  // composer when the OEM fails to shrink the window under the soft keyboard
+  // (ColorOS/OPPO), otherwise it gets stuck behind the input bar. When the keyboard
+  // is closed the list already sits directly above the composer in the flex layout,
+  // so only a small natural gap is used - no excessive empty space.
+  const belowStackH =
+    (barHeights.rec || 0) + (barHeights.attach || 0)
+    + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
+    + (composerH || 54);
+  const bottomPad = (kbOpen ? belowStackH : 0) + 18;
 
   return (
     <KeyboardAvoidingView
@@ -1401,8 +1417,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         windowSize={11}
         removeClippedSubviews={Platform.OS === 'android'}
         renderItem={renderMessage}
-        contentContainerStyle={styles.messageList}
+        contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
         style={{ backgroundColor: 'transparent' }}
+        onLayout={() => { if (atBottomRef.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false })); }}
       />
       </View>
 
@@ -2156,7 +2173,7 @@ const styles = StyleSheet.create({
   avatarImg: { width: '100%', height: '100%' },
   headerName: { fontSize: fs(16), fontWeight: '700' },
   headerStatus: { fontSize: fs(12), marginLeft: 4 },
-  messageList: { padding: fs(14), paddingBottom: fs(18) },
+  messageList: { padding: fs(14) },
   msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
   bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14), overflow: 'hidden' },
