@@ -4,8 +4,12 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.net.Uri
 
@@ -82,5 +86,45 @@ class TojeyChatHeadModule(private val reactContext: ReactApplicationContext) : R
       reactContext.startService(s)
     } catch (e: Exception) {
     }
+  }
+
+  @ReactMethod
+  fun vibrate(patternStr: String) {
+    val run = Runnable {
+      try {
+        var pattern: LongArray?
+        pattern = try {
+          val parts = patternStr.split(",")
+          LongArray(parts.size) { parts[it].trim().toLong() }
+        } catch (e: Exception) {
+          null
+        }
+        if (pattern == null || pattern.size < 1) {
+          pattern = longArrayOf(0, 350, 120, 350, 120, 350)
+        }
+        val vib: Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
+          val vm = reactContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+          vm.defaultVibrator
+        } else {
+          @Suppress("DEPRECATION")
+          reactContext.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+        if (vib != null && vib.hasVibrator()) {
+          if (Build.VERSION.SDK_INT >= 26) {
+            val amplitudes = IntArray(pattern.size) { if (pattern[it] > 0) 255 else 0 }
+            vib.vibrate(VibrationEffect.createWaveform(pattern as LongArray, amplitudes, -1))
+          } else {
+            @Suppress("DEPRECATION")
+            vib.vibrate(pattern as LongArray, -1)
+          }
+          android.util.Log.w("TojeyChatHead", "vibrate pattern=${patternStr}")
+        } else {
+          android.util.Log.w("TojeyChatHead", "vibrate skipped no vibrator")
+        }
+      } catch (e: Exception) {
+      }
+    }
+    val activity = reactContext.currentActivity
+    if (activity != null) activity.runOnUiThread(run) else run.run()
   }
 }
