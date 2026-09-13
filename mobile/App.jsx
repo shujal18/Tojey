@@ -62,7 +62,6 @@ function Shell() {
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
   const [notifBanner, setNotifBanner] = useState(null);
-  const pushStarted = useRef(false);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -123,10 +122,8 @@ function Shell() {
   const handleLogin = (user, token) => {
     setSession({ user, token });
     setSocket(connect(token));
-    if (!pushStarted.current) {
-      pushStarted.current = true;
-      startPush(token).catch(() => {});
-    }
+    pushStarted.current = true;
+    startPush(token).catch(() => {});
   };
 
   const handleLogout = async () => {
@@ -134,6 +131,7 @@ function Shell() {
     disconnect();
     stopPush();
     try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
+    pushStarted.current = false;
     setSession(null);
     setSocket(null);
     setActiveChat(null);
@@ -153,10 +151,7 @@ function Shell() {
         setSession(s);
         if (s) {
           setSocket(connect(s.token));
-          if (!pushStarted.current) {
-            pushStarted.current = true;
-            startPush(s.token).catch(() => {});
-          }
+          startPush(s.token).catch(() => {});
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);

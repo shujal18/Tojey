@@ -205,6 +205,18 @@ app.post('/api/devices/token', authMiddleware, async (req, res) => {
       [user.id, token.trim(), platform || 'android', deviceId || null]
     );
 
+    // Firebase rotated this device's token: supersede any OTHER active token that this
+    // same device previously registered for this user, so the old (now-dead) token never
+    // lingers as an active entry that later hard-fails with UNREGISTERED.
+    if (deviceId) {
+      await pool.query(
+        `UPDATE device_tokens SET is_active = FALSE, updated_at = NOW()
+         WHERE user_id = $1 AND device_id = $2 AND fcm_token <> $3 AND is_active = TRUE`,
+        [user.id, deviceId, token.trim()]
+      );
+    }
+
+    console.log(`[FCM] token registered: user=${user.id} device=${deviceId || 'n/a'} token=${maskToken(token.trim())}`);
     res.json({ ok: true });
   } catch (e) {
     console.error('devices:token error', e.message);
@@ -219,17 +231,29 @@ app.post('/api/devices/token/deactivate', authMiddleware, async (req, res) => {
     const user = (await pool.query('SELECT id FROM users WHERE username = $1', [req.user.username])).rows[0];
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { token } = req.body || {};
-    if (!token || typeof token !== 'string' || !token.trim()) {
-      return res.status(400).json({ error: 'token is required' });
+    const { token, deviceId } = req.body || {};
+    if (!deviceId && (!token || typeof token !== 'string' || !token.trim())) {
+      return res.status(400).json({ error: 'token or deviceId is required' });
     }
 
-    await pool.query(
-      `UPDATE device_tokens SET is_active = FALSE, updated_at = NOW()
-       WHERE fcm_token = $1 AND user_id = $2`,
-      [token.trim(), user.id]
-    );
+    // Deactivate everything this device registered for this user (covers token rotation
+    // between login and logout); without a deviceId, fall back to the token-scoped row.
+    const tp = token ? token.trim() : null;
+    if (deviceId) {
+      await pool.query(
+        `UPDATE device_tokens SET is_active = FALSE, updated_at = NOW()
+         WHERE user_id = $1 AND device_id = $2 AND ($3::text IS NULL OR fcm_token = $3)`,
+        [user.id, deviceId, tp]
+      );
+    } else {
+      await pool.query(
+        `UPDATE device_tokens SET is_active = FALSE, updated_at = NOW()
+         WHERE user_id = $1 AND fcm_token = $2`,
+        [user.id, tp]
+      );
+    }
 
+    console.log(`[FCM] token deactivated: user=${user.id} device=${deviceId || 'n/a'} token=${tp ? maskToken(tp) : '*'}`);
     res.json({ ok: true });
   } catch (e) {
     console.error('devices:token deactivate error', e.message);

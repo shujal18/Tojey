@@ -83,6 +83,13 @@ function isInvalidTokenCode(code) {
  *   { success: false, note }                  - nothing accepted (or FCM disabled)
  *   void invalidTokens: string[]              - tokens firebase reports as dead
  */
+// Show only the start and end of a token so logs stay debuggable without leaking FCM tokens.
+function maskToken(t) {
+  if (!t) return '';
+  if (String(t).length <= 12) return '***';
+  return `${String(t).slice(0, 8)}…${String(t).slice(-4)}`;
+}
+
 async function sendPush({ tokens, notification, data }) {
   if (!ensureInitialized()) {
     warnOnce();
@@ -122,7 +129,13 @@ async function sendPush({ tokens, notification, data }) {
       return { success: true, messageId: firstSuccessMessageId, invalidTokens };
     }
     if (invalidTokens.length) {
-      console.log(`[FCM] multicast: all ${tokens.length} token(s) reported invalid (UNREGISTERED).`);
+      // UNREGISTERED on a freshly-registered token almost always means the token was
+      // created for a DIFFERENT Firebase project/app than the Admin SDK being used
+      // (e.g. a token registered from a build with another google-services.json), or
+      // the app was uninstalled/reinstalled so Android invalidated the old token.
+      const sample = invalidTokens.slice(0, 2).map(maskToken).join(', ');
+      const projectId = (messaging.app && messaging.app.options && messaging.app.options.projectId) || 'unknown';
+      console.log(`[FCM] multicast: all ${tokens.length} token(s) reported UNREGISTERED (sample: ${sample || 'n/a'}). Admin project=${projectId} - verify the app's google-services.json project matches, or reinstall to get a fresh token.`);
     }
     return { success: false, note: 'fcm-rejected', invalidTokens };
   } catch (e) {

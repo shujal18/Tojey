@@ -1,4 +1,5 @@
 import { Platform, PermissionsAndroid } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import messaging from '@react-native-firebase/messaging';
 import notifee, { AndroidImportance, AndroidVisibility, EventType } from '@notifee/react-native';
 import { SERVER_URL } from '../config';
@@ -15,6 +16,26 @@ function maskToken(t) {
 }
 
 let tokenUnsub = null;
+
+// Stable per-install device id (survives user switches, dies with app data). Lets the
+// backend replace the OLD token of THIS device when Firebase rotates the token, instead
+// of leaving the superseded token active.
+const DEVICE_ID_KEY = '@tojey_device_id';
+let cachedDeviceId = null;
+async function getDeviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+  try {
+    let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
+    if (!id) {
+      id = `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      await AsyncStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    cachedDeviceId = id;
+    return id;
+  } catch (e) {
+    return 'unknown';
+  }
+}
 
 /**
  * Extract our notification payload from a RemoteMessage.
@@ -163,27 +184,45 @@ async function requestNotificationPermission() {
   return true;
 }
 
+// Fresh token guaranteed: getToken() always reflects Firebase's CURRENT token, never
+// a cached/stale one. If Firebase rotated the token (reinstall, expiry, cleared app
+// data) this is where we learn about it.
+function currentToken() {
+  return messaging().getToken();
+}
+
 async function registerToken(token, userToken) {
+  const body = JSON.stringify({ token, platform: 'android', deviceId: await getDeviceId() });
+  let res;
   try {
-    const res = await fetch(`${SERVER_URL}/api/devices/token`, {
+    res = await fetch(`${SERVER_URL}/api/devices/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${userToken}`,
       },
-      body: JSON.stringify({ token, platform: 'android' }),
+      body,
     });
-    if (!res.ok) {
-      console.warn('registerToken server error', res.status);
-    }
   } catch (e) {
-    console.warn('registerToken network failed:', e.message);
+    console.warn(`[FCM] backend token registration network failed (${maskToken(token)}):`, e.message);
+    return false;
   }
+  let json = null;
+  try { json = await res.json(); } catch (e) {}
+  console.log(`[FCM] backend token registration response: status=${res.status} ok=${json && json.ok} (${maskToken(token)})`);
+  if (!res.ok || !json || !json.ok) {
+    console.warn('[FCM] token registration rejected by backend:', res.status, json && json.error);
+    return false;
+  }
+  return true;
 }
 
 /**
  * Request permission, create the channel and register the push token with the backend.
  * Also wires token refresh. Returns true when FCM is usable.
+ * Idempotent: safe to call on every login and every app boot with the CURRENT user's
+ * JWT, so an account switch (logout -> login) re-binds this device token to the new
+ * user instead of leaving it active under the old one.
  */
 export async function startPush(userToken) {
   if (Platform.OS !== 'android') return false;
@@ -201,16 +240,27 @@ export async function startPush(userToken) {
       tokenUnsub = null;
     }
 
-    const token = await messaging().getToken();
-    console.log(`[FCM] token obtained: ${maskToken(token)}`);
-    await registerToken(token, userToken);
-    console.log(`[FCM] token registered with backend: ${maskToken(token)}`);
+    const token = await currentToken();
+    console.log(`[FCM] getToken succeeded: ${maskToken(token)}`);
+    if (!token) {
+      console.warn('[FCM] getToken returned empty - Firebase messaging not ready');
+      return false;
+    }
+    const registered = await registerToken(token, userToken);
+    if (registered) {
+      console.log(`[FCM] token registered with backend: ${maskToken(token)}`);
+    } else {
+      console.warn(`[FCM] token NOT registered with backend: ${maskToken(token)}`);
+    }
     console.log(`[FCM] POST_NOTIFICATIONS ${hasPerm ? 'GRANTED' : 'DENIED'} on Android ${Platform.Version}`);
 
-    // Refresh tokens as soon as Firebase issues them.
+    // Refresh tokens as soon as Firebase issues them, ALWAYS for the currently logged
+    // in user (userToken is captured for this startPush call, so an account switch
+    // followed by startPush(userToken') re-registers under the right identity).
     tokenUnsub = messaging().onTokenRefresh(async (t) => {
-      console.log(`[FCM] token refreshed: ${maskToken(t)}`);
-      await registerToken(t, userToken);
+      console.log(`[FCM] token refresh detected: ${maskToken(t)}`);
+      const ok = await registerToken(t, userToken);
+      console.log(`[FCM] refreshed token ${ok ? 'registered' : 'registration FAILED'}: ${maskToken(t)}`);
     });
     if (!hasPerm) {
       console.warn('[FCM] POST_NOTIFICATIONS denied on Android 13+ - banners/sound will NOT show. Ask the user to enable notifications in App Settings.');
@@ -253,8 +303,9 @@ export async function deactivateToken() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${s.token}`,
       },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, deviceId: await getDeviceId() }),
     });
+    console.log(`[FCM] deactivate at logout: status=${res.status} (${maskToken(token)})`);
     if (!res.ok) console.warn('deactivateToken server error', res.status);
   } catch (e) {
     console.warn('deactivateToken failed:', e.message);
