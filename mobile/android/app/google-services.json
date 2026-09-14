@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "872586899376",
+    "project_id": "tojey-dba45",
+    "storage_bucket": "tojey-dba45.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:872586899376:android:0e88ae12c5e268c603f075",
+        "android_client_info": {
+          "package_name": "com.tojey"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB0gJeP-4K2AhCpPh5mU46iYRs9L78l3Bw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
