@@ -128,8 +128,11 @@ const result = await messaging.sendEachForMulticast({
       if (r.success) {
         accepted++;
         if (!firstSuccessMessageId) firstSuccessMessageId = r.messageId || '';
-      } else if (isInvalidTokenCode(r.error && r.error.code)) {
-        invalidTokens.push(tokens[i]);
+      } else {
+        const code = r.error && r.error.code ? r.error.code : 'unknown';
+        const msg  = r.error && r.error.message ? r.error.message : '';
+        console.log(`[FCM] token ${i+1}/${tokens.length} code=${code} msg=${msg}`);
+        if (isInvalidTokenCode(code)) invalidTokens.push(tokens[i]);
       }
     });
 
