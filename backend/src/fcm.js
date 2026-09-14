@@ -114,6 +114,9 @@ const result = await messaging.sendEachForMulticast({
           // many devices silently drops the notification. ic_stat_tojey exists in
           // the APK and is what the app's own notifier uses, so it is resolvable.
           icon: 'ic_stat_tojey',
+          // Classify as a message so DND rules that allow messages / messaging-app
+          // priority let this one actually break through instead of being silenced.
+          category: 'message',
         },
       },
     });

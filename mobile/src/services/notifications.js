@@ -1,7 +1,7 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import messaging from '@react-native-firebase/messaging';
-import notifee, { AndroidImportance, AndroidVisibility, EventType } from '@notifee/react-native';
+import notifee, { AndroidImportance, AndroidVisibility, AndroidCategory, EventType } from '@notifee/react-native';
 import { SERVER_URL } from '../config';
 import { loadSession } from './auth';
 
@@ -108,6 +108,7 @@ export async function showSystemNotification(payload) {
         smallIcon: 'ic_stat_tojey',
         color: '#6C3CE9',
         importance: AndroidImportance.HIGH,
+        category: AndroidCategory.MESSAGE,
         visibility: AndroidVisibility.PUBLIC,
         pressAction: { id: NOTIFEE_PRESS_ACTION },
       },
