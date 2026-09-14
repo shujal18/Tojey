@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from '
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
-  Animated, PanResponder, Dimensions, ScrollView, AppState,
+  Animated, PanResponder, Dimensions, ScrollView, AppState, LayoutAnimation, UIManager,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -15,6 +15,10 @@ import {
   getChatHeadEnabled, showChatHead, hideChatHead, canDrawOverlay, getNudgeVibrationEnabled,
 } from '../services/chatHead';
 
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
 // Full reaction set shown when the + on the reaction bar is tapped (reactions only).
 const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
 import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
@@ -22,7 +26,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
-import { loadMessages, saveMessages, clearConversationCache } from '../services/cache';
+import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
 import {
@@ -157,6 +161,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [highlightId, setHighlightId] = useState(null);
   const highlightTimer = useRef(null);
 
+  // Pagination (lazy-loading older messages on scroll up).
+  const hasMoreRef = useRef(false);
+  const loadingMoreRef = useRef(false);
+  const oldestIdRef = useRef(null);
+  const loadingSafetyTimer = useRef(null);
+
+  // Send a message through the socket if connected, otherwise queue it for flush
+  // on reconnect. Mirrors whatsapp's offline-queue behaviour.
+  const socketReady = () => !!socket && socket.connected;
+
   // Defensive: ensure otherUser has all required properties
   const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
   const otherUserId = safeOtherUser.id;
@@ -216,7 +230,36 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       atBottomNearRef.current = nearBottom;
       setAtBottomNear(nearBottom);
     }
-  }, []);
+    // Scroll up near the top -> lazily load older messages (pagination).
+    if (y <= 80 && hasMoreRef.current && !loadingMoreRef.current && oldestIdRef.current != null) {
+      loadingMoreRef.current = true;
+      clearTimeout(loadingSafetyTimer.current);
+      loadingSafetyTimer.current = setTimeout(() => { loadingMoreRef.current = false; }, 6000);
+      if (socketReady()) {
+        socket.emit('messages:loadMore', {
+          otherUserId,
+          beforeId: oldestIdRef.current,
+          limit: 50,
+        }, (res) => {
+          loadingMoreRef.current = false;
+          clearTimeout(loadingSafetyTimer.current);
+          if (res && res.ok && Array.isArray(res.messages) && res.messages.length) {
+            setMessages((prev) => {
+              const existing = new Set(prev.map((m) => m.id));
+              const older = res.messages.filter((m) => !existing.has(m.id));
+              if (!older.length) return prev;
+              const merged = [...older, ...prev];
+              oldestIdRef.current = merged[0] ? merged[0].id : null;
+              return merged;
+            });
+          }
+          hasMoreRef.current = !!(res && res.ok && res.hasMore);
+        });
+      } else {
+        loadingMoreRef.current = false;
+      }
+    }
+  }, [otherUserId]);
 
   const REACTPOP_H = 60;
   const handleLongPress = useCallback((msg, evt) => {
@@ -336,8 +379,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
 
     const hHistory = (msgs) => {
-      setMessages(msgs);
-      saveMessages(currentUser.id, otherUserId, msgs);
+      const list = Array.isArray(msgs) ? msgs : [];
+      setMessages(list);
+      saveMessages(currentUser.id, otherUserId, list);
+      oldestIdRef.current = list.length ? list[0].id : null;
+      hasMoreRef.current = list.length >= 200;
       atBottomNearRef.current = true;
       setAtBottomNear(true);
       setPendingCount(0);
@@ -352,6 +398,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         if (prev.some((m) => m.id === message.id)) return prev;
         return [...prev, { ...message, _local: message.sender_id === currentUser.id }];
       });
+      // Warm the image caches right away so scrolling to a fresh media message
+      // never shows a loader (prefetch both thumb + full so zooming is ready too).
+      if (message && (message.thumb_url || message.media_url)) {
+        try {
+          if (message.thumb_url) Image.prefetch(absUrl(message.thumb_url)).catch(() => {});
+          if (message.media_url && message.media_url !== message.thumb_url) Image.prefetch(absUrl(message.media_url)).catch(() => {});
+        } catch (e) { /* prefetch is best-effort */ }
+      }
       if (message.sender_id !== currentUser.id) {
         if (!appVisibleRef.current) {
           headUnreadRef.current += 1;
@@ -360,7 +414,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         if (!atBottomRef.current) {
           setPendingCount((n) => n + 1);
         } else {
-          setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50);
+          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
         }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
@@ -391,7 +445,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:edited', hEdited);
     socket.on('message:deleted', hDeleted);
     socket.on('message:reaction', hReaction);
-    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); clearConversationCache(currentUser.id, otherUserId); };
+    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); oldestIdRef.current = null; hasMoreRef.current = false; clearConversationCache(currentUser.id, otherUserId); };
     socket.on('conversation:cleared', hCleared);
     const hNudge = ({ from }) => {
       headUnreadRef.current += 1;
@@ -406,15 +460,55 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     socket.on('presence:update', hPresence);
 
-    // Re-emit conversation:open on socket reconnect to ensure message sync
+    // Re-emit conversation:open on socket reconnect to ensure message sync, and
+    // drain any offline-queued outgoing messages (in order, idempotently).
+    const flushOutgoingQueue = async () => {
+      if (!socket || !currentUser?.id || !otherUserId) return;
+      try {
+        const queued = await loadOutgoingQueue(currentUser.id);
+        for (const item of queued) {
+          if (!item || typeof item.clientId !== 'string' || !item.otherId) continue;
+          if (String(item.otherId) !== String(otherUserId)) continue;
+          if (!socket.connected) break; // went offline again mid-flush
+          try {
+            await new Promise((resolve) => {
+              socket.emit('message:send', {
+                otherUserId,
+                type: item.type || 'TEXT',
+                content: item.content || '',
+                replyTo: item.replyTo || null,
+                clientId: item.clientId,
+              }, (ack) => {
+                if (ack && ack.ok) {
+                  // Reliable replace: the pending temp row uses id == clientId.
+                  setMessages((prev) => {
+                    const hasTemp = prev.some((m) => m.id === item.clientId);
+                    if (!hasTemp) return prev;
+                    return prev.map((m) => (m.id === item.clientId ? ack.message : m));
+                  });
+                  dequeueOutgoing(currentUser.id, item.clientId);
+                }
+                resolve();
+              });
+            });
+          } catch (e2) {
+            // keep the item queued; retried on the next reconnect
+          }
+        }
+      } catch (e) {
+        console.warn('flushOutgoingQueue failed:', e);
+      }
+    };
     const onReconnect = () => {
       if (socket && otherUserId) {
         socket.emit('conversation:open', { otherUserId });
       }
+      flushOutgoingQueue();
     };
     socket.on('connect', onReconnect);
     socket.io?.off('reconnect', onReconnect);
     socket.io?.on('reconnect', onReconnect);
+    if (socket.connected) flushOutgoingQueue();
 
     return () => {
       socket.off('messages:history', hHistory);
@@ -483,13 +577,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const persistSigRef = useRef('');
   useEffect(() => {
     if (!currentUser?.id || !otherUserId || !messages.length) return;
-    const sig = messages
-      .map((m) => [m.id, m.status, m.is_edited ? 1 : 0, m.is_deleted_for_everyone ? 1 : 0, m._uploadError ? 1 : 0, m.content].join('|'))
-      .join(';')
-      .slice(0, 40000);
+    // Only the newest 200 affect the signature: pagination keeps growing the array
+    // and a full-text signature of thousands of messages is wasteful.
+    const tail = messages.slice(-200);
+    const sig = tail
+      .map((m) => [m.id, m.status, m._uploadError ? 1 : 0, m._uploadProgress != null ? Math.round(m._uploadProgress * 40) : 0, m.is_edited ? 1 : 0, m.is_deleted_for_everyone ? 1 : 0].join('|'))
+      .join(';');
     if (sig === persistSigRef.current) return;
     persistSigRef.current = sig;
-    saveMessages(currentUser.id, otherUserId, messages);
+    const t = setTimeout(() => saveMessages(currentUser.id, otherUserId, messages), 300);
+    return () => clearTimeout(t);
   }, [messages, otherUserId, currentUser.id]);
 
   // Keyboard reopen fix: Android stops showing the keyboard on the focused input
@@ -503,15 +600,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       const h = e && e.endCoordinates ? e.endCoordinates.height : 0;
       if (h) kbHeightRef.current = h;
       setKbHeight(h || kbHeightRef.current || 0);
+      // Scroll the newest message fully above the composer right away and keep
+      // re-scrolling through the geometry settle (window shrink on Android is
+      // async, so a single scroll can land short / leave the last bubble behind
+      // the input bar).
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 140);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 320);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 160);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 420);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 700);
     };
     const hide = () => {
       if (Platform.OS !== 'ios') kbVisibleRef.current = false;
       setKbOpen(false);
       setKbHeight(0);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
+      if (atBottomRef.current) setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
     };
     const subs = [
       Keyboard.addListener('keyboardDidShow', show),
@@ -624,9 +726,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setText('');
       return;
     }
-    const tempId = `tmp-${Date.now()}`;
+    const clientId = `tmp-${currentUser.id}-${Date.now()}`;
     const localMsg = {
-      id: tempId,
+      id: clientId,
       sender_id: currentUser.id,
       type: 'TEXT',
       content,
@@ -637,34 +739,46 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _local: true,
       _pending: true,
     };
-    setMessages((prev) => [...prev, localMsg]);
-    const payload = {
-      otherUserId,
-      type: 'TEXT',
-      content,
-      replyTo: replyingTo?.id || null,
-    };
-    if (socket) socket.emit('typing:stop', { otherUserId });
-    if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
-    socket.emit('message:send', payload, (ack) => {
-      if (ack?.ok) {
-        atBottomRef.current = true;
-        setAtBottomNear(true);
-        setPendingCount(0);
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? ack.message : m)));
-        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
-      }
-    });
+    const replyTo = replyingTo?.id || null;
+    if (socketReady()) {
+      // Optimistic render + instant scroll-to-latest: the message appears
+      // immediately, then the ack swaps the temp id in place (no scroll jump).
+      setMessages((prev) => [...prev, localMsg]);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      const payload = {
+        otherUserId,
+        type: 'TEXT',
+        content,
+        replyTo,
+        clientId,
+      };
+      socket.emit('typing:stop', { otherUserId });
+      if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
+      socket.emit('message:send', payload, (ack) => {
+        if (ack?.ok) {
+          atBottomRef.current = true;
+          setAtBottomNear(true);
+          setPendingCount(0);
+          setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+        }
+      });
+    } else {
+      // Offline: show the pending row immediately and queue the send for flush
+      // on reconnect (idempotent by clientId).
+      setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content, replyTo });
+    }
     setText('');
     setReplyingTo(null);
   };
 
   const sendReplyText = useCallback((target, content) => {
     const c = (content || '').trim();
-    if (!target || !c || !socket) return;
-    const tempId = `tmp-${Date.now()}`;
+    if (!target || !c) return;
+    const clientId = `tmp-${currentUser.id}-${Date.now()}`;
     const localMsg = {
-      id: tempId,
+      id: clientId,
       sender_id: currentUser.id,
       type: 'TEXT',
       content: c,
@@ -675,16 +789,23 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _local: true,
       _pending: true,
     };
-    setMessages((prev) => [...prev, localMsg]);
-    socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo: target.id || null }, (ack) => {
-      if (ack && ack.ok) {
-        atBottomRef.current = true;
-        setAtBottomNear(true);
-        setPendingCount(0);
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? ack.message : m)));
-        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
-      }
-    });
+    const replyTo = target.id || null;
+    if (socketReady()) {
+      setMessages((prev) => [...prev, localMsg]);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
+        if (ack && ack.ok) {
+          atBottomRef.current = true;
+          setAtBottomNear(true);
+          setPendingCount(0);
+          setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+        }
+      });
+    } else {
+      setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
+    }
   }, [socket, otherUserId, currentUser.id]);
 
   const sendVoiceMessage = useCallback((filePath, durationSec) => {
@@ -1272,7 +1393,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   // otherwise the newest message stays hidden behind the input bar after sending.
   const kbShrinkTaken = kbOpen ? Math.max(0, (msgAreaClosedH.current || msgAreaH || 0) - msgAreaH) : 0;
   const kbOverlap = kbOpen ? Math.max(0, kbHeight - kbShrinkTaken) : 0;
-  const bottomPad = 18 + (kbOpen ? belowStackH + kbOverlap : 0);
+  const bottomPad = 18 + (kbOpen ? belowStackH + kbOverlap + 6 : 0);
 
   return (
     <KeyboardAvoidingView
@@ -1434,10 +1555,11 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
         initialNumToRender={15}
-        maxToRenderPerBatch={10}
-        updateCellsBatchingPeriod={30}
-        windowSize={11}
+        maxToRenderPerBatch={12}
+        updateCellsBatchingPeriod={25}
+        windowSize={15}
         removeClippedSubviews={Platform.OS === 'android'}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         renderItem={renderMessage}
         contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
         style={{ backgroundColor: 'transparent' }}
@@ -1834,9 +1956,11 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
 
   const hasMedia = !!(message.media_url || message.thumb_url);
   const voicePct = `${Math.min(100, Math.max(0, Math.round((voiceProgress || 0) * 100)))}%`;
-  const statusIcon = message.status === 'READ'
-    ? 'checkmark-done' : message.status === 'DELIVERED'
-      ? 'checkmark-done' : 'checkmark';
+  const statusIcon = message._queued || message._uploading
+    ? 'time-outline'
+    : message.status === 'READ'
+      ? 'checkmark-done' : message.status === 'DELIVERED'
+        ? 'checkmark-done' : 'checkmark';
   const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
 
   const singleEmoji = message.type === 'TEXT' && isSingleEmoji(message.content);

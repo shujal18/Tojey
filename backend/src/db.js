@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS messages (
   reaction TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   delivered_at TIMESTAMPTZ,
-  read_at TIMESTAMPTZ
+  read_at TIMESTAMPTZ,
+  client_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS message_reactions (
@@ -164,6 +165,9 @@ CREATE INDEX IF NOT EXISTS idx_notifications_sender ON notifications(sender_id);
 
 const MIGRATIONS = `
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_id
+  ON messages(conversation_id, client_id) WHERE client_id IS NOT NULL;
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();

@@ -81,8 +81,9 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       };
       socket.on('conversation:list', hList);
       socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
+        // Update presence in place - no full conversation-list round trip needed
+        // (avoids a server fetch on every presence change across all users).
         setPresence((prev) => ({ ...prev, [userId]: { isOnline, lastSeen } }));
-        refreshList();
       });
       socket.on('message:receive', ({ message, sender, conversationId }) => {
         const senderPic = sender.profilePic || '';

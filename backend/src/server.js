@@ -47,6 +47,8 @@ if (fs.existsSync(FRONTEND_DIST)) {
 const io = new Server(server, {
   cors: { origin: '*' },
   maxHttpBufferSize: 1e8,
+  pingInterval: 15000,
+  pingTimeout: 10000,
 });
 
 app.get('/', (req, res) => res.json({ app: 'Tojey', status: 'running' }));
@@ -586,21 +588,68 @@ io.on('connection', async (socket) => {
       }
     });
 
+    // Paginated older-history loader (scroll up for older messages). Returns the
+    // `limit` oldest messages strictly older than `beforeId`.
+    socket.on('messages:loadMore', async ({ otherUserId, beforeId, limit = 50 }, callback = () => {}) => {
+      try {
+        const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
+        const beforeRaw = Number.parseInt(beforeId, 10);
+        const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
+        const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 10), 100);
+        const msgs = await pool.query(
+          `SELECT * FROM (
+             SELECT m.*,
+                    COALESCE((SELECT json_agg(r.*) FROM message_reactions r
+                              WHERE r.message_id = m.id), '[]') AS reactions
+             FROM messages m
+             WHERE m.conversation_id = $1
+               AND m.is_deleted_for_everyone = FALSE
+               AND ($2::int IS NULL OR m.id < $2)
+             ORDER BY m.created_at DESC, m.id DESC
+             LIMIT $3
+           ) sub
+           ORDER BY created_at ASC, id ASC`,
+          [convo.id, before, lim]
+        );
+        callback({ ok: true, messages: msgs.rows, hasMore: msgs.rows.length === lim });
+      } catch (e) {
+        console.error('messages:loadMore error', e);
+        callback({ error: e.message });
+      }
+    });
+
     socket.on('message:send', async (data, callback = () => {}) => {
       try {
-        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0 } = data;
+        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0, clientId = null } = data;
 
         if (!otherUserId) return callback({ error: 'otherUserId required' });
 
         const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
+
+        // Idempotency: if this clientId was already saved (e.g. an offline-queued
+        // send that reached the server twice), return the existing row instead of
+        // inserting a duplicate.
+        if (clientId) {
+          const existing = await pool.query(
+            'SELECT * FROM messages WHERE conversation_id = $1 AND client_id = $2',
+            [convo.id, String(clientId)]
+          );
+          if (existing.rows.length) {
+            const dup = existing.rows[0];
+            if (!dup.reactions) dup.reactions = [];
+            callback({ ok: true, message: dup, deduped: true });
+            return;
+          }
+        }
+
         const result = await pool.query(
           `INSERT INTO messages
             (conversation_id, sender_id, reply_to, type, content, media_url, thumb_url,
-             duration, waveform, transcript, status, is_view_once, created_at, file_name, media_size)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SENT', $11, NOW(), $12, $13)
+             duration, waveform, transcript, status, is_view_once, created_at, file_name, media_size, client_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SENT', $11, NOW(), $12, $13, $14)
            RETURNING *`,
           [convo.id, dbUser.userId, replyTo, type, content, mediaUrl || null, thumbUrl || null,
-           duration || 0, waveform || '', transcript || '', isViewOnce || false, fileName || '', fileSize || mediaSize || 0]
+           duration || 0, waveform || '', transcript || '', isViewOnce || false, fileName || '', fileSize || mediaSize || 0, clientId ? String(clientId) : null]
         );
 
         const message = result.rows[0];

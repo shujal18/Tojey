@@ -1,22 +1,19 @@
-import React from 'react';
-import { Text } from 'react-native';
+import React, { useState } from 'react';
+import { Image, Text } from 'react-native';
 
-// Emoji are rendered with the device's native color emoji font so they always keep
-// their original palette. The json-level `color` (white on sent bubbles, gray on
-// received, etc.) is NOT applied to emoji spans - a color-emoji glyph tinted by the
-// bubble text color is exactly what makes it look faded or dark. Non-emoji text keeps
-// the caller's color as before.
+// Emoji are rendered as Twemoji PNGs (bright, consistent palette) instead of the
+// device's emoji font, which on some OEMs (OPPO / ColorOS) falls back to a
+// monochrome/dark system emoji font inside <Text> that makes emoji look faded or
+// solid-black. Rendering images guarantees the original colorful glyphs.
 //
 // Runs are grouped into grapheme clusters so multi-codepoint emoji (ZWJ families,
-// skin tones, flags, ©️/®️/™️, 1️⃣ keycaps) stay inside a SINGLE <Text> node. Splitting
-// a sequence across nested <Text> nodes breaks the ligature and can render partial or
-// faded-looking glyphs on Android.
+// skin tones, flags, ©️/®️/™️, 1️⃣ keycaps) stay intact. Splitting a sequence breaks
+// the ligature and can render partial or faded-looking glyphs.
+const EMOJI_BASE = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/';
 
-// The bundled color emoji font (android/app/src/main/assets/fonts/NotoColorEmoji.ttf)
-// is forced on emoji-only runs. Some devices (ColorOS/OPPO) otherwise
-// fall back to a monochrome system emoji font inside <Text>, which is exactly what made
-// emoji look dark/solid-black in the chat. This font only contains emoji glyphs, so it
-// must NEVER be applied to non-emoji spans (they would render as tofu boxes).
+// Fallback font (bundled android/app/src/main/assets/fonts/NotoColorEmoji.ttf) is
+// used ONLY if a Twemoji image fails to load. It must never be applied to
+// non-emoji spans (they would render as tofu boxes).
 const EMOJI_FONT = 'NotoColorEmoji';
 
 const VS16 = 0xfe0f;     // emoji variation selector
@@ -99,6 +96,60 @@ export function emojiRuns(text) {
   return out;
 }
 
+// Split a single emoji run into individual grapheme clusters (one Twemoji image each).
+function splitEmoji(s) {
+  const chars = Array.from(s);
+  if (!chars.length) return [];
+  const out = [];
+  let cur = chars[0];
+  for (let i = 1; i < chars.length; i++) {
+    const cp = chars[i].codePointAt(0);
+    const prev = chars[i - 1].codePointAt(0);
+    let glueWithPrev = false;
+    if (cp === VS16 || cp === ZWJ || cp === ZWNJ || SKIN(cp) || TAG(cp)) glueWithPrev = true;
+    else if (cp === KEYCAP && (isKeycapBaseCp(prev) || prev === VS16)) glueWithPrev = true;
+    else if (REGIONAL(cp) && REGIONAL(prev)) glueWithPrev = true;
+    else if (MISC_EMOJI.has(cp) && prev === VS16) glueWithPrev = true;
+    if (glueWithPrev) cur += chars[i];
+    else { out.push(cur); cur = chars[i]; }
+  }
+  out.push(cur);
+  return out;
+}
+
+// Twemoji filenames are lowercase hex codepoints joined by '-'. Variation selectors
+// (…-fe0f) are usually omitted from the filename, but a few sequences keep them
+// (text-default bases inside ZWJ sequences, e.g. 🚴♀️ = …-2640-fe0f). Try the
+// "stripped" form first, then the "kept" form, then fall back to the native font.
+function twemojiCandidates(cluster) {
+  const hex = Array.from(cluster).map((c) => c.codePointAt(0).toString(16).padStart(4, '0')).join('-');
+  const stripped = Array.from(cluster)
+    .map((c) => c.codePointAt(0))
+    .filter((cp) => cp !== VS16 && cp !== ZWNJ)
+    .map((cp) => cp.toString(16).padStart(4, '0'))
+    .join('-');
+  const out = [stripped];
+  if (stripped !== hex) out.push(hex);
+  return out.map((p) => EMOJI_BASE + p + '.png');
+}
+
+const EmojiImg = React.memo(function EmojiImg({ cluster, size, fallbackStyle, candidates }) {
+  const [idx, setIdx] = useState(0);
+  if (idx >= candidates.length) {
+    return <Text style={fallbackStyle}>{cluster}</Text>;
+  }
+  return (
+    <Image
+      source={{ uri: candidates[idx] }}
+      onError={() => setIdx(idx + 1)}
+      style={{ width: size, height: size }}
+      resizeMode="contain"
+      fadeDuration={0}
+      accessible={false}
+    />
+  );
+});
+
 function flatten(style) {
   if (Array.isArray(style)) return Object.assign({}, ...style);
   return { ...(style || {}) };
@@ -109,11 +160,20 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
   const runs = emojiRuns(text);
   const base = flatten(style);
   const { color, ...baseNoColor } = base;
+  const fontSize = parseFloat(base.fontSize) || 14;
+  const lineHeight = base.lineHeight != null ? parseFloat(base.lineHeight) || 0 : 0;
+  let emojiPx = Math.round(fontSize * 1.08);
+  if (lineHeight > 0 && emojiPx > lineHeight) emojiPx = Math.max(1, Math.round(lineHeight * 0.96));
+  const fallbackStyle = [baseNoColor, { fontFamily: EMOJI_FONT, fontWeight: '400' }];
   return (
     <Text style={color != null ? baseNoColor : base} numberOfLines={numberOfLines} {...rest}>
       {runs.map((r, i) =>
         r.emoji
-          ? <Text key={i} style={[baseNoColor, { fontFamily: EMOJI_FONT, fontWeight: '400' }]}>{r.text}</Text>
+          ? splitEmoji(r.text).map((cluster, j) =>
+              cluster ? (
+                <EmojiImg key={`${i}-${j}`} cluster={cluster} size={emojiPx} fallbackStyle={fallbackStyle} candidates={twemojiCandidates(cluster)} />
+              ) : null
+            )
           : <Text key={i} style={color != null ? [baseNoColor, { color }] : base}>{r.text}</Text>
       )}
     </Text>
