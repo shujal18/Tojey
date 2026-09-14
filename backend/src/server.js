@@ -445,7 +445,7 @@ app.post('/api/devices/tokens/sendtest', authMiddleware, async (req, res) => {
     if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
     const masked = tokens.slice(0, 3).map(maskToken).join(', ');
     console.log(`[FCM] sendtest to user ${user.id}: tokens=${tokens.length} accepted-note=${push.success ? push.messageId || 'ok' : (push.note || 'failed')} invalid=${push.invalidTokens.length} tokens=${masked}${tokens.length > 3 ? '…' : ''}`);
-    res.json({ ok: true, sent: push.success, tokens: tokens.length, accepted: push.success ? 1 : 0, invalid: push.invalidTokens.length, messageId: push.messageId || null, note: push.note });
+    res.json({ ok: true, sent: push.success, tokens: tokens.length, accepted: push.success ? 1 : 0, invalid: push.invalidTokens.length, messageId: push.messageId || null, note: push.note, perToken: push.perToken || [] });
   } catch (e) {
     console.error('devices:sendtest error', e.message);
     res.status(500).json({ error: 'Server error' });

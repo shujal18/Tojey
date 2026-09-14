@@ -124,21 +124,24 @@ const result = await messaging.sendEachForMulticast({
     const invalidTokens = [];
     let accepted = 0;
     let firstSuccessMessageId = '';
+    const perToken = [];
     (result.responses || []).forEach((r, i) => {
       if (r.success) {
         accepted++;
         if (!firstSuccessMessageId) firstSuccessMessageId = r.messageId || '';
+        perToken.push({ ok: true, messageId: r.messageId || '' });
       } else {
         const code = r.error && r.error.code ? r.error.code : 'unknown';
         const msg  = r.error && r.error.message ? r.error.message : '';
         console.log(`[FCM] token ${i+1}/${tokens.length} code=${code} msg=${msg}`);
+        perToken.push({ ok: false, code, msg });
         if (isInvalidTokenCode(code)) invalidTokens.push(tokens[i]);
       }
     });
 
     if (accepted > 0) {
       console.log(`[FCM] multicast: tokens=${tokens.length} accepted=${accepted} invalid=${invalidTokens.length} msgId=${firstSuccessMessageId}`);
-      return { success: true, messageId: firstSuccessMessageId, invalidTokens };
+      return { success: true, messageId: firstSuccessMessageId, invalidTokens, perToken };
     }
     if (invalidTokens.length) {
       // UNREGISTERED on a freshly-registered token almost always means the token was
