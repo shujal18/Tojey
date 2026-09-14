@@ -5,3 +5,11 @@ backend/uploads/*
 .env
 *.log
 .DS_Store
+
+# Firebase app config is project-specific (contains API keys). Not committed;
+# builds fail clearly until google-services.json is supplied (see app/build.gradle).
+mobile/android/app/google-services.json
+mobile/google-services.json
+
+# Local APK artifacts
+*.apk

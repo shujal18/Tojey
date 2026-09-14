@@ -98,7 +98,13 @@ async function sendPush({ tokens, notification, data }) {
   try {
     const result = await messaging.sendEachForMulticast({
       tokens,
-      notification,
+notification: {
+        ...notification,
+        // Without an icon, Google Play services on many devices silently drops the
+        // notification. ic_stat_tojey exists in the APK and is what the app's own
+        // notifier uses, so it is always resolvable.
+        icon: notification && notification.icon ? notification.icon : 'ic_stat_tojey',
+      },
       data,
       android: {
         priority: 'high',

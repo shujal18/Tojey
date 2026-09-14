@@ -639,13 +639,13 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Delivery decision: socket-only when the recipient is ONLINE AND on-screen
-        // (foreground). When they are backgrounded/minimized OR fully offline, fall back
-        // to a real FCM system notification - a live socket in the background must NOT
-        // suppress the notification, that is the bug that made minimized chat silent.
+        // Delivery decision: the app itself renders the system notification from the
+        // socket event when its process is alive (backgrounded/minimized/open on another
+        // screen) - reliable even on OEM ROMs like ColorOS. The server only falls back to
+        // FCM when the user has NO socket at all (app terminated/fully closed), where
+        // Google Play services renders the tray notification itself.
         const hasSocket = userSockets(otherUserId).size > 0;
-        const receiverForeground = isUserForeground(otherUserId);
-        const needFcm = !hasSocket || !receiverForeground;
+        const needFcm = !hasSocket;
 
         // Always emit over the socket too: when the client is backgrounded the message is
         // persisted by JS and is already there the moment the UI returns (no duplicate UI
@@ -668,7 +668,7 @@ io.on('connection', async (socket) => {
             [otherUserId]
           );
           const tokens = tokensRes.rows.map((r) => r.fcm_token);
-          console.log(`[FCM] message to user ${otherUserId}: sockets=${userSockets(otherUserId).size} foreground=${receiverForeground} -> fcm + ${tokens.length} token(s)`);
+          console.log(`[FCM] message to user ${otherUserId}: sockets=${userSockets(otherUserId).size} -> fcm + ${tokens.length} token(s)`);
           if (tokens.length) {
             const banner = messageSummary(message);
             const push = await sendPush({
