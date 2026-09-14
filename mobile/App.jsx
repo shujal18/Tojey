@@ -61,7 +61,6 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
-  const [notifBanner, setNotifBanner] = useState(null);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -72,7 +71,6 @@ function Shell() {
     // Never open a conversation for a different account on this device.
     if (ownId && nd.receiverId && nd.receiverId !== ownId) return;
     if (activeChat && activeChat.id === nd.senderId) {
-      setNotifBanner(null);
       return;
     }
     let contact = null;
@@ -94,7 +92,6 @@ function Shell() {
       last_seen: contact.last_seen ?? contact.lastSeen ?? null,
       bio: contact.bio || '',
     });
-    setNotifBanner(null);
   }, [session, activeChat]);
   openFromNotifRef.current = openFromNotif;
 
@@ -133,7 +130,6 @@ function Shell() {
     setSession(null);
     setSocket(null);
     setActiveChat(null);
-    setNotifBanner(null);
     setShowSettings(false);
   };
 
@@ -195,7 +191,9 @@ function Shell() {
     };
   }, [session, socket]);
 
-  // Online delivery over the socket (no FCM when connected) + foreground push -> in-app banner.
+  // Online delivery over the socket (no FCM when connected) + foreground FCM ->
+      // Online delivery over the socket (no FCM when connected) + foreground FCM -> a real
+  // device system notification. No in-app popup is shown.
   useEffect(() => {
     if (!socket) return undefined;
     const onNotif = (d) => {
@@ -210,13 +208,11 @@ function Shell() {
         title: d.sender.displayName || 'Tojey',
         notificationId: d.notification && d.notification.id,
       };
-      setNotifBanner(payload);
       showSystemNotification(payload);
     };
     socket.on('notification:receive', onNotif);
     const unsubFg = onForegroundMessage((p) => {
       if (!session) return;
-      setNotifBanner(p);
       showSystemNotification(p);
     });
     return () => {
@@ -397,15 +393,6 @@ function Shell() {
   return (
     <>
       {content}
-      {notifBanner && (
-        <NotifBanner
-          theme={theme}
-          title={notifBanner.title || 'Tojey'}
-          message={notifBanner.message}
-          onView={() => openFromNotif(notifBanner)}
-          onClose={() => setNotifBanner(null)}
-        />
-      )}
     </>
   );
 }
@@ -419,40 +406,6 @@ export default function App() {
     </ThemeProvider>
   );
 }
-
-function NotifBanner({ theme, title, message, onView, onClose }) {
-  return (
-    <View style={styles.notifBannerWrap} pointerEvents="box-none">
-      <View style={[styles.notifBanner, { backgroundColor: theme.card, borderColor: theme.border }]}>
-        <View style={{ paddingLeft: 6 }}>
-          <Icon name="notifications" size={18} color={theme.primary} style={{ marginRight: 8 }} />
-        </View>
-        <TouchableOpacity style={{ flex: 1 }} onPress={onView}>
-          <Text numberOfLines={1} style={{ color: theme.text, fontWeight: '700', fontSize: 14 }}>{title}</Text>
-          {!!message && (
-            <Text numberOfLines={2} style={{ color: theme.textSecondary, fontSize: 13, marginTop: 2 }}>
-              {message}
-            </Text>
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onClose} style={{ padding: 6 }} accessibilityLabel="Dismiss notification">
-          <Icon name="close" size={16} color={theme.textSecondary} />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-const styles = {
-  notifBannerWrap: {
-    position: 'absolute', top: 8, left: 12, right: 12, zIndex: 100,
-  },
-  notifBanner: {
-    flexDirection: 'row', alignItems: 'center', borderRadius: 14, paddingVertical: 8,
-    paddingRight: 8, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10,
-    shadowOffset: { width: 0, height: 3 }, elevation: 6, gap: 8,
-  },
-};
 
 class RootErrorBoundary extends React.Component {
   constructor(props) {

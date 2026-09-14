@@ -12,6 +12,13 @@ import { Text } from 'react-native';
 // a sequence across nested <Text> nodes breaks the ligature and can render partial or
 // faded-looking glyphs on Android.
 
+// The bundled color emoji font (android/app/src/main/assets/fonts/NotoColorEmoji.ttf)
+// is forced on emoji-only runs. Some devices (ColorOS/OPPO) otherwise
+// fall back to a monochrome system emoji font inside <Text>, which is exactly what made
+// emoji look dark/solid-black in the chat. This font only contains emoji glyphs, so it
+// must NEVER be applied to non-emoji spans (they would render as tofu boxes).
+const EMOJI_FONT = 'NotoColorEmoji';
+
 const VS16 = 0xfe0f;     // emoji variation selector
 const ZWJ = 0x200d;      // zero width joiner
 const ZWNJ = 0x200c;
@@ -106,7 +113,7 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
     <Text style={color != null ? baseNoColor : base} numberOfLines={numberOfLines} {...rest}>
       {runs.map((r, i) =>
         r.emoji
-          ? <Text key={i} style={baseNoColor}>{r.text}</Text>
+          ? <Text key={i} style={[baseNoColor, { fontFamily: EMOJI_FONT, fontWeight: '400' }]}>{r.text}</Text>
           : <Text key={i} style={color != null ? [baseNoColor, { color }] : base}>{r.text}</Text>
       )}
     </Text>

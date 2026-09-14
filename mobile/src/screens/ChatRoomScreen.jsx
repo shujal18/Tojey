@@ -119,6 +119,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [composerH, setComposerH] = useState(0);
   const [barHeights, setBarHeights] = useState({});
   const [kbOpen, setKbOpen] = useState(false);
+  const [kbHeight, setKbHeight] = useState(0);
+  const kbHeightRef = useRef(0);
+  const [msgAreaH, setMsgAreaH] = useState(0);
+  const msgAreaClosedH = useRef(0);
   const setBarH = (k) => (e) => {
     const h = Math.round(e.nativeEvent.layout.height);
     setBarHeights((prev) => (prev[k] === h ? prev : { ...prev, [k]: h }));
@@ -493,9 +497,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // Also scroll the chat so the newest message sits just above the input box
   // instead of hiding behind the keyboard/composer.
   useEffect(() => {
-    const show = () => {
+    const show = (e) => {
       kbVisibleRef.current = true;
       setKbOpen(true);
+      const h = e && e.endCoordinates ? e.endCoordinates.height : 0;
+      if (h) kbHeightRef.current = h;
+      setKbHeight(h || kbHeightRef.current || 0);
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 140);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 320);
@@ -503,6 +510,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const hide = () => {
       if (Platform.OS !== 'ios') kbVisibleRef.current = false;
       setKbOpen(false);
+      setKbHeight(0);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
     };
     const subs = [
@@ -1257,7 +1265,14 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
     (barHeights.rec || 0) + (barHeights.attach || 0)
     + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
     + (composerH || 54);
-  const bottomPad = (kbOpen ? belowStackH : 0) + 18;
+  // How much of the window the soft keyboard actually shrank the message area. When the
+  // OEM honors adjustResize this equals the keyboard height (nothing extra is needed).
+  // When it fails (ColorOS/OPPO) the message area keeps its full height and the keyboard
+  // goes on top of it - the list then needs the keyboard height of extra bottom padding,
+  // otherwise the newest message stays hidden behind the input bar after sending.
+  const kbShrinkTaken = kbOpen ? Math.max(0, (msgAreaClosedH.current || msgAreaH || 0) - msgAreaH) : 0;
+  const kbOverlap = kbOpen ? Math.max(0, kbHeight - kbShrinkTaken) : 0;
+  const bottomPad = 18 + (kbOpen ? belowStackH + kbOverlap : 0);
 
   return (
     <KeyboardAvoidingView
@@ -1392,7 +1407,14 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
       )}
 
       {/* Messages */}
-      <View style={[styles.msgArea, { backgroundColor: chatBg }]}>
+      <View
+        style={[styles.msgArea, { backgroundColor: chatBg }]}
+        onLayout={(e) => {
+          const h = Math.round(e.nativeEvent.layout.height);
+          setMsgAreaH(h);
+          if (!kbOpen) msgAreaClosedH.current = h;
+        }}
+      >
         {CHAT_BACKGROUND && (
           <Image
             source={{ uri: CHAT_BACKGROUND }}
