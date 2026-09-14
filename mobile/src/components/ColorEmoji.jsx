@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
 import { Image, Text } from 'react-native';
 
-// Emoji are rendered as Twemoji PNGs (bright, consistent palette) instead of the
-// device's emoji font, which on some OEMs (OPPO / ColorOS) falls back to a
-// monochrome/dark system emoji font inside <Text> that makes emoji look faded or
-// solid-black. Rendering images guarantees the original colorful glyphs.
+// Emoji are rendered as Google Noto Color Emoji PNGs ("emoji-datasource-google")
+// instead of the device's emoji font, which on some OEMs (OPPO / ColorOS) falls
+// back to a monochrome/dark system emoji font inside <Text> that makes emoji look
+// faded or solid-black. Rendering images guarantees the original colorful Apple/
+// Android-style glyphs while keeping the familiar Android look.
 //
 // Runs are grouped into grapheme clusters so multi-codepoint emoji (ZWJ families,
 // skin tones, flags, ©️/®️/™️, 1️⃣ keycaps) stay intact. Splitting a sequence breaks
 // the ligature and can render partial or faded-looking glyphs.
-const EMOJI_BASE = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/';
+const EMOJI_BASE = 'https://cdn.jsdelivr.net/npm/emoji-datasource-google@14.0.0/img/google/64/';
 
 // Fallback font (bundled android/app/src/main/assets/fonts/NotoColorEmoji.ttf) is
 // used ONLY if a Twemoji image fails to load. It must never be applied to
@@ -117,19 +118,19 @@ function splitEmoji(s) {
   return out;
 }
 
-// Twemoji filenames are lowercase hex codepoints joined by '-'. Variation selectors
-// (…-fe0f) are usually omitted from the filename, but a few sequences keep them
-// (text-default bases inside ZWJ sequences, e.g. 🚴♀️ = …-2640-fe0f). Try the
-// "stripped" form first, then the "kept" form, then fall back to the native font.
-function twemojiCandidates(cluster) {
+// Google Noto emoji filenames are lowercase hex codepoints joined by '-'. Some
+// glyphs keep the variation selector in the filename (e.g. 2764-fe0f.png,
+// 263a-fe0f.png) while others are stripped (1f923.png, 2615.png). Try the "kept"
+// form first, then the "stripped" form, then fall back to the native font.
+function emojiCandidates(cluster) {
   const hex = Array.from(cluster).map((c) => c.codePointAt(0).toString(16).padStart(4, '0')).join('-');
   const stripped = Array.from(cluster)
     .map((c) => c.codePointAt(0))
     .filter((cp) => cp !== VS16 && cp !== ZWNJ)
     .map((cp) => cp.toString(16).padStart(4, '0'))
     .join('-');
-  const out = [stripped];
-  if (stripped !== hex) out.push(hex);
+  const out = [hex];
+  if (stripped !== hex) out.push(stripped);
   return out.map((p) => EMOJI_BASE + p + '.png');
 }
 
@@ -171,7 +172,7 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
         r.emoji
           ? splitEmoji(r.text).map((cluster, j) =>
               cluster ? (
-                <EmojiImg key={`${i}-${j}`} cluster={cluster} size={emojiPx} fallbackStyle={fallbackStyle} candidates={twemojiCandidates(cluster)} />
+                <EmojiImg key={`${i}-${j}`} cluster={cluster} size={emojiPx} fallbackStyle={fallbackStyle} candidates={emojiCandidates(cluster)} />
               ) : null
             )
           : <Text key={i} style={color != null ? [baseNoColor, { color }] : base}>{r.text}</Text>

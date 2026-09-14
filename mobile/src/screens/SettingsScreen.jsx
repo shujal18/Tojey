@@ -467,7 +467,7 @@ const styles = StyleSheet.create({
   rowLabel: { flex: 1, fontSize: 14 },
   helperText: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
   themeRow: { flexDirection: 'row', gap: 8, padding: 14, borderBottomWidth: 1 },
-  chatColorRow: { flexDirection: 'row', flexWrap: 'wrap', padding: 14, gap: 12 },
+  chatColorRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', padding: 14, gap: 14 },
   chatColorItem: { alignItems: 'center', width: 56, borderWidth: 2, borderRadius: 12, paddingVertical: 8 },
   chatColorCircle: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   themeBtn: {

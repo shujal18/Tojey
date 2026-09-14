@@ -486,6 +486,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
                     if (!hasTemp) return prev;
                     return prev.map((m) => (m.id === item.clientId ? ack.message : m));
                   });
+                  if (atBottomRef.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
                   dequeueOutgoing(currentUser.id, item.clientId);
                 }
                 resolve();
@@ -760,6 +761,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+          // Reference-parity: keep the freshly sent bubble flush above the composer
+          // even after the ack swap changes row geometry.
+          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
         }
       });
     } else {
@@ -799,6 +803,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
         }
       });
     } else {
