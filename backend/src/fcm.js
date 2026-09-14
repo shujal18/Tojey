@@ -96,15 +96,9 @@ async function sendPush({ tokens, notification, data }) {
     return { success: false, note: 'fcm-unconfigured', invalidTokens: [] };
   }
   try {
-    const result = await messaging.sendEachForMulticast({
+const result = await messaging.sendEachForMulticast({
       tokens,
-notification: {
-        ...notification,
-        // Without an icon, Google Play services on many devices silently drops the
-        // notification. ic_stat_tojey exists in the APK and is what the app's own
-        // notifier uses, so it is always resolvable.
-        icon: notification && notification.icon ? notification.icon : 'ic_stat_tojey',
-      },
+      notification,
       data,
       android: {
         priority: 'high',
@@ -114,6 +108,12 @@ notification: {
           priority: 'high',
           defaultVibrateTimings: true,
           visibility: 'private',
+          // Android-specific fields must live under android.notification. Putting
+          // icon in the generic FCM notification object makes the Admin SDK reject
+          // the message on some versions. Without an icon, Google Play services on
+          // many devices silently drops the notification. ic_stat_tojey exists in
+          // the APK and is what the app's own notifier uses, so it is resolvable.
+          icon: 'ic_stat_tojey',
         },
       },
     });
@@ -147,7 +147,7 @@ notification: {
   } catch (e) {
     // FCM outage / network failure must never crash the server.
     console.error('FCM send failed:', e.errorInfo && e.errorInfo.code ? e.errorInfo.code : e.message);
-    return { success: false, note: 'fcm-error' };
+    return { success: false, note: 'fcm-error', invalidTokens: [] };
   }
 }
 
