@@ -9,30 +9,6 @@ const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
 const path = require('path');
 const { upload } = require('./media');
 
-// Human-friendly one-line summary used as the FCM notification body.
-function messageSummary(m) {
-  if (!m) return '';
-  if (m.is_view_once) {
-    if (m.type === 'IMAGE' || m.type === 'VIDEO') return 'Sent you a photo/video (view once)';
-    return 'Sent you a view-once message';
-  }
-  switch (m.type) {
-    case 'TEXT':
-      return String(m.content || '').slice(0, 160);
-    case 'IMAGE':
-      return 'Sent you a photo';
-    case 'VIDEO':
-      return 'Sent you a video';
-    case 'VOICE':
-      return 'Sent you a voice message';
-    case 'FILE':
-    case 'DOCUMENT':
-      return m.file_name ? `Sent you a file: ${String(m.file_name).slice(0, 80)}` : 'Sent you a file';
-    default:
-      return 'Sent you a message';
-  }
-}
-
 // Show only the start and end of a token so logs stay debuggable without leaking FCM tokens.
 function maskToken(t) {
   if (!t) return '';
@@ -639,17 +615,12 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Delivery decision: the app itself renders the system notification from the
-        // socket event when its process is alive (backgrounded/minimized/open on another
-        // screen) - reliable even on OEM ROMs like ColorOS. The server only falls back to
-        // FCM when the user has NO socket at all (app terminated/fully closed), where
-        // Google Play services renders the tray notification itself.
+        // Chat messages are delivered in-app ONLY - they never fire a system
+        // notification in any app state. FCM for chat is intentionally NOT sent; the
+        // only feature that produces a system popup is the explicit "Send notification"
+        // button (/api/notifications/send), which covers both online and offline users.
         const hasSocket = userSockets(otherUserId).size > 0;
-        const needFcm = !hasSocket;
 
-        // Always emit over the socket too: when the client is backgrounded the message is
-        // persisted by JS and is already there the moment the UI returns (no duplicate UI
-        // notification is created for socket-delivered messages in the JS foreground path).
         if (hasSocket) {
           setTimeout(() => {
             io.to(`user:${dbUser.userId}`).emit('message:delivered', {
@@ -657,46 +628,6 @@ io.on('connection', async (socket) => {
               userId: dbUser.userId,
             });
           }, 300);
-        }
-        if (!needFcm) return callback({ ok: true, message });
-
-        // Receiver has no active socket OR is backgrounded/minimized: send a proper FCM
-        // notification+data push so Android's own client renders the tray notification.
-        try {
-          const tokensRes = await pool.query(
-            `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-            [otherUserId]
-          );
-          const tokens = tokensRes.rows.map((r) => r.fcm_token);
-          console.log(`[FCM] message to user ${otherUserId}: sockets=${userSockets(otherUserId).size} -> fcm + ${tokens.length} token(s)`);
-          if (tokens.length) {
-            const banner = messageSummary(message);
-            const push = await sendPush({
-              tokens,
-              notification: {
-                title: dbUser.displayName || dbUser.username,
-                body: banner,
-              },
-              data: {
-                type: 'tojey_notification',
-                notificationId: String(message.id),
-                id: String(message.id),
-                senderId: String(dbUser.userId),
-                senderUsername: dbUser.username,
-                senderName: dbUser.displayName || dbUser.username,
-                receiverId: String(otherUserId),
-                conversationId: String(convo.id),
-                body: banner,
-              },
-            });
-            console.log(`[FCM] chat push for ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-          } else {
-            console.log(`[FCM] user ${otherUserId} has no registered tokens - skipping push`);
-          }
-        } catch (pushErr) {
-          // Never break message delivery because the push failed.
-          console.error('[FCM] chat push failed:', pushErr.message);
         }
 
         callback({ ok: true, message });

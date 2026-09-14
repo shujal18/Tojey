@@ -225,41 +225,6 @@ function Shell() {
     };
   }, [socket, session]);
 
-  // Chat messages arrive over the socket. Show a real Android system notification
-  // (same mechanism as the Send-notification button) whenever the user is NOT actively
-  // reading that conversation - i.e. app backgrounded/minimized, or open on another
-  // screen. While reading the chat, the message stays in-app (no system popup).
-  useEffect(() => {
-    if (!socket) return undefined;
-    const messageSummary = (m) => {
-      if (!m) return 'New message';
-      switch (m.type) {
-        case 'VOICE': return 'Voice message';
-        case 'IMAGE': return 'Photo';
-        case 'VIDEO': return 'Video';
-        case 'FILE': return 'Document';
-        default: return m.content || 'New message';
-      }
-    };
-    const onMsg = (d) => {
-      if (!d || !d.sender || !d.message) return;
-      const readingSameChat = AppState.currentState === 'active' && activeChat && activeChat.id === d.sender.userId;
-      if (readingSameChat) return;
-      showSystemNotification({
-        senderId: d.sender.userId,
-        senderUsername: d.sender.username,
-        senderName: d.sender.displayName || 'Tojey',
-        receiverId: session && session.user ? session.user.id : null,
-        conversationId: d.conversationId,
-        message: messageSummary(d.message),
-        title: d.sender.displayName || 'Tojey',
-        notificationId: `chat-${d.message.id}`,
-      });
-    };
-    socket.on('message:receive', onMsg);
-    return () => socket.off('message:receive', onMsg);
-  }, [socket, session, activeChat]);
-
   // Tapping a system notification (foreground while running / cold start) opens that conversation.
   useEffect(() => {
     const unsubPressed = onSystemNotificationPressed((p) => {

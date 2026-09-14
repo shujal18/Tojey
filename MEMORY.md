@@ -7,33 +7,18 @@ changing notification, delivery, or chat behavior, and before assuming how the a
 - Socket.IO = realtime in-app delivery. FCM = Android system notification.
 - Never run a keep-alive service just for FCM on Android.
 
-## NOTIFICATION REQUIREMENT (from user, 2026-09-13/14)
-1. The **"Send notification"** feature (mobile HomeScreen contact long-press → button →
-   `POST /api/notifications/send`, and its web equivalent) MUST produce an Android system
-   notification pop-up on the receiver's phone **whether the receiver is ONLINE or OFFLINE**.
-   This is a hard requirement — the button is the reference feature and it must pop in all states.
-2. **Chat-room messages** must be delivered in-app over the socket. Whether they also fire a
-   system notification depends on the "message popup rule" below (see "Message popup rule").
-3. The user complains that currently the Send-notification button pops but **chat messages do
-   not** behave like it — the gap is `message:receive` has no system-notification path while
-   `notification:receive` does (mobile App.jsx).
-4. Chat messages must ALWAYS display *inside* the app (chat room), independent of popups.
+## NOTIFICATION REQUIREMENT (from user, 2026-09-14, final)
+1. **Chat messages must NEVER produce an Android system notification/pop-up**, in any app
+   state (foreground, background, terminated, or on a different screen). Chat is in-app only.
+2. The **"Send notification"** button (`POST /api/notifications/send` + mobile HomeScreen
+   long-press → send) MUST produce a real Android system notification pop-up on the receiver
+   device **whether ONLINE or OFFLINE**. This is the ONLY system notification the app
+   produces. The server routes via Socket.IO when online and FCM when offline.
 
-## Message popup rule — CONFIRMED by user (2026-09-14, corrected)
-- **CHAT MESSAGES SHOULD POP like the Send-notification button**: a system notification appears
-  when the receiving app is NOT actively showing that conversation (background, minimized,
-  terminated, or the app is open on a different screen). When the user is reading that same
-  chat, the message stays in-app (no system popup).
-- The explicit **Send notification** button (/api/notifications/send) MUST pop in EVERY state:
-  ONLINE and OFFLINE (foreground, background, terminated).
-- No double popups: app-side (socket→notifee) covers background/minimized/open-elsewhere;
-  server FCM (GMS rendering) covers terminated/offline where no socket exists.
-
-## Delivery mechanisms (single popup per state — avoid double popups)
-- Foreground + socket alive → in-app only (NO system popup).
-- Background + socket alive → app-side system notification from the socket event (notifee) is
-  acceptable; server FCM for the same case must not double-fire.
-- Terminated / offline (no socket) → server FCM (GMS renders the notification+data payload).
+## Delivery mechanisms (button-only popup, confirmed final)
+- Online + socket alive → `notification:receive` over socket → app renders notifee popup (works on OEM ROMs like ColorOS).
+- Offline / no socket → FCM push via Firebase Admin (system-tray notification rendered by GMS).
+- Chat messages: Socket.IO only, in-app. No FCM ever for chat messages.
 
 ## Firebase / token invariants
 - Project `tojey-dba45`, Android package `com.tojey`. No hardcoded FCM tokens.
