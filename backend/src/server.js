@@ -665,10 +665,42 @@ io.on('connection', async (socket) => {
         });
 
         // Chat messages are delivered in-app ONLY - they never fire a system
-        // notification in any app state. FCM for chat is intentionally NOT sent; the
-        // only feature that produces a system popup is the explicit "Send notification"
-        // button (/api/notifications/send), which covers both online and offline users.
+        // notification in any app state. The ONLY feature that produces a system
+        // popup is the explicit "Send notification" button (/api/notifications/send).
         const hasSocket = userSockets(otherUserId).size > 0;
+
+        // Offline/backgrounded receivers without a socket get a DATA-ONLY FCM push
+        // (no `notification` payload => no tray popup, exactly matching the
+        // "chat never pops" rule). Devices with a killed process wake up and can still
+        // surface the message through the chat head / nudge when the app is opened.
+        if (!hasSocket) {
+          try {
+            const tokensRes = await pool.query(
+              `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+              [otherUserId]
+            );
+            const tokens = tokensRes.rows.map((r) => r.fcm_token);
+            if (tokens.length) {
+              const push = await sendPush({
+                tokens,
+                data: {
+                  type: 'tojey_chat',
+                  conversationId: String(convo.id),
+                  messageId: String(message.id),
+                  senderId: String(dbUser.userId),
+                  senderUsername: dbUser.username,
+                  senderName: dbUser.displayName || dbUser.username,
+                  senderPic: dbProfilePic || '',
+                  msgType: String(type),
+                  body: String(content || ''),
+                },
+              });
+              if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+            }
+          } catch (pushErr) {
+            console.error('[FCM] chat push failed:', pushErr.message);
+          }
+        }
 
         if (hasSocket) {
           setTimeout(() => {

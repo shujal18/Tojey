@@ -601,14 +601,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       const h = e && e.endCoordinates ? e.endCoordinates.height : 0;
       if (h) kbHeightRef.current = h;
       setKbHeight(h || kbHeightRef.current || 0);
-      // Scroll the newest message fully above the composer right away and keep
-      // re-scrolling through the geometry settle (window shrink on Android is
-      // async, so a single scroll can land short / leave the last bubble behind
-      // the input bar).
-      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 160);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 420);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 700);
+      // Scroll the newest message fully above the composer right away and re-check
+      // after the geometry settles (window shrink on Android is async, so a single
+      // scroll can land short / leave the last bubble behind the input bar). Two
+      // non-animated scrolls beat a burst of animated ones: instant, no jank.
+      const settle = () => listRef.current?.scrollToEnd({ animated: false });
+      requestAnimationFrame(settle);
+      setTimeout(settle, 180);
+      setTimeout(settle, 360);
     };
     const hide = () => {
       if (Platform.OS !== 'ios') kbVisibleRef.current = false;
@@ -745,7 +745,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       // Optimistic render + instant scroll-to-latest: the message appears
       // immediately, then the ack swaps the temp id in place (no scroll jump).
       setMessages((prev) => [...prev, localMsg]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
       const payload = {
         otherUserId,
         type: 'TEXT',
@@ -770,7 +770,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       // Offline: show the pending row immediately and queue the send for flush
       // on reconnect (idempotent by clientId).
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content, replyTo });
     }
     setText('');
@@ -796,7 +796,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const replyTo = target.id || null;
     if (socketReady()) {
       setMessages((prev) => [...prev, localMsg]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
       socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
         if (ack && ack.ok) {
           atBottomRef.current = true;
@@ -808,7 +808,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       });
     } else {
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 40);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
     }
   }, [socket, otherUserId, currentUser.id]);
@@ -1380,25 +1380,18 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
     (barHeights.rec || 0) + (barHeights.attach || 0)
     + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
     + (composerH || 54) + 8;
-  // Full height of everything below the message list (reply/edit/rec/attach/emoji
-  // bars + composer). When the keyboard is open the message list needs at least this
-  // much bottom padding so the newest message can be scrolled completely above the
-  // composer when the OEM fails to shrink the window under the soft keyboard
-  // (ColorOS/OPPO), otherwise it gets stuck behind the input bar. When the keyboard
-  // is closed the list already sits directly above the composer in the flex layout,
-  // so only a small natural gap is used - no excessive empty space.
-  const belowStackH =
-    (barHeights.rec || 0) + (barHeights.attach || 0)
-    + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
-    + (composerH || 54);
   // How much of the window the soft keyboard actually shrank the message area. When the
   // OEM honors adjustResize this equals the keyboard height (nothing extra is needed).
   // When it fails (ColorOS/OPPO) the message area keeps its full height and the keyboard
-  // goes on top of it - the list then needs the keyboard height of extra bottom padding,
+  // goes on top of it - the list then needs the hidden amount of extra bottom padding,
   // otherwise the newest message stays hidden behind the input bar after sending.
   const kbShrinkTaken = kbOpen ? Math.max(0, (msgAreaClosedH.current || msgAreaH || 0) - msgAreaH) : 0;
   const kbOverlap = kbOpen ? Math.max(0, kbHeight - kbShrinkTaken) : 0;
-  const bottomPad = 18 + (kbOpen ? belowStackH + kbOverlap + 6 : 0);
+  // The list already ends directly above the composer when the window resizes, so the
+  // keyboard adds NO padding here - bigger pads (stack + overlap) created a large empty
+  // gap between the newest message and the composer when the keyboard was open. Exact
+  // padding is used ONLY if the window failed to shrink (measured kbOverlap > 0).
+  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 12;
 
   return (
     <KeyboardAvoidingView

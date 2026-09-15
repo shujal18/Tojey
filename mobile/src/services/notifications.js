@@ -1,12 +1,42 @@
-import { Platform, PermissionsAndroid } from 'react-native';
+import { Platform, PermissionsAndroid, NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import messaging from '@react-native-firebase/messaging';
 import notifee, { AndroidImportance, AndroidVisibility, AndroidCategory, EventType } from '@notifee/react-native';
 import { SERVER_URL } from '../config';
 import { loadSession } from './auth';
+import { showChatHead, getChatHeadEnabled, canDrawOverlay, getNudgeVibrationEnabled } from './chatHead';
 
 export const NOTIFICATION_CHANNEL_ID = 'tojey-messages';
 export const NOTIFEE_PRESS_ACTION = 'open-chat';
+
+// Show the floating chat head (and vibrate for nudges) from a background/headless
+// FCM data message - this is what lets chat / nudge work on devices whose process
+// is killed while the app is backgrounded (socket-only delivery would be lost).
+const ChatHeadMod = NativeModules.TojeyChatHead;
+async function handleBackgroundChatOrNudge(d) {
+  const type = d && d.type;
+  const isChat = type === 'tojey_chat';
+  const isNudge = type === 'tojey_nudge' || (d && d.nudge === '1');
+  if (!isChat && !isNudge) return false;
+  try {
+    if (isNudge) {
+      const nudgVib = await getNudgeVibrationEnabled().catch(() => true);
+      if (nudgVib && ChatHeadMod && ChatHeadMod.vibrate) {
+        try { ChatHeadMod.vibrate('0,450,150,450,150,450,150,450,150,450'); } catch (e) {}
+      }
+    }
+    const [chatHeadEnabled, over] = await Promise.all([
+      getChatHeadEnabled().catch(() => true),
+      canDrawOverlay().catch(() => false),
+    ]);
+    if (chatHeadEnabled && over) {
+      showChatHead(d.senderPic || '💬', d.senderName || d.senderUsername || 'Tojey', 1);
+    }
+  } catch (e) {
+    // best effort
+  }
+  return true;
+}
 
 // Never log full FCM tokens (they are bearer credentials).
 function maskToken(t) {
@@ -381,8 +411,12 @@ export function registerBackgroundHandler() {
           await showSystemNotification(payload);
         } else if (remoteMessage && remoteMessage.data) {
           const d = remoteMessage.data;
-          console.log('[FCM] background data-only render (generic)');
-          await showSystemNotification({ title: d.title || 'Tojey', message: d.body || '' });
+          if (await handleBackgroundChatOrNudge(d)) {
+            console.log(`[FCM] background data-only ${d.type || 'nudge'} -> chat head/nudge handled`);
+          } else {
+            console.log('[FCM] background data-only render (generic)');
+            await showSystemNotification({ title: d.title || 'Tojey', message: d.body || '' });
+          }
         }
       } catch (e) {
         console.warn('background render failed:', e.message);

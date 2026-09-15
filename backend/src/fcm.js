@@ -96,30 +96,38 @@ async function sendPush({ tokens, notification, data }) {
     return { success: false, note: 'fcm-unconfigured', invalidTokens: [] };
   }
   try {
-const result = await messaging.sendEachForMulticast({
+    // Data-only payloads (no `notification`) must NOT carry android.notification:
+    // FCM keeps those as foreground-fallback notifications and can pop a blank tray
+    // entry. Android builds the tray UI itself when `notification` is present.
+    const payload = {
       tokens,
       notification,
       data,
       android: {
         priority: 'high',
-        notification: {
-          channelId: 'tojey-messages',
-          sound: 'default',
-          priority: 'high',
-          defaultVibrateTimings: true,
-          visibility: 'private',
-          // Android-specific fields must live under android.notification. Putting
-          // icon in the generic FCM notification object makes the Admin SDK reject
-          // the message on some versions. Without an icon, Google Play services on
-          // many devices silently drops the notification. ic_stat_tojey exists in
-          // the APK and is what the app's own notifier uses, so it is resolvable.
-          icon: 'ic_stat_tojey',
-          // Classify as a message so DND rules that allow messages / messaging-app
-          // priority let this one actually break through instead of being silenced.
-          category: 'message',
-        },
+        ...(notification
+          ? {
+              notification: {
+                channelId: 'tojey-messages',
+                sound: 'default',
+                priority: 'high',
+                defaultVibrateTimings: true,
+                visibility: 'private',
+                // Android-specific fields must live under android.notification. Putting
+                // icon in the generic FCM notification object makes the Admin SDK reject
+                // the message on some versions. Without an icon, Google Play services on
+                // many devices silently drops the notification. ic_stat_tojey exists in
+                // the APK and is what the app's own notifier uses, so it is resolvable.
+                icon: 'ic_stat_tojey',
+                // Classify as a message so DND rules that allow messages / messaging-app
+                // priority let this one actually break through instead of being silenced.
+                category: 'message',
+              },
+            }
+          : {}),
       },
-    });
+    };
+    const result = await messaging.sendEachForMulticast(payload);
 
     const invalidTokens = [];
     let accepted = 0;
