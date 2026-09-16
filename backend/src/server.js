@@ -943,6 +943,84 @@ io.on('connection', async (socket) => {
       }
     });
 
+    // --- Video-call signaling relay (1:1) ---
+    // WebRTC media flows peer-to-peer; the server ONLY relays tiny JSON
+    // (invite/accept/reject/offer/answer + ICE candidates) to the other user's
+    // live socket. No media ever passes through here. All handlers run after the
+    // socket auth middleware, so both ends are authenticated users.
+    const relayVideo = (eventName, targetUserId, payload) => {
+      socket.to(`user:${targetUserId}`).emit(eventName, payload);
+    };
+    const validTarget = (n) => Number.isInteger(n) && n > 0 && n !== dbUser.userId;
+
+    socket.on('video-call:invite', ({ calleeId, callId }, callback = () => {}) => {
+      const target = Number(calleeId);
+      const id = String(callId || '');
+      if (!Number.isInteger(target) || target <= 0) return callback({ error: 'calleeId required' });
+      if (target === dbUser.userId) return callback({ error: 'Cannot call yourself' });
+      if (!id) return callback({ error: 'callId required' });
+      if (!userSockets(target).size) return callback({ error: 'offline' });
+      relayVideo('video-call:invite', target, {
+        callId: id,
+        callerId: dbUser.userId,
+        caller: {
+          userId: dbUser.userId,
+          username: dbUser.username,
+          displayName: dbUser.displayName,
+          profilePic: dbUser.profile_pic_url || '',
+        },
+      });
+      callback({ ok: true, callId: id });
+    });
+
+    socket.on('video-call:accept', ({ targetUserId, callId }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:accept', target, { callId: id, calleeId: dbUser.userId });
+    });
+
+    socket.on('video-call:reject', ({ targetUserId, callId }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:reject', target, { callId: id, calleeId: dbUser.userId });
+    });
+
+    socket.on('video-call:offer', ({ targetUserId, callId, offer }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id || !offer) return;
+      relayVideo('video-call:offer', target, { callId: id, offer });
+    });
+
+    socket.on('video-call:answer', ({ targetUserId, callId, answer }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id || !answer) return;
+      relayVideo('video-call:answer', target, { callId: id, answer });
+    });
+
+    socket.on('video-call:ice-candidate', ({ targetUserId, callId, candidate }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id || !candidate) return;
+      relayVideo('video-call:ice-candidate', target, { callId: id, candidate });
+    });
+
+    socket.on('video-call:end', ({ targetUserId, callId }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:end', target, { callId: id, endedBy: dbUser.userId });
+    });
+
     socket.on('disconnect', async () => {
       const wasTracked = userSockets(dbUser.userId).has(socket.id);
       const nowOffline = removeSocket(dbUser.userId, socket.id);

@@ -30,3 +30,8 @@ export async function ensureMicPermission() {
   const req = await request(mic);
   return req === RESULTS.GRANTED;
 }
+
+// Video calls are CAMERA-ONLY (no mic/audio), so this never touches RECORD_AUDIO.
+export async function ensureVideoCallPermission() {
+  return ensureCameraPermission();
+}

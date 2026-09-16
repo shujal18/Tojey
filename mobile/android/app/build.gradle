@@ -56,8 +56,8 @@ android {
         applicationId "com.tojey"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.1.10"
+        versionCode 9
+        versionName "1.2.0"
     }
 
     signingConfigs {
@@ -88,6 +88,11 @@ android {
 }
 
 dependencies {
+    // react-native-webrtc's optional USB-camera module (libausbc) is not published
+    // on any reachable repo; we only ever use the built-in camera, so drop it.
+    configurations.all {
+        exclude group: 'com.github.jiangdongguo.AndroidUSBCamera', module: 'libausbc'
+    }
     implementation(project(":react-native-async-storage_async-storage"))
     implementation(project(":react-native-clipboard_clipboard"))
     implementation(project(":react-native-permissions"))

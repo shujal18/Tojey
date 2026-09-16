@@ -7,7 +7,7 @@ import {
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
-import ColorEmoji from '../components/ColorEmoji';
+import ColorEmoji, { emojiRuns, splitEmoji } from '../components/ColorEmoji';
 import { fs } from '../utils/size';
 import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
@@ -25,7 +25,12 @@ import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
-import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
+import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission, ensureVideoCallPermission } from '../services/permissions';
+import {
+  startLocalStream, createPeerConnection, applyCallbacks, createOffer, acceptOffer,
+  handleRemoteAnswer, handleRemoteCandidate, cleanupCall, switchCamera,
+} from '../services/videoCall';
+import VideoCallView from '../components/VideoCallView';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
@@ -147,6 +152,19 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const atBottomNearRef = useRef(true);
   const scrolledToEndOnMount = useRef(false);
   const uploadTasks = useRef(new Map());
+  // --- video call state (camera-only, media flows P2P, server relays signaling) ---
+  const [callStatus, setCallStatus] = useState('none'); // none|outgoing|incoming|active
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [incomingCaller, setIncomingCaller] = useState(null);
+  const callStatusRef = useRef('none');
+  const callIdRef = useRef(null);
+  const callPeerIdRef = useRef(null);
+  const callRingingRef = useRef(null);
+  const setCall = (s) => {
+    callStatusRef.current = s;
+    setCallStatus(s);
+  };
   const normCache = useRef(new WeakMap());
   const getNorm = (item) => {
     if (item && typeof item === 'object') {
@@ -173,6 +191,31 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const prependPendingRef = useRef(false);
   const prependOffsetRef = useRef(0);
   const prependContentHRef = useRef(0);
+
+  // Centralized scroll-to-bottom state: a single source of truth for all
+  // "jump to latest message" actions (send, receive, keyboard, FAB).
+  const pendingScrollToBottomRef = useRef(false);
+  const lastContentHeightRef = useRef(0);
+  const bottomInsetRef = useRef(0);
+  const scrollActionRef = useRef(null);
+  const pendingCountRef = useRef(0);
+
+  // Single instant-scroll helper: double-rAF ensures layout has applied after a
+  // state change before scrolling, and always animated:false (spec: no animated
+  // list scroll).
+  const scrollToLatestInstant = useCallback(() => {
+    // Coalesce bursts (send + ack + content-change all want the same jump) into
+    // a single double-rAF scroll; always animated:false (spec: no animated list scroll).
+    if (scrollActionRef.current === 'latest') return;
+    scrollActionRef.current = 'latest';
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollActionRef.current = null;
+        const l = listRef.current;
+        if (l) l.scrollToEnd({ animated: false });
+      });
+    });
+  }, []);
 
   // Send a message through the socket if connected, otherwise queue it for flush
   // on reconnect. Mirrors whatsapp's offline-queue behaviour.
@@ -223,6 +266,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   }, [mediaItems]);
 
   const handleContentSizeChange = useCallback((w, h) => {
+    lastContentHeightRef.current = h;
     // After an older-messages prepend, keep the message under the user's thumb put:
     // RN grew the content above, so shift the offset down by exactly the added height.
     if (prependPendingRef.current) {
@@ -232,20 +276,32 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: target, animated: false }));
       return;
     }
-    if ((atBottomRef.current || kbVisibleRef.current) && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
-  }, []);
+    // Follow growth only when the user is at the bottom or a jump is explicitly owed.
+    if ((atBottomRef.current || pendingScrollToBottomRef.current) && scrolledToEndOnMount.current) {
+      pendingScrollToBottomRef.current = false;
+      scrollToLatestInstant();
+    }
+  }, [scrollToLatestInstant]);
 
   const handleScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
     const h = e.nativeEvent.layoutMeasurement.height;
     const cs = e.nativeEvent.contentSize.height;
     scrollMetricsRef.current = { y, contentH: cs, viewportH: h };
-    const nearBottom = y + h >= cs - 50;
-    atBottomRef.current = nearBottom;
-    if (nearBottom) setPendingCount(0);
+    const distToBottom = Math.max(0, cs - (y + h));
+    const trulyAtBottom = distToBottom <= 4;
+    const nearBottom = distToBottom <= 32;
+    atBottomRef.current = trulyAtBottom;
+    // Update the near-bottom flag only when it actually flips (never per event),
+    // so the FAB/badge state changes once instead of on every scroll tick.
     if (nearBottom !== atBottomNearRef.current) {
       atBottomNearRef.current = nearBottom;
       setAtBottomNear(nearBottom);
+    }
+    // Unread count clears only when truly at the bottom.
+    if (trulyAtBottom && pendingCountRef.current > 0) {
+      pendingCountRef.current = 0;
+      setPendingCount(0);
     }
     // Scroll up near the top -> lazily load older messages (pagination).
     if (y <= 80 && hasMoreRef.current && !loadingMoreRef.current && oldestIdRef.current != null) {
@@ -395,7 +451,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         atBottomRef.current = true;
         atBottomNearRef.current = true;
         setAtBottomNear(true);
-        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 80);
+        pendingScrollToBottomRef.current = true;
+        scrolledToEndOnMount.current = true;
+        scrollToLatestInstant();
       }
     });
 
@@ -408,10 +466,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       atBottomNearRef.current = true;
       setAtBottomNear(true);
       setPendingCount(0);
-      setTimeout(() => {
-        listRef.current?.scrollToEnd({ animated: false });
-        scrolledToEndOnMount.current = true;
-      }, 80);
+      pendingScrollToBottomRef.current = true;
+      scrolledToEndOnMount.current = true;
+      scrollToLatestInstant();
     };
     const hReceive = ({ message }) => {
       // Deduplicate: check if message already exists
@@ -433,9 +490,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           updateChatHead();
         }
         if (!atBottomRef.current) {
+          // Away from the bottom: count the unread badge, never steal position.
           setPendingCount((n) => n + 1);
         } else {
-          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+          // At the bottom: owe instantly a jump so the new bubble clears the
+          // composer (double-rAF), and re-check once content actually grows.
+          pendingScrollToBottomRef.current = true;
+          scrollToLatestInstant();
         }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
@@ -507,7 +568,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
                     if (!hasTemp) return prev;
                     return prev.map((m) => (m.id === item.clientId ? ack.message : m));
                   });
-                  if (atBottomRef.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+pendingScrollToBottomRef.current = true;
+                  scrollToLatestInstant();
                   dequeueOutgoing(currentUser.id, item.clientId);
                 }
                 resolve();
@@ -593,6 +655,210 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
+  // ---------- video call control ----------
+  const emitVideo = (event, payload) => {
+    if (socket && socket.connected) socket.emit(event, payload);
+  };
+
+  const resetCallUi = () => {
+    callIdRef.current = null;
+    callPeerIdRef.current = null;
+    if (callRingingRef.current) clearTimeout(callRingingRef.current);
+    callRingingRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
+    setIncomingCaller(null);
+    setCall('none');
+  };
+
+  const teardownCall = () => {
+    cleanupCall();
+    resetCallUi();
+  };
+
+  const endCall = () => {
+    if (callPeerIdRef.current && callIdRef.current) {
+      emitVideo('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
+    }
+    teardownCall();
+  };
+
+  const wirePeerCallbacks = () => {
+    applyCallbacks({
+      onIceCandidate: (candidate) => {
+        if (callPeerIdRef.current && callIdRef.current) {
+          emitVideo('video-call:ice-candidate', { targetUserId: callPeerIdRef.current, callId: callIdRef.current, candidate });
+        }
+      },
+      onRemoteStream: (stream) => setRemoteStream(stream),
+      onConnectionState: (state) => {
+        if (state === 'connected' || state === 'completed') {
+          if (callRingingRef.current) clearTimeout(callRingingRef.current);
+        } else if (state === 'failed' || state === 'closed') {
+          if (callStatusRef.current !== 'none') teardownCall();
+        }
+      },
+    });
+  };
+
+  const startVideoCall = async () => {
+    if (callStatusRef.current !== 'none') return;
+    if (!socket?.connected) return;
+    try {
+      if (!(await ensureVideoCallPermission())) {
+        setNudgeToast('Camera permission is required for video calls.');
+        return;
+      }
+      const stream = await startLocalStream();
+      const callId = `vc-${currentUser?.id || 0}-${Date.now()}`;
+      await new Promise((resolve, reject) => {
+        socket.emit('video-call:invite', { calleeId: otherUserId, callId }, (res) => {
+          if (res && res.ok) resolve();
+          else reject(new Error((res && res.error) || 'invite failed'));
+        });
+      });
+      callIdRef.current = callId;
+      callPeerIdRef.current = otherUserId;
+      setLocalStream(stream);
+      wirePeerCallbacks();
+      setCall('outgoing');
+      if (callRingingRef.current) clearTimeout(callRingingRef.current);
+      callRingingRef.current = setTimeout(() => {
+        if (callStatusRef.current === 'outgoing') endCall();
+      }, 30000);
+    } catch (e) {
+      cleanupCall();
+      resetCallUi();
+      setNudgeToast(e && e.message === 'offline' ? `${otherUserName} is not online right now.` : 'Could not start the video call.');
+    }
+  };
+
+  const acceptIncoming = async () => {
+    const inc = incomingCaller;
+    if (!inc) return;
+    try {
+      if (!(await ensureVideoCallPermission())) {
+        emitVideo('video-call:reject', { targetUserId: inc.callerId, callId: inc.callId });
+        resetCallUi();
+        setNudgeToast('Camera permission is required for video calls.');
+        return;
+      }
+      const stream = await startLocalStream();
+      callIdRef.current = inc.callId;
+      callPeerIdRef.current = inc.callerId;
+      setLocalStream(stream);
+      wirePeerCallbacks();
+      createPeerConnection();
+      setIncomingCaller(null);
+      setCall('active');
+      emitVideo('video-call:accept', { targetUserId: inc.callerId, callId: inc.callId });
+    } catch (e) {
+      resetCallUi();
+      setNudgeToast('Could not start the video call.');
+    }
+  };
+
+  const declineIncoming = () => {
+    const inc = incomingCaller;
+    if (inc) emitVideo('video-call:reject', { targetUserId: inc.callerId, callId: inc.callId });
+    teardownCall();
+  };
+
+  const headerCallPress = () => {
+    if (callStatusRef.current === 'incoming') declineIncoming();
+    else if (callStatusRef.current !== 'none') endCall();
+    else startVideoCall();
+  };
+
+  // Signaling listeners (server relays SDP/ICE only; media is P2P over WebRTC).
+  useEffect(() => {
+    if (!socket || !otherUserId) return;
+    const hInvite = ({ callId, callerId, caller }) => {
+      if (!callId || !callerId) return;
+      if (callStatusRef.current !== 'none') {
+        emitVideo('video-call:reject', { targetUserId: callerId, callId });
+        return;
+      }
+      callIdRef.current = callId;
+      callPeerIdRef.current = callerId;
+      setIncomingCaller({ callId, callerId, caller });
+      setCall('incoming');
+    };
+    const hAccept = ({ callId }) => {
+      if (callIdRef.current !== callId || callStatusRef.current !== 'outgoing') return;
+      setCall('active');
+      try {
+        createPeerConnection();
+        (async () => {
+          const offer = await createOffer();
+          if (callPeerIdRef.current && callIdRef.current && callStatusRef.current !== 'none') {
+            emitVideo('video-call:offer', { targetUserId: callPeerIdRef.current, callId: callIdRef.current, offer });
+          }
+        })().catch(() => teardownCall());
+      } catch (e) {
+        teardownCall();
+      }
+    };
+    const hReject = ({ callId }) => {
+      if (callIdRef.current !== callId) return;
+      if (callStatusRef.current === 'outgoing') teardownCall();
+    };
+    const hOffer = ({ callId, offer }) => {
+      if (callIdRef.current !== callId || !offer) return;
+      (async () => {
+        const answer = await acceptOffer(offer);
+        if (callIdRef.current === callId && callPeerIdRef.current && callStatusRef.current !== 'none') {
+          emitVideo('video-call:answer', { targetUserId: callPeerIdRef.current, callId, answer });
+        }
+      })().catch(() => teardownCall());
+    };
+    const hAnswer = ({ callId, answer }) => {
+      if (callIdRef.current !== callId || !answer) return;
+      handleRemoteAnswer(answer).catch(() => {});
+    };
+    const hIce = ({ callId, candidate }) => {
+      if (callIdRef.current !== callId || !candidate) return;
+      handleRemoteCandidate(candidate);
+    };
+    const hEnd = ({ callId }) => {
+      if (callIdRef.current !== callId) return;
+      teardownCall();
+    };
+    const hDisconnect = () => {
+      if (callStatusRef.current !== 'none') teardownCall();
+    };
+    socket.on('video-call:invite', hInvite);
+    socket.on('video-call:accept', hAccept);
+    socket.on('video-call:reject', hReject);
+    socket.on('video-call:offer', hOffer);
+    socket.on('video-call:answer', hAnswer);
+    socket.on('video-call:ice-candidate', hIce);
+    socket.on('video-call:end', hEnd);
+    socket.on('disconnect', hDisconnect);
+    return () => {
+      socket.off('video-call:invite', hInvite);
+      socket.off('video-call:accept', hAccept);
+      socket.off('video-call:reject', hReject);
+      socket.off('video-call:offer', hOffer);
+      socket.off('video-call:answer', hAnswer);
+      socket.off('video-call:ice-candidate', hIce);
+      socket.off('video-call:end', hEnd);
+      socket.off('disconnect', hDisconnect);
+    };
+  }, [socket, otherUserId, otherUserName]);
+
+  // Hard cleanup: if the screen unmounts mid-call, tell the peer and release media.
+  useEffect(() => {
+    return () => {
+      if (callStatusRef.current !== 'none') {
+        if (callPeerIdRef.current && callIdRef.current && socket?.connected) {
+          socket.emit('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
+        }
+        cleanupCall();
+      }
+    };
+  }, [socket]);
+
   // Persist messages to offline cache whenever meaningful state changes.
   // Upload progress (_uploadProgress) ticks ~8x/sec; skip those to avoid
   // constant AsyncStorage churn and app-jank while media is sending.
@@ -611,10 +877,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     return () => clearTimeout(t);
   }, [messages, otherUserId, currentUser.id]);
 
+  // Ref mirror of the unread count so scroll handlers clear it without re-renders.
+  useEffect(() => { pendingCountRef.current = pendingCount; }, [pendingCount]);
+
   // Keyboard reopen fix: Android stops showing the keyboard on the focused input
   // after a manual dismiss. Track visibility and force a blur+refocus cycle.
-  // Also scroll the chat so the newest message sits just above the input box
-  // instead of hiding behind the keyboard/composer.
+  // Keyboard open/close is geometry-aware: change the inset state, then do ONE
+  // instant correction only when already at the bottom (no timer storms).
   useEffect(() => {
     const show = (e) => {
       kbVisibleRef.current = true;
@@ -622,31 +891,33 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       const h = e && e.endCoordinates ? e.endCoordinates.height : 0;
       if (h) kbHeightRef.current = h;
       setKbHeight(h || kbHeightRef.current || 0);
-      // Scroll the newest message fully above the composer right away and re-check
-      // after the geometry settles (window shrink on Android is async, so a single
-      // scroll can land short / leave the last bubble behind the input bar). Two
-      // non-animated scrolls beat a burst of animated ones: instant, no jank.
-      const settle = () => listRef.current?.scrollToEnd({ animated: false });
-      requestAnimationFrame(settle);
-      setTimeout(settle, 180);
-      setTimeout(settle, 360);
+      if (atBottomRef.current) {
+        pendingScrollToBottomRef.current = true;
+        scrollToLatestInstant();
+      }
     };
     const hide = () => {
       if (Platform.OS !== 'ios') kbVisibleRef.current = false;
       setKbOpen(false);
       setKbHeight(0);
-      if (atBottomRef.current) setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 90);
+      if (atBottomRef.current) {
+        pendingScrollToBottomRef.current = true;
+        scrollToLatestInstant();
+      }
     };
     const subs = [
       Keyboard.addListener('keyboardDidShow', show),
       Keyboard.addListener('keyboardDidHide', hide),
       Keyboard.addListener('keyboardWillChangeFrame', (e) => {
         if (Platform.OS !== 'ios') return;
-        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+        if (atBottomRef.current) {
+          pendingScrollToBottomRef.current = true;
+          scrollToLatestInstant();
+        }
       }),
     ];
     return () => subs.forEach((s) => s.remove());
-  }, []);
+  }, [scrollToLatestInstant]);
 
   // Blur + refocus (with a fallback retry) so the keyboard reliably returns when the
   // user taps the input after dismissing it. Guarded by the visibility flag.
@@ -762,11 +1033,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _pending: true,
     };
     const replyTo = replyingTo?.id || null;
+    // Clear the input immediately (spec: optimistic append, instant clear, send
+    // disabled only when genuinely empty). Jump always lands at the latest.
+    setText('');
+    setReplyingTo(null);
+    pendingScrollToBottomRef.current = true;
+    atBottomRef.current = true;
+    atBottomNearRef.current = true;
+    setAtBottomNear(true);
+    setPendingCount(0);
     if (socketReady()) {
       // Optimistic render + instant scroll-to-latest: the message appears
       // immediately, then the ack swaps the temp id in place (no scroll jump).
       setMessages((prev) => [...prev, localMsg]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
+      scrollToLatestInstant();
       const payload = {
         otherUserId,
         type: 'TEXT',
@@ -784,18 +1064,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
           // Reference-parity: keep the freshly sent bubble flush above the composer
           // even after the ack swap changes row geometry.
-          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+          pendingScrollToBottomRef.current = true;
+          scrollToLatestInstant();
         }
       });
     } else {
       // Offline: show the pending row immediately and queue the send for flush
       // on reconnect (idempotent by clientId).
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
+      scrollToLatestInstant();
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content, replyTo });
     }
-    setText('');
-    setReplyingTo(null);
   };
 
   const sendReplyText = useCallback((target, content) => {
@@ -815,24 +1094,30 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _pending: true,
     };
     const replyTo = target.id || null;
+    pendingScrollToBottomRef.current = true;
+    atBottomRef.current = true;
+    atBottomNearRef.current = true;
+    setAtBottomNear(true);
+    setPendingCount(0);
     if (socketReady()) {
       setMessages((prev) => [...prev, localMsg]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
+      scrollToLatestInstant();
       socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
         if (ack && ack.ok) {
           atBottomRef.current = true;
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
-          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+          pendingScrollToBottomRef.current = true;
+          scrollToLatestInstant();
         }
       });
     } else {
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 30);
+      scrollToLatestInstant();
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
     }
-  }, [socket, otherUserId, currentUser.id]);
+  }, [socket, otherUserId, currentUser.id, scrollToLatestInstant]);
 
   const sendVoiceMessage = useCallback((filePath, durationSec) => {
     if (!filePath) return;
@@ -859,9 +1144,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
-    if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
-    }
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestInstant();
     uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -875,6 +1159,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
+            pendingScrollToBottomRef.current = true;
+            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
             deleteVoiceFile(cleanPath).catch(() => {});
@@ -886,7 +1172,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         console.error('voice upload failed:', e);
         setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
       });
-  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress]);
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, scrollToLatestInstant]);
 
   const startRecording = async () => {
     if (recording) return;
@@ -1042,9 +1328,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
-    if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
-    }
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestInstant();
     uploadAsset({ uri: asset.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1058,6 +1343,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            pendingScrollToBottomRef.current = true;
+            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1208,9 +1495,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
-    if (atBottomRef.current) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
-    }
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestInstant();
     uploadAsset({ uri: opts.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1225,6 +1511,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            pendingScrollToBottomRef.current = true;
+            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1254,6 +1542,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       : isVoice ? 'audio/mp4'
       : isVideo ? 'video/mp4' : 'image/jpeg';
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestInstant();
     uploadAsset({ uri: msg.media_url, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1302,6 +1592,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       _uploadProgress: 0,
     };
     setMessages((prev) => [...prev, localMsg]);
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestInstant();
     try {
       const upData = await uploadAsset({ uri: filePath, name: fileName, type: 'image/png' }, (p) => setUploadProgress(tempId, p));
       uploadTasks.current.delete(fileName);
@@ -1314,6 +1606,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          pendingScrollToBottomRef.current = true;
+          scrollToLatestInstant();
           if (onDone) onDone();
         } else {
           setMessages((prev) => prev.filter((m) => m.id !== tempId));
@@ -1413,6 +1707,7 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   // gap between the newest message and the composer when the keyboard was open. Exact
   // padding is used ONLY if the window failed to shrink (measured kbOverlap > 0).
   const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 12;
+  bottomInsetRef.current = bottomPad;
 
   return (
     <KeyboardAvoidingView
@@ -1440,6 +1735,13 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             </Text>
           </View>
         </View>
+        <TouchableOpacity
+          onPress={headerCallPress}
+          style={styles.headerIconBtn}
+          accessibilityLabel={callStatusRef.current !== 'none' ? 'End video call' : 'Start video call'}
+        >
+          <Icon name="videocam-outline" size={22} color={callStatusRef.current !== 'none' ? '#E53935' : theme.primary} />
+        </TouchableOpacity>
         <TouchableOpacity
           onPress={() => { if (reactionPop) { setNudgeMenuVisible(false); getNudgeVibrationEnabled().then(setNudgeMenuVisible); setSelMenu(true); } else { setHeaderMenu((v) => !v); } }}
           style={styles.headerIconBtn}
@@ -1563,6 +1865,20 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             fadeDuration={0}
           />
         )}
+        {callStatus !== 'none' ? (
+          <VideoCallView
+            status={callStatus}
+            peerName={otherUserName}
+            peerAvatar={otherUserAvatar}
+            localStream={localStream}
+            remoteStream={remoteStream}
+            onAccept={acceptIncoming}
+            onDecline={declineIncoming}
+            onEnd={endCall}
+            onSwitchCamera={() => switchCamera()}
+            theme={theme}
+          />
+        ) : (
         <FlatList
         ref={listRef}
         data={messages}
@@ -1581,18 +1897,21 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         renderItem={renderMessage}
         contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
         style={{ backgroundColor: 'transparent' }}
-        onLayout={() => { if (atBottomRef.current) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false })); }}
+        onLayout={() => { if (atBottomRef.current || pendingScrollToBottomRef.current) scrollToLatestInstant(); }}
       />
+        )}
       </View>
 
       {!atBottomNear  && !recording && (
         <TouchableOpacity
           onPress={() => {
-            requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+            // FAB: instant jump to latest (never animated), reset badge + flags.
+            pendingScrollToBottomRef.current = true;
             atBottomRef.current = true;
             atBottomNearRef.current = true;
             setAtBottomNear(true);
             setPendingCount(0);
+            scrollToLatestInstant();
           }}
           style={[styles.fab, { backgroundColor: '#23292E', borderColor: 'rgba(255,255,255,0.10)', bottom: fabBottom }]}
           accessibilityLabel="Scroll to latest message"
@@ -2049,7 +2368,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                   This message was deleted
                 </Text>
               ) : message.type === 'IMAGE' || message.type === 'VIDEO' ? (
-                <View>
+                <View style={styles.mediaBubble}>
                   <Image
                     source={{ uri: absUrl(message.thumb_url || message.media_url) }}
                     style={[styles.mediaImage, { width: mediaW, height: mediaH, backgroundColor: isSent ? 'rgba(255,255,255,0.12)' : theme.primaryLight }]}
@@ -2291,18 +2610,26 @@ function fmtDur(totalSec) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// True only for a SINGLE emoji (WhatsApp-style big-emoji message). Multi-emoji
-// or text+emoji falls back to the normal bubble at default text size.
-// Hermes-safe: no \p{...} property escapes, just mark-stripping + code-point count.
+// True when a TEXT message consists of emoji ONLY (one or more grapheme clusters)
+// -> WhatsApp-style large "emoji-only" rendering, no bubble. ZWJ families, skin
+// tones, flags and keycaps are kept intact as single clusters (never split by
+// code point). Text+emoji or anything with letters/digits -> normal bubble.
+// Hermes-safe: no \p{...} property escapes; reuses the ColorEmoji run parser.
 function isSingleEmoji(s) {
   if (!s || typeof s !== 'string') return false;
   const t = s.trim();
-  if (!t || /[A-Za-z0-9]/.test(t)) return false;
-  const stripped = t
-    .replace(/[\uFE0F\u200D]/g, '')
-    .replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '')
-    .replace(/\u20E3/g, '');
-  return Array.from(stripped).length === 1 && /[^\x00-\x7F]/.test(stripped);
+  if (!t) return false;
+  let emojiClusters = 0;
+  let textChars = 0;
+  for (const r of emojiRuns(t)) {
+    if (r.emoji) {
+      emojiClusters += splitEmoji(r.text).length;
+    } else {
+      if (/[A-Za-z0-9]/.test(r.text)) return false;
+      textChars += Array.from(r.text).length;
+    }
+  }
+  return emojiClusters > 0 && textChars === 0;
 }
 
 function hexToRgba(hex, alpha) {
@@ -2340,14 +2667,19 @@ const styles = StyleSheet.create({
   messageList: { padding: fs(14) },
   msgArea: { flex: 1, overflow: 'hidden' },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
-  bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14), overflow: 'hidden' },
-  bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, paddingHorizontal: 4, paddingVertical: 4, overflow: 'visible' },
+  bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14) },
+  // Emoji-only bubbles are transparent + zero padding: the large emoji text carries
+  // its own line box so nothing clips. Never recolor/tint/opacity the glyphs.
+  bubbleEmojiOnly: { backgroundColor: 'transparent', borderWidth: 0, padding: 0 },
   sentBubble: { borderBottomRightRadius: 4 },
   recvBubble: { borderBottomLeftRadius: 4, borderWidth: 1 },
-  msgText: { fontSize: fs(15), lineHeight: fs(21) },
-  msgEmojiWrap: { paddingVertical: 2 },
-  msgEmoji: { fontSize: fs(40), lineHeight: fs(48), paddingHorizontal: fs(10), paddingVertical: 4 },
-  msgEmojiSingle: { fontSize: fs(40), lineHeight: fs(48), paddingHorizontal: 4, opacity: 1 },
+  msgText: { fontSize: fs(15), lineHeight: fs(21), includeFontPadding: true },
+  msgEmojiWrap: { paddingTop: 2, paddingBottom: 4 },
+  msgEmoji: { fontSize: fs(40), lineHeight: fs(50), includeFontPadding: true, paddingHorizontal: fs(10), paddingVertical: 4 },
+  msgEmojiSingle: { fontSize: fs(40), lineHeight: fs(50), includeFontPadding: true, paddingHorizontal: 2, paddingTop: 2, paddingBottom: 4 },
+  // Media thumbs/video keep overflow clipping (rounded corners + overlay fit);
+  // this is the ONLY place clipping is allowed.
+  mediaBubble: { overflow: 'hidden', borderRadius: 12 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
   msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: fs(10), paddingHorizontal: fs(7), paddingVertical: 2 },
   metaText: { fontSize: fs(10), color: '#9B96A8' },
