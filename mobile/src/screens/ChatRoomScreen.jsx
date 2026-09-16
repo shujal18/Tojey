@@ -166,6 +166,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const loadingMoreRef = useRef(false);
   const oldestIdRef = useRef(null);
   const loadingSafetyTimer = useRef(null);
+  // Scroll position tracking used to preserve the reading offset when older
+  // messages are prepended (replaces maintainVisibleContentPosition, which pinned
+  // the viewport and kept newly sent messages hidden below the bottom bar).
+  const scrollMetricsRef = useRef({ y: 0, contentH: 0 });
+  const prependPendingRef = useRef(false);
+  const prependOffsetRef = useRef(0);
+  const prependContentHRef = useRef(0);
 
   // Send a message through the socket if connected, otherwise queue it for flush
   // on reconnect. Mirrors whatsapp's offline-queue behaviour.
@@ -215,7 +222,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, [mediaItems]);
 
-  const handleContentSizeChange = useCallback(() => {
+  const handleContentSizeChange = useCallback((w, h) => {
+    // After an older-messages prepend, keep the message under the user's thumb put:
+    // RN grew the content above, so shift the offset down by exactly the added height.
+    if (prependPendingRef.current) {
+      prependPendingRef.current = false;
+      const delta = h - prependContentHRef.current;
+      const target = Math.max(0, (prependOffsetRef.current || 0) + delta);
+      requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: target, animated: false }));
+      return;
+    }
     if ((atBottomRef.current || kbVisibleRef.current) && scrolledToEndOnMount.current) listRef.current?.scrollToEnd({ animated: false });
   }, []);
 
@@ -223,6 +239,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const y = e.nativeEvent.contentOffset.y;
     const h = e.nativeEvent.layoutMeasurement.height;
     const cs = e.nativeEvent.contentSize.height;
+    scrollMetricsRef.current = { y, contentH: cs, viewportH: h };
     const nearBottom = y + h >= cs - 50;
     atBottomRef.current = nearBottom;
     if (nearBottom) setPendingCount(0);
@@ -244,6 +261,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           loadingMoreRef.current = false;
           clearTimeout(loadingSafetyTimer.current);
           if (res && res.ok && Array.isArray(res.messages) && res.messages.length) {
+            const before = scrollMetricsRef.current || { y: 0, contentH: 0 };
+            prependPendingRef.current = true;
+            prependOffsetRef.current = before.y;
+            prependContentHRef.current = before.contentH || 0;
             setMessages((prev) => {
               const existing = new Set(prev.map((m) => m.id));
               const older = res.messages.filter((m) => !existing.has(m.id));
@@ -1557,7 +1578,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         updateCellsBatchingPeriod={25}
         windowSize={15}
         removeClippedSubviews={Platform.OS === 'android'}
-        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         renderItem={renderMessage}
         contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
         style={{ backgroundColor: 'transparent' }}
