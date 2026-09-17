@@ -664,16 +664,25 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Chat messages are delivered in-app ONLY - they never fire a system
-        // notification in any app state. The ONLY feature that produces a system
-        // popup is the explicit "Send notification" button (/api/notifications/send).
-        const hasSocket = userSockets(otherUserId).size > 0;
+        // Chat routing is driven by the receiver's EXPLICIT app state (reported via
+        // app:foreground / app:background socket events), never by socket presence alone:
+        //   foreground + socket        -> live chat UI is on screen: Socket.IO only (no popup)
+        //   minimized (socket alive)   -> app backgrounded: real FCM popup (notification+data)
+        //   terminated / offline       -> no socket at all: real FCM popup rendered natively
+        // A minimized-but-connected client was previously treated as "online" and silently
+        // missed every chat message. The socket delivery below still runs for backgrounded
+        // clients so the message persists when the UI returns (deduped by id on receipt).
+        const receiverHasSocket = userSockets(otherUserId).size > 0;
+        const receiverForeground = isUserForeground(otherUserId);
+        const needsFcmPopup = !receiverHasSocket || !receiverForeground;
 
-        // Offline/backgrounded receivers without a socket get a DATA-ONLY FCM push
-        // (no `notification` payload => no tray popup, exactly matching the
-        // "chat never pops" rule). Devices with a killed process wake up and can still
-        // surface the message through the chat head / nudge when the app is opened.
-        if (!hasSocket) {
+        if (needsFcmPopup) {
+          const msgPreview = String(content || '')
+            || (type === 'VOICE' ? 'Voice message'
+              : type === 'IMAGE' ? 'Photo'
+              : type === 'VIDEO' ? 'Video'
+              : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
+              : '');
           try {
             const tokensRes = await pool.query(
               `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
@@ -681,8 +690,17 @@ io.on('connection', async (socket) => {
             );
             const tokens = tokensRes.rows.map((r) => r.fcm_token);
             if (tokens.length) {
+              // notification+data: when the process is backgrounded or dead, Android's FCM
+              // client renders the tray popup itself (no dependence on JS waking up), and the
+              // `data` payload carries the ids the app needs to open the exact conversation
+              // on tap. `body` stays as the raw content so a foreground data handler (race
+              // only) can render without the auto-tray duplicate.
               const push = await sendPush({
                 tokens,
+                notification: {
+                  title: `${dbUser.displayName || dbUser.username} • Tojey`,
+                  body: msgPreview,
+                },
                 data: {
                   type: 'tojey_chat',
                   conversationId: String(convo.id),
@@ -691,18 +709,23 @@ io.on('connection', async (socket) => {
                   senderUsername: dbUser.username,
                   senderName: dbUser.displayName || dbUser.username,
                   senderPic: dbProfilePic || '',
+                  receiverId: String(otherUserId),
                   msgType: String(type),
+                  msgPreview,
                   body: String(content || ''),
                 },
               });
+              console.log(`[FCM] chat push to user ${otherUserId}: state=${receiverHasSocket ? 'background' : 'offline'} tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
               if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
             }
           } catch (pushErr) {
             console.error('[FCM] chat push failed:', pushErr.message);
           }
+        } else {
+          console.log(`[DELIVERY] chat to user ${otherUserId}: foreground+socket via Socket.IO only`);
         }
 
-        if (hasSocket) {
+        if (receiverHasSocket) {
           setTimeout(() => {
             io.to(`user:${dbUser.userId}`).emit('message:delivered', {
               messageId: message.id,
@@ -779,18 +802,21 @@ io.on('connection', async (socket) => {
         const banner = '👋 nudged you!';
         const push = await sendPush({
           tokens,
-          notification: {
-            title: dbUser.displayName || dbUser.username,
-            body: banner,
-          },
+          // Deliberately DATA-ONLY (no `notification` payload). Android renders any
+          // `notification` payload in the tray by itself and never invokes the app's
+          // headless JS handler - which is exactly where the strong nudge vibrate
+          // pattern + chat head bubble run. Data-only FCM reaches the background
+          // handler even when the app is minimized / screen off, so the nudge always
+          // buzzes with the real pattern instead of a generic tray vibration.
           data: {
-            type: 'tojey_notification',
+            type: 'tojey_nudge',
             id: `nudge-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
             senderId: String(dbUser.userId),
             senderUsername: dbUser.username,
             senderName: dbUser.displayName || dbUser.username,
+            senderPic: dbUser.profile_pic_url || '',
             receiverId: String(otherUserId),
-            conversationId: '0',
+            title: dbUser.displayName || dbUser.username,
             body: banner,
             nudge: '1',
           },

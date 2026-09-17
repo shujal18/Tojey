@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Image, Text } from 'react-native';
+import { Image, Text, View } from 'react-native';
 
 // Emoji are rendered as Google Noto Color Emoji PNGs ("emoji-datasource-google")
 // instead of the device's emoji font, which on some OEMs (OPPO / ColorOS) falls
@@ -98,7 +98,7 @@ export function emojiRuns(text) {
 }
 
 // Split a single emoji run into individual grapheme clusters (one Twemoji image each).
-function splitEmoji(s) {
+export function splitEmoji(s) {
   const chars = Array.from(s);
   if (!chars.length) return [];
   const out = [];
@@ -178,5 +178,32 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
           : <Text key={i} style={color != null ? [baseNoColor, { color }] : base}>{r.text}</Text>
       )}
     </Text>
+  );
+}
+
+// Emoji-only content rendered as standalone <Image>s in a flex row instead of
+// inside a <Text> line box. <Text> clips inline images to the line height/descent,
+// which chopped the bottom of large emoji; this variant never clips and is used
+// for WhatsApp-style big emoji-only bubbles.
+export function EmojiOnlyView({ children, size }) {
+  const text = String(children == null ? '' : children);
+  const clusters = [];
+  for (const r of emojiRuns(text)) {
+    if (r.emoji) {
+      for (const c of splitEmoji(r.text)) if (c) clusters.push(c);
+    }
+  }
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center' }}>
+      {clusters.map((c, i) => (
+        <EmojiImg
+          key={`${i}-${c}`}
+          cluster={c}
+          size={size}
+          fallbackStyle={{ fontFamily: EMOJI_FONT, color: '#fff', fontWeight: '400' }}
+          candidates={emojiCandidates(c)}
+        />
+      ))}
+    </View>
   );
 }

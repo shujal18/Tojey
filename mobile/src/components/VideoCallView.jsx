@@ -8,11 +8,18 @@ import { absUrl } from '../config';
 // In-call video surface for Tojey. Rendered between the chat header and the
 // existing Tojey text composer (which stays fully functional during a call).
 // Camera-only: mic/speaker controls are intentionally absent (spec forbids audio).
-function Peers({ localUrl, remoteUrl, peerAvatar, peerName, theme }) {
+// Works on Android 6+ (minSdk 24). The local preview is kept behind a small
+// non-rounded surface (SurfaceView cannot be rounded/clipped reliably on some
+// Android versions) with an explicit zIndex/elevation so it always stacks above
+// the remote stream, and mirrored for the front camera.
+function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing }) {
+  const localUrl = localStream ? localStream.toURL() : null;
+  const remoteUrl = remoteStream ? remoteStream.toURL() : null;
+  const showOffPip = !screenSharing && !cameraOn;
   return (
     <View style={styles.stage}>
       {remoteUrl ? (
-        <RTCView streamURL={remoteUrl} objectFit="cover" style={StyleSheet.absoluteFill} />
+        <RTCView streamURL={remoteUrl} objectFit="cover" style={StyleSheet.absoluteFill} zOrder={0} />
       ) : (
         <View style={[styles.waiting, { backgroundColor: '#101418' }]}>
           {peerAvatar ? (
@@ -23,22 +30,68 @@ function Peers({ localUrl, remoteUrl, peerAvatar, peerName, theme }) {
             </View>
           )}
           <Text style={styles.waitingName}>{peerName}</Text>
-          <Text style={styles.waitingHint}>Connecting…</Text>
+          <Text style={styles.waitingHint}>{screenSharing ? 'Sharing your screen…' : 'Connecting…'}</Text>
         </View>
       )}
-      {localUrl && (
-        <View style={styles.localPip}>
-          <RTCView streamURL={localUrl} objectFit="cover" style={styles.localVideo} />
+      {localUrl && !showOffPip && (
+        <View style={styles.localPip} pointerEvents="none">
+          {screenSharing && (
+            <View style={styles.scrTag}>
+              <Icon name="laptop-outline" size={13} color="#fff" />
+              <Text style={styles.scrTagText}>Screen</Text>
+            </View>
+          )}
+          <RTCView
+            streamURL={localUrl}
+            objectFit="cover"
+            style={StyleSheet.absoluteFill}
+            mirror={!screenSharing}
+            zOrder={1}
+          />
+        </View>
+      )}
+      {showOffPip && (
+        <View style={styles.localPip} pointerEvents="none">
+          <View style={styles.offPip}>
+            <Icon name="videocam-off-outline" size={26} color="#fff" />
+          </View>
         </View>
       )}
     </View>
   );
 }
 
-export default function VideoCallView({ status, peerName, peerAvatar, localStream, remoteStream, onAccept, onDecline, onEnd, onSwitchCamera, theme }) {
-  const localUrl = localStream ? localStream.toURL() : null;
-  const remoteUrl = status === 'active' && remoteStream ? remoteStream.toURL() : null;
+function ControlButton({ onPress, icon, label, color, active, small, accessibilityLabel }) {
+  const base = small ? styles.ctrlCircleS : styles.ctrlCircle;
+  return (
+    <TouchableOpacity onPress={onPress} style={styles.ctrlBtn} accessibilityLabel={accessibilityLabel}>
+      <View style={[base, { backgroundColor: color || 'rgba(255,255,255,0.16)' }, active && styles.ctrlActive]}>
+        <Icon name={icon} size={small ? 19 : 24} color={active && !color ? '#0B0F14' : '#fff'} />
+      </View>
+      {!small && <Text style={styles.ctrlLabel}>{label}</Text>}
+    </TouchableOpacity>
+  );
+}
 
+export default function VideoCallView({
+  status,
+  peerName,
+  peerAvatar,
+  localStream,
+  remoteStream,
+  cameraOn,
+  screenSharing,
+  compact,
+  onAccept,
+  onDecline,
+  onEnd,
+  onSwitchCamera,
+  onToggleCamera,
+  onToggleScreenShare,
+  onMinimize,
+  onExpand,
+  theme,
+}) {
   if (status === 'incoming') {
     return (
       <View style={[styles.fit, { backgroundColor: '#101418' }]}>
@@ -69,29 +122,67 @@ export default function VideoCallView({ status, peerName, peerAvatar, localStrea
     );
   }
 
-  const connecting = status !== 'active' || !remoteUrl;
+  const small = !!compact;
 
   return (
     <View style={styles.fit}>
-      <Peers localUrl={localUrl} remoteUrl={remoteUrl} peerAvatar={peerAvatar} peerName={peerName} theme={theme} />
-      <View style={styles.topBar}>
-        <Text style={styles.topStatus}>
-          {status === 'active' && remoteUrl ? 'Video call' : 'Ringing…'}
-        </Text>
+      <Peers
+        localStream={localStream}
+        remoteStream={remoteStream}
+        peerAvatar={peerAvatar}
+        peerName={peerName}
+        theme={theme}
+        cameraOn={cameraOn}
+        screenSharing={screenSharing}
+      />
+      <View style={styles.topBar} pointerEvents="box-none">
+        <View style={styles.statusChip}>
+          <Text style={styles.topStatus}>
+            {status === 'active' && remoteStream ? (screenSharing ? 'Sharing screen' : 'Video call') : 'Ringing…'}
+          </Text>
+        </View>
+        {compact ? (
+          <TouchableOpacity onPress={onExpand} style={styles.layoutBtn} accessibilityLabel="Expand call">
+            <Icon name="chevron-up" size={22} color="#fff" />
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity onPress={onMinimize} style={styles.layoutBtn} accessibilityLabel="Minimize call">
+            <Icon name="chevron-down" size={22} color="#fff" />
+          </TouchableOpacity>
+        )}
       </View>
-      <View style={styles.controls}>
-        <TouchableOpacity onPress={onSwitchCamera} style={styles.ctrlBtn} accessibilityLabel="Switch camera">
-          <View style={[styles.ctrlCircle, { backgroundColor: 'rgba(255,255,255,0.16)' }]}>
-            <Icon name="camera-reverse-outline" size={24} color="#fff" />
-          </View>
-          <Text style={styles.ctrlLabel}>Flip</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onEnd} style={styles.ctrlBtn} accessibilityLabel="End call">
-          <View style={[styles.ctrlCircle, { backgroundColor: '#E53935' }]}>
-            <Icon name="call" size={24} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
-          </View>
-          <Text style={styles.ctrlLabel}>End</Text>
-        </TouchableOpacity>
+      <View style={[styles.controls, small && styles.controlsSmall]}>
+        <ControlButton
+          onPress={onSwitchCamera}
+          icon="camera-reverse-outline"
+          label="Flip"
+          small={small}
+          accessibilityLabel="Switch camera"
+        />
+        <ControlButton
+          onPress={onToggleCamera}
+          icon={cameraOn ? 'videocam' : 'videocam-off-outline'}
+          label="Camera off"
+          active={!cameraOn}
+          small={small}
+          accessibilityLabel="Toggle camera"
+        />
+        <ControlButton
+          onPress={onToggleScreenShare}
+          icon="laptop-outline"
+          label="Share"
+          active={screenSharing}
+          small={small}
+          accessibilityLabel="Toggle screen share"
+        />
+        <ControlButton
+          onPress={onEnd}
+          icon="call"
+          label="End"
+          color="#E53935"
+          small={small}
+          accessibilityLabel="End call"
+        />
       </View>
     </View>
   );
@@ -115,11 +206,54 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.25)',
-    elevation: 5,
+    elevation: 6,
+    zIndex: 3,
   },
-  localVideo: { flex: 1, borderRadius: 12 },
-  topBar: { position: 'absolute', top: 14, left: 14 },
+  scrTag: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    zIndex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    gap: 4,
+  },
+  scrTagText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  offPip: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(20,22,26,0.92)',
+  },
+  topBar: {
+    position: 'absolute',
+    top: 10,
+    left: 12,
+    right: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    zIndex: 4,
+  },
+  statusChip: {
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
   topStatus: { color: '#fff', fontSize: 13, fontWeight: '600', textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 6 },
+  layoutBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   controls: {
     position: 'absolute',
     left: 0,
@@ -127,11 +261,19 @@ const styles = StyleSheet.create({
     bottom: 16,
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 40,
+    gap: 30,
+    zIndex: 4,
+    alignItems: 'flex-end',
+  },
+  controlsSmall: {
+    bottom: 10,
+    gap: 22,
   },
   ctrlBtn: { alignItems: 'center' },
   ctrlCircle: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
-  ctrlLabel: { color: '#fff', fontSize: 11, marginTop: 6, fontWeight: '600' },
+  ctrlCircleS: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  ctrlActive: { backgroundColor: '#fff' },
+  ctrlLabel: { color: '#fff', fontSize: 11, marginTop: 6, fontWeight: '600', textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 4 },
   bigAvatar: { width: 120, height: 120, borderRadius: 60, alignSelf: 'center', marginTop: 60, alignItems: 'center', justifyContent: 'center', resizeMode: 'cover' },
   bigAvatarText: { color: '#fff', fontSize: 46, fontWeight: '700' },
   bigName: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: 18 },

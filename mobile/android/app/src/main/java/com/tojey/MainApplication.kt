@@ -14,6 +14,7 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.load
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.facebook.soloader.SoLoader
+import com.oney.WebRTCModule.WebRTCModuleOptions
 
 class MainApplication : Application(), ReactApplication {
 
@@ -38,6 +39,7 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
+    WebRTCModuleOptions.getInstance().enableMediaProjectionService = true
     // Guarantee the chat notification channel exists from the very first process start
     // (API 26+). Background FCM messages are rendered by Android's system tray, and on
     // Android 8+ a notification is silently DROPPED if its channel does not exist yet.

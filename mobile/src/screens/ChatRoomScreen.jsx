@@ -7,7 +7,7 @@ import {
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { reactionPopRow } from '../theme';
-import ColorEmoji, { emojiRuns, splitEmoji } from '../components/ColorEmoji';
+import ColorEmoji, { emojiRuns, splitEmoji, EmojiOnlyView } from '../components/ColorEmoji';
 import { fs } from '../utils/size';
 import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
@@ -29,6 +29,7 @@ import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission, ens
 import {
   startLocalStream, createPeerConnection, applyCallbacks, createOffer, acceptOffer,
   handleRemoteAnswer, handleRemoteCandidate, cleanupCall, switchCamera,
+  setVideoEnabled, startScreenShare, stopScreenShare, getScreenStream,
 } from '../services/videoCall';
 import VideoCallView from '../components/VideoCallView';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing } from '../services/cache';
@@ -114,6 +115,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [headerMenu, setHeaderMenu] = useState(false);
   const [selMenu, setSelMenu] = useState(false);
   const [nudgeToast, setNudgeToast] = useState('');
+  const [sendFlash, setSendFlash] = useState(false);
+  const sendScale = useRef(new Animated.Value(1)).current;
+  const sendFlashTimerRef = useRef(null);
+  const cameraTimeoutRef = useRef(null);
   const [nudgeMenuVisible, setNudgeMenuVisible] = useState(false);
   const chatHeadOnRef = useRef(false);
   const appVisibleRef = useRef(true);
@@ -154,9 +159,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const uploadTasks = useRef(new Map());
   // --- video call state (camera-only, media flows P2P, server relays signaling) ---
   const [callStatus, setCallStatus] = useState('none'); // none|outgoing|incoming|active
+  const [callLayout, setCallLayout] = useState('full'); // full|compact (chat visible while calling)
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [incomingCaller, setIncomingCaller] = useState(null);
+  const [cameraOn, setCameraOn] = useState(true);
+  const [screenSharing, setScreenSharing] = useState(false);
+  const [screenStream, setScreenStream] = useState(null);
+  const screenSharingRef = useRef(false);
   const callStatusRef = useRef('none');
   const callIdRef = useRef(null);
   const callPeerIdRef = useRef(null);
@@ -165,19 +175,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     callStatusRef.current = s;
     setCallStatus(s);
   };
-  const normCache = useRef(new WeakMap());
-  const getNorm = (item) => {
-    if (item && typeof item === 'object') {
-      const hit = normCache.current.get(item);
-      if (hit) return hit;
-      const n = normalizeMessage(item);
-      normCache.current.set(item, n);
-      return n;
-    }
-    return normalizeMessage(item);
-  };
-  const [highlightId, setHighlightId] = useState(null);
-  const highlightTimer = useRef(null);
 
   // Pagination (lazy-loading older messages on scroll up).
   const hasMoreRef = useRef(false);
@@ -241,13 +238,19 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     ),
     [messages]
   );
+  // Ref mirror so openMedia stays referentially stable across message arrivals: a
+  // changing onOpenMedia prop would defeat MessageRow memoization and re-render the
+  // whole visible window on every incoming message.
+  const mediaItemsRef = useRef(mediaItems);
+  mediaItemsRef.current = mediaItems;
 
   const openMedia = useCallback((message) => {
     if (!message || !message.media_url) return;
+    const items = mediaItemsRef.current;
     if (message.type === 'IMAGE' || message.type === 'VIDEO') {
-      const idx = mediaItems.findIndex((m) => m.id === message.id);
+      const idx = items.findIndex((m) => m.id === message.id);
       if (idx >= 0) {
-        setMediaViewer({ items: mediaItems, index: idx });
+        setMediaViewer({ items, index: idx });
         return;
       }
       Linking.openURL(absUrl(message.media_url)).catch(() => {});
@@ -263,7 +266,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     } else {
       Linking.openURL(absUrl(message.media_url)).catch(() => {});
     }
-  }, [mediaItems]);
+  }, []);
 
   const handleContentSizeChange = useCallback((w, h) => {
     lastContentHeightRef.current = h;
@@ -283,12 +286,25 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, [scrollToLatestInstant]);
 
+  // Stable FlatList layout callback (memo comparison of <MessageList> requires it to
+  // not be an inline arrow).
+  const handleListLayout = useCallback(() => {
+    if (atBottomRef.current || pendingScrollToBottomRef.current) scrollToLatestInstant();
+  }, [scrollToLatestInstant]);
+
   const handleScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
     const h = e.nativeEvent.layoutMeasurement.height;
     const cs = e.nativeEvent.contentSize.height;
     scrollMetricsRef.current = { y, contentH: cs, viewportH: h };
-    const distToBottom = Math.max(0, cs - (y + h));
+    // The contentContainer carries extra bottom padding while the keyboard overlaps
+    // (ColorOS/OPPO: window never shrinks). That padding pushes the true "latest"
+    // beyond reach, so the FAB would light up even at the newest message. Measure
+    // distance against the content MINUS the inset so "at bottom" means the last
+    // message, not the end of the invisible padding.
+    const inset = bottomInsetRef.current || 0;
+    const contentBottom = Math.max(0, cs - inset);
+    const distToBottom = Math.max(0, contentBottom - (y + h));
     const trulyAtBottom = distToBottom <= 4;
     const nearBottom = distToBottom <= 32;
     atBottomRef.current = trulyAtBottom;
@@ -355,75 +371,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     reactTo(msg.id, mine && mine.reaction === '❤️' ? '' : '❤️');
   }, [currentUser.id]);
 
-  const replyIndex = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
-  const replyPreviewOf = useCallback((id) => {
-    const ref = replyIndex.get(id);
-    return ref ? replyPreview(ref) : '…';
-  }, [replyIndex]);
-  const replyReferentOf = useCallback((id) => replyIndex.get(id) || null, [replyIndex]);
-
-  // Tap on a reply preview → jump to the exact original message (non-animated),
-  // temporarily highlight it, and never crash if it's deleted/not loaded.
-  const jumpToMessage = useCallback((id) => {
-    if (id == null) return;
-    const idx = messages.findIndex((m) => m.id === id);
-    if (idx < 0) return;
-    setHighlightId(id);
-    clearTimeout(highlightTimer.current);
-    highlightTimer.current = setTimeout(() => setHighlightId(null), 1800);
-    try {
-      listRef.current?.scrollToIndex({ index: idx, viewPosition: 0.3, animated: false });
-    } catch (e) {
-      // On Android, scrollToIndex can throw before rows are measured; the
-      // onScrollToIndexFailed fallback on the FlatList retries safely.
-    }
-  }, [messages]);
-
-  const onScrollToIndexFailed = useCallback(({ index }) => {
-    if (!messages.length) return;
-    try {
-      listRef.current?.scrollToIndex({ index, viewPosition: 0.3, animated: false });
-    } catch (e) {
-      // Still not measured — estimate a non-animated offset; safe even if imprecise.
-      listRef.current?.scrollToOffset({ offset: Math.max(0, index * 64 - 30), animated: false });
-    }
-  }, [messages]);
-
-  const renderMessage = useCallback(({ item, index }) => {
-    const safe = getNorm(item);
-    const isSent = safe.sender_id === currentUser.id;
-    const prev = index > 0 ? messages[index - 1] : null;
-    const grouped = !!prev && (prev.sender_id || 0) === safe.sender_id && !!prev.type && prev.type === safe.type;
-    return (
-      <RowBoundary isSent={isSent} rowKey={String(safe.id)}>
-        <MessageRow
-          message={safe}
-          isSent={isSent}
-          grouped={grouped}
-          theme={theme}
-          receivedBubble={INCOMING_MESSAGE_COLOR}
-          flash={highlightId === safe.id}
-          ownId={currentUser.id}
-          otherName={otherUserName}
-          replyReferentOf={replyReferentOf}
-          onLongPress={handleLongPress}
-          onOpenMedia={openMedia}
-          onRetry={retrySendMedia}
-          onReply={setReplyingTo}
-          onDoubleTap={toggleLike}
-          onJumpToReply={jumpToMessage}
-          replyPreviewOf={replyPreviewOf}
-          suggestEdit={isSent && safe.type === 'TEXT' && !!safe.content && !safe._pending}
-          onEditRow={(m) => doAction('edit', m)}
-          onCancelUpload={cancelUpload}
-          voicePlaying={playingVoiceId === safe.id}
-          voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
-          onPlayVoice={toggleVoicePlayback}
-        />
-      </RowBoundary>
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, theme, handleLongPress, openMedia, toggleLike, replyPreviewOf, replyReferentOf, jumpToMessage, highlightId, otherUserName, cancelUpload, playingVoiceId, voiceProgress, toggleVoicePlayback]);
+  // The message list (reply lookup, row rendering, tap-to-jump highlight and the
+  // FlatList itself) lives in the memoized <MessageList> below, so typing, upload
+  // progress and unrelated state changes never re-render the visible chat window.
 
   const onType = (t) => {
     setText(t);
@@ -665,6 +615,11 @@ pendingScrollToBottomRef.current = true;
     callPeerIdRef.current = null;
     if (callRingingRef.current) clearTimeout(callRingingRef.current);
     callRingingRef.current = null;
+    screenSharingRef.current = false;
+    setCallLayout('full');
+    setCameraOn(true);
+    setScreenSharing(false);
+    setScreenStream(null);
     setLocalStream(null);
     setRemoteStream(null);
     setIncomingCaller(null);
@@ -770,6 +725,36 @@ pendingScrollToBottomRef.current = true;
     else startVideoCall();
   };
 
+  const toggleCamera = () => {
+    if (callStatusRef.current === 'none') return;
+    const next = !cameraOn;
+    setVideoEnabled(next);
+    setCameraOn(next);
+  };
+
+  const toggleScreenShare = async () => {
+    if (callStatusRef.current === 'none') return;
+    if (screenSharingRef.current) {
+      try {
+        await stopScreenShare();
+      } catch (e) {}
+      screenSharingRef.current = false;
+      setScreenSharing(false);
+      setScreenStream(null);
+    } else {
+      try {
+        const stream = await startScreenShare();
+        if (!stream) throw new Error('could not capture');
+        screenSharingRef.current = true;
+        setScreenStream(getScreenStream());
+        setScreenSharing(true);
+      } catch (e) {
+        screenSharingRef.current = false;
+        setNudgeToast('Could not start screen share: ' + ((e && e.message) || 'unknown error'));
+      }
+    }
+  };
+
   // Signaling listeners (server relays SDP/ICE only; media is P2P over WebRTC).
   useEffect(() => {
     if (!socket || !otherUserId) return;
@@ -850,6 +835,8 @@ pendingScrollToBottomRef.current = true;
   // Hard cleanup: if the screen unmounts mid-call, tell the peer and release media.
   useEffect(() => {
     return () => {
+      if (sendFlashTimerRef.current) clearTimeout(sendFlashTimerRef.current);
+      if (cameraTimeoutRef.current) clearTimeout(cameraTimeoutRef.current);
       if (callStatusRef.current !== 'none') {
         if (callPeerIdRef.current && callIdRef.current && socket?.connected) {
           socket.emit('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
@@ -1077,6 +1064,20 @@ pendingScrollToBottomRef.current = true;
     }
   };
 
+  // Send button feedback: press darkens the button (WhatsApp-style dark tap) and
+  // bursts a tiny scale bounce, then the button returns while the message flies.
+  const pressSend = () => {
+    if (!text.trim()) return;
+    Animated.sequence([
+      Animated.timing(sendScale, { toValue: 0.86, duration: 90, useNativeDriver: true }),
+      Animated.spring(sendScale, { toValue: 1, friction: 4, tension: 180, useNativeDriver: true }),
+    ]).start();
+    if (sendFlashTimerRef.current) clearTimeout(sendFlashTimerRef.current);
+    setSendFlash(true);
+    sendFlashTimerRef.current = setTimeout(() => setSendFlash(false), 320);
+    sendText();
+  };
+
   const sendReplyText = useCallback((target, content) => {
     const c = (content || '').trim();
     if (!target || !c) return;
@@ -1295,6 +1296,12 @@ pendingScrollToBottomRef.current = true;
     else if (action === 'save') { if (message && message.media_url) downloadAndOpen(message); }
   };
 
+  // Stable per-row edit handler (reads the latest doAction via ref so its identity is
+  // constant and MessageRow memoization stays effective across message arrivals).
+  const doActionRef = useRef(null);
+  doActionRef.current = doAction;
+  const doEditRow = useCallback((m) => doActionRef.current && doActionRef.current('edit', m), []);
+
   const clearChatLocal = () => {
     setMessages([]);
     setReplyingTo(null);
@@ -1371,10 +1378,21 @@ pendingScrollToBottomRef.current = true;
               alert('Camera permission is required to take photos.');
               return;
             }
-            ImagePicker.launchCamera({ mediaType: 'photo' }, (r) => {
+            // Close the attach sheet and keyboard before firing the camera intent.
+            // On ColorOS/OPPO the intent can be swallowed when it races a UI
+            // transition, which made the camera tap appear to do nothing.
+            Keyboard.dismiss();
+            if (cameraTimeoutRef.current) clearTimeout(cameraTimeoutRef.current);
+            await new Promise((res) => setTimeout(res, 80));
+            cameraTimeoutRef.current = setTimeout(() => {
+              cameraTimeoutRef.current = null;
+              alert('The camera did not open. Grant the camera permission in system settings and try again.');
+            }, 12000);
+            ImagePicker.launchCamera({ mediaType: 'photo', includeBase64: false }, (r) => {
+              if (cameraTimeoutRef.current) { clearTimeout(cameraTimeoutRef.current); cameraTimeoutRef.current = null; }
               if (r.didCancel) return;
               if (r.errorCode) {
-                alert('Failed to open camera: ' + (r.errorMessage || 'Unknown error'));
+                alert('Failed to open camera: ' + (r.errorMessage || r.errorCode || 'Unknown error'));
                 return;
               }
               if (r.assets && r.assets.length) openEditor(r.assets[0]);
@@ -1865,40 +1883,69 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
             fadeDuration={0}
           />
         )}
-        {callStatus !== 'none' ? (
-          <VideoCallView
-            status={callStatus}
-            peerName={otherUserName}
-            peerAvatar={otherUserAvatar}
-            localStream={localStream}
-            remoteStream={remoteStream}
-            onAccept={acceptIncoming}
-            onDecline={declineIncoming}
-            onEnd={endCall}
-            onSwitchCamera={() => switchCamera()}
-            theme={theme}
-          />
-        ) : (
-        <FlatList
-        ref={listRef}
-        data={messages}
-        keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
-        onContentSizeChange={handleContentSizeChange}
-        onScroll={handleScroll}
-        onScrollToIndexFailed={onScrollToIndexFailed}
-        scrollEventThrottle={16}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
-        initialNumToRender={15}
-        maxToRenderPerBatch={12}
-        updateCellsBatchingPeriod={25}
-        windowSize={15}
-        removeClippedSubviews={Platform.OS === 'android'}
-        renderItem={renderMessage}
-        contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
-        style={{ backgroundColor: 'transparent' }}
-        onLayout={() => { if (atBottomRef.current || pendingScrollToBottomRef.current) scrollToLatestInstant(); }}
-      />
+        {callStatus !== 'none' && callStatus !== 'incoming' && callLayout === 'compact' && (
+          <View style={styles.callStrip} pointerEvents="auto">
+            <VideoCallView
+              compact
+              status={callStatus}
+              peerName={otherUserName}
+              peerAvatar={otherUserAvatar}
+              localStream={screenSharing && screenStream ? screenStream : localStream}
+              remoteStream={remoteStream}
+              cameraOn={cameraOn}
+              screenSharing={screenSharing}
+              onAccept={acceptIncoming}
+              onDecline={declineIncoming}
+              onEnd={endCall}
+              onSwitchCamera={() => switchCamera()}
+              onToggleCamera={toggleCamera}
+              onToggleScreenShare={toggleScreenShare}
+              onExpand={() => setCallLayout('full')}
+              theme={theme}
+            />
+          </View>
+        )}
+        <MessageList
+          messages={messages}
+          ownId={currentUser.id}
+          otherUserName={otherUserName}
+          theme={theme}
+          listRef={listRef}
+          bottomPad={bottomPad}
+          onScroll={handleScroll}
+          onContentSizeChange={handleContentSizeChange}
+          onLayout={handleListLayout}
+          onOpenMedia={openMedia}
+          onLongPress={handleLongPress}
+          onDoubleTap={toggleLike}
+          onReply={setReplyingTo}
+          onEditRow={doEditRow}
+          onRetry={retrySendMedia}
+          onCancelUpload={cancelUpload}
+          onPlayVoice={toggleVoicePlayback}
+          playingVoiceId={playingVoiceId}
+          voiceProgress={voiceProgress}
+        />
+        {callStatus !== 'none' && (callStatus === 'incoming' || callLayout !== 'compact') && (
+          <View style={styles.callOverlay} pointerEvents="auto">
+            <VideoCallView
+              status={callStatus}
+              peerName={otherUserName}
+              peerAvatar={otherUserAvatar}
+              localStream={screenSharing && screenStream ? screenStream : localStream}
+              remoteStream={remoteStream}
+              cameraOn={cameraOn}
+              screenSharing={screenSharing}
+              onAccept={acceptIncoming}
+              onDecline={declineIncoming}
+              onEnd={endCall}
+              onSwitchCamera={() => switchCamera()}
+              onToggleCamera={toggleCamera}
+              onToggleScreenShare={toggleScreenShare}
+              onMinimize={() => setCallLayout('compact')}
+              theme={theme}
+            />
+          </View>
         )}
       </View>
 
@@ -2102,8 +2149,15 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
               <Icon name="attach-outline" size={20} color={showAttach ? '#fff' : theme.primary} />
             </TouchableOpacity>
             {text.trim() ? (
-              <TouchableOpacity style={[styles.sendBtn, { backgroundColor: theme.primary }]} onPress={sendText} accessibilityLabel="Send message">
-                <Icon name="send" size={18} color="#fff" />
+              <TouchableOpacity
+                style={[styles.sendBtn, { backgroundColor: sendFlash ? '#0B0F14' : theme.primary }]}
+                onPress={pressSend}
+                activeOpacity={0.85}
+                accessibilityLabel="Send message"
+              >
+                <Animated.View style={{ transform: [{ scale: sendScale }] }}>
+                  <Icon name="send" size={18} color="#fff" />
+                </Animated.View>
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={[styles.micBtn, { backgroundColor: theme.primary }]} onPress={startRecording} accessibilityLabel="Record voice message">
@@ -2253,7 +2307,7 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyReferentOf, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, replyPreviewOf, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyRef, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const revealOpacity = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
@@ -2298,7 +2352,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
     : message.status === 'READ'
       ? 'checkmark-done' : message.status === 'DELIVERED'
         ? 'checkmark-done' : 'checkmark';
-  const statusColor = message.status === 'READ' ? theme.readBlue : (isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary);
+  const statusColor = message.status === 'READ' ? '#53C3FF' : (isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary);
 
   const singleEmoji = message.type === 'TEXT' && isSingleEmoji(message.content);
   const mediaBase = Math.min(APP_W * 0.62, 250);
@@ -2338,7 +2392,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
 
   const replyRevealStyle = isSent ? styles.revealRight : styles.revealLeft;
 
-  const refMsg = message.reply_to && replyReferentOf ? replyReferentOf(message.reply_to) : null;
+  const refMsg = message.reply_to ? replyRef : null;
   const refName = refMsg
     ? (refMsg.sender_id === ownId ? 'You' : (refMsg.sender_name || refMsg.sender_username || otherName || 'Message'))
     : 'Message';
@@ -2486,13 +2540,13 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                             {refName}
                           </Text>
                           <Text numberOfLines={2} style={{ fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
-                            {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
+                            {refMsg ? <ColorEmoji>{replyPreview(refMsg)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
                       )}
-                      <ColorEmoji style={[styles.msgEmojiSingle]}>
+                      <EmojiOnlyView size={fs(56)}>
                         {message.content}
-                      </ColorEmoji>
+                      </EmojiOnlyView>
                     </View>
                   ) : (
                     <View>
@@ -2506,7 +2560,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                             {refName}
                           </Text>
                           <Text numberOfLines={2} style={{ fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)' }}>
-                            {replyPreviewOf ? <ColorEmoji>{replyPreviewOf(message.reply_to)}</ColorEmoji> : '…'}
+                            {refMsg ? <ColorEmoji>{replyPreview(refMsg)}</ColorEmoji> : '…'}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -2535,7 +2589,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                   <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }, singleEmoji && !isSent && { color: 'rgba(255,255,255,0.85)' }]}>
                     {message.created_at ? timeOf(message.created_at) : ''}
                   </Text>
-                  {isSent && <Icon name={statusIcon} size={13} color={statusColor} />}
+                  {isSent && <Icon name={statusIcon} size={message.status === 'READ' ? 15 : 13} color={statusColor} style={message.status === 'READ' ? styles.readTick : null} />}
                 </View>
               )}
             </TouchableOpacity>
@@ -2564,6 +2618,126 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
 }
 
 const MessageRow = memo(MessageRowFn);
+
+// Memoized message list: the reply lookup map, per-row renderer and the FlatList
+// itself live here so an incoming message (or a keystroke / upload tick in the
+// composer) only re-renders the rows whose data actually changed. Row callbacks stay
+// referentially stable (read via refs) so memo(MessageRow) skips untouched bubbles.
+function MessageListFn({
+  messages, ownId, otherUserName, theme, listRef, bottomPad, onScroll, onContentSizeChange, onLayout,
+  onOpenMedia, onLongPress, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice,
+  playingVoiceId, voiceProgress,
+}) {
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  const replyIndex = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  const replyIndexRef = useRef(replyIndex);
+  replyIndexRef.current = replyIndex;
+
+  const normCache = useRef(new WeakMap());
+  const getNorm = (item) => {
+    if (item && typeof item === 'object') {
+      const hit = normCache.current.get(item);
+      if (hit) return hit;
+      const n = normalizeMessage(item);
+      normCache.current.set(item, n);
+      return n;
+    }
+    return normalizeMessage(item);
+  };
+
+  const [highlightId, setHighlightId] = useState(null);
+  const highlightTimer = useRef(null);
+
+  // Tap on a reply preview → jump to the exact original message (non-animated),
+  // temporarily highlight it, and never crash if it's deleted/not loaded.
+  const jumpToMessage = useCallback((id) => {
+    if (id == null) return;
+    const idx = messagesRef.current.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    setHighlightId(id);
+    clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 1800);
+    try {
+      listRef.current?.scrollToIndex({ index: idx, viewPosition: 0.3, animated: false });
+    } catch (e) {
+      // On Android, scrollToIndex can throw before rows are measured; the
+      // onScrollToIndexFailed fallback on the FlatList retries safely.
+    }
+  }, [listRef]);
+
+  const onScrollToIndexFailed = useCallback(({ index }) => {
+    if (!messagesRef.current.length) return;
+    try {
+      listRef.current?.scrollToIndex({ index, viewPosition: 0.3, animated: false });
+    } catch (e) {
+      // Still not measured — estimate a non-animated offset; safe even if imprecise.
+      listRef.current?.scrollToOffset({ offset: Math.max(0, index * 64 - 30), animated: false });
+    }
+  }, [listRef]);
+
+  const renderMessage = useCallback(({ item, index }) => {
+    const safe = getNorm(item);
+    const isSent = safe.sender_id === ownId;
+    const prev = index > 0 ? messagesRef.current[index - 1] : null;
+    const grouped = !!prev && (prev.sender_id || 0) === safe.sender_id && !!prev.type && prev.type === safe.type;
+    const replyRef = safe.reply_to ? (replyIndexRef.current.get(safe.reply_to) || null) : null;
+    return (
+      <RowBoundary isSent={isSent} rowKey={String(safe.id)}>
+        <MessageRow
+          message={safe}
+          isSent={isSent}
+          grouped={grouped}
+          theme={theme}
+          receivedBubble={INCOMING_MESSAGE_COLOR}
+          flash={highlightId === safe.id}
+          ownId={ownId}
+          otherName={otherUserName}
+          replyRef={replyRef}
+          onLongPress={onLongPress}
+          onOpenMedia={onOpenMedia}
+          onRetry={onRetry}
+          onReply={onReply}
+          onDoubleTap={onDoubleTap}
+          onJumpToReply={jumpToMessage}
+          suggestEdit={isSent && safe.type === 'TEXT' && !!safe.content && !safe._pending}
+          onEditRow={onEditRow}
+          onCancelUpload={onCancelUpload}
+          voicePlaying={playingVoiceId === safe.id}
+          voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
+          onPlayVoice={onPlayVoice}
+        />
+      </RowBoundary>
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme, ownId, otherUserName, onLongPress, onOpenMedia, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice, jumpToMessage, highlightId, playingVoiceId, voiceProgress]);
+
+  return (
+    <FlatList
+      ref={listRef}
+      data={messages}
+      keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
+      onContentSizeChange={onContentSizeChange}
+      onScroll={onScroll}
+      onScrollToIndexFailed={onScrollToIndexFailed}
+      scrollEventThrottle={16}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
+      initialNumToRender={15}
+      maxToRenderPerBatch={12}
+      updateCellsBatchingPeriod={25}
+      windowSize={15}
+      removeClippedSubviews={Platform.OS === 'android'}
+      renderItem={renderMessage}
+      contentContainerStyle={[styles.messageList, { paddingBottom: bottomPad }]}
+      style={{ flex: 1, backgroundColor: 'transparent' }}
+      onLayout={onLayout}
+    />
+  );
+}
+
+const MessageList = memo(MessageListFn);
 
 function ArcProgress({ size = 56, thickness = 4, progress, color = '#fff', track = 'rgba(255,255,255,0.3)' }) {
   const p = Math.min(Math.max(progress || 0, 0), 1);
@@ -2666,6 +2840,18 @@ const styles = StyleSheet.create({
   headerStatus: { fontSize: fs(12), marginLeft: 4 },
   messageList: { padding: fs(14) },
   msgArea: { flex: 1, overflow: 'hidden' },
+  callStrip: {
+    height: Math.min(Math.round(APP_H * 0.42), 320),
+    zIndex: 40,
+    elevation: 20,
+    backgroundColor: '#101418',
+  },
+  callOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 45,
+    elevation: 30,
+    backgroundColor: '#101418',
+  },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
   bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14) },
   // Emoji-only bubbles are transparent + zero padding: the large emoji text carries
@@ -2681,6 +2867,9 @@ const styles = StyleSheet.create({
   // this is the ONLY place clipping is allowed.
   mediaBubble: { overflow: 'hidden', borderRadius: 12 },
   msgMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3 },
+  // Bold, always-legible blue read tick: bright cyan + a soft dark halo so it
+  // stands out on every chat colour (incl. bright coral/orange/pink bubbles).
+  readTick: { textShadowColor: 'rgba(0,0,0,0.4)', textShadowRadius: 1, textShadowOffset: { width: 0, height: 0 }, fontWeight: '700' },
   msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: fs(10), paddingHorizontal: fs(7), paddingVertical: 2 },
   metaText: { fontSize: fs(10), color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },

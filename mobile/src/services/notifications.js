@@ -13,7 +13,7 @@ export const NOTIFEE_PRESS_ACTION = 'open-chat';
 // FCM data message - this is what lets chat / nudge work on devices whose process
 // is killed while the app is backgrounded (socket-only delivery would be lost).
 const ChatHeadMod = NativeModules.TojeyChatHead;
-async function handleBackgroundChatOrNudge(d) {
+async function handleBackgroundChatOrNudge(d, opts = {}) {
   const type = d && d.type;
   const isChat = type === 'tojey_chat';
   const isNudge = type === 'tojey_nudge' || (d && d.nudge === '1');
@@ -23,6 +23,22 @@ async function handleBackgroundChatOrNudge(d) {
       const nudgVib = await getNudgeVibrationEnabled().catch(() => true);
       if (nudgVib && ChatHeadMod && ChatHeadMod.vibrate) {
         try { ChatHeadMod.vibrate('0,450,150,450,150,450,150,450,150,450'); } catch (e) {}
+      }
+      // Also render a real tray notification for the nudge so the backgrounded
+      // user sees it (data-only pushes have no system-rendered tray entry). Skip
+      // only when Android already rendered the tray entry itself (forward-compat).
+      if (opts.tray !== false) {
+        try {
+          await showSystemNotification({
+            notificationId: numOf(d.id),
+            senderId: numOf(d.senderId),
+            senderUsername: d.senderUsername,
+            senderName: d.senderName || d.senderUsername,
+            receiverId: numOf(d.receiverId),
+            message: d.body || '👋 nudged you!',
+            title: d.title || d.senderName || d.senderUsername || 'Tojey',
+          });
+        } catch (e) {}
       }
     }
     const [chatHeadEnabled, over] = await Promise.all([
@@ -37,6 +53,8 @@ async function handleBackgroundChatOrNudge(d) {
   }
   return true;
 }
+
+const numOf = (v) => (/^[1-9]\d*$/.test(String(v)) ? parseInt(v, 10) : undefined);
 
 // Never log full FCM tokens (they are bearer credentials).
 function maskToken(t) {
@@ -69,14 +87,33 @@ async function getDeviceId() {
 
 /**
  * Extract our notification payload from a RemoteMessage.
- * Returns null for anything that is not a Tojey notification.
+ * Handles both notify-button pushes (`tojey_notification`) and chat pushes
+ * (`tojey_chat`, which now carry notification+data for backgrounded/terminated
+ * delivery). Returns null for anything that is not a Tojey notification.
  */
 export function extractNotifPayload(remoteMessage) {
   if (!remoteMessage) return null;
   const d = (remoteMessage.data && typeof remoteMessage.data === 'object') ? remoteMessage.data : {};
-  if (d.type !== 'tojey_notification') return null;
   const num = (v) => (/^[1-9]\d*$/.test(String(v)) ? parseInt(v, 10) : null);
+  if (d.type === 'tojey_chat') {
+    // Tap on a chat popup (system-rendered when backgrounded/terminated) opens the
+    // exact conversation - never the notify-button flow, which only exists for
+    // `tojey_notification` pushes.
+    return {
+      kind: 'chat',
+      conversationId: num(d.conversationId),
+      messageId: num(d.messageId),
+      senderId: num(d.senderId),
+      senderUsername: d.senderUsername,
+      senderName: d.senderName || d.senderUsername,
+      receiverId: num(d.receiverId || d.toUserId),
+      message: d.msgPreview || d.body || (remoteMessage.notification && remoteMessage.notification.body) || '',
+      title: d.senderName || d.senderUsername || (remoteMessage.notification && remoteMessage.notification.title) || 'Tojey',
+    };
+  }
+  if (d.type !== 'tojey_notification') return null;
   return {
+    kind: 'notification',
     notificationId: num(d.notificationId || d.id),
     senderId: num(d.senderId),
     senderUsername: d.senderUsername,
@@ -348,10 +385,16 @@ export function onForegroundMessage(cb) {
   try {
     return messaging().onMessage((remoteMessage) => {
       const payload = extractNotifPayload(remoteMessage);
-      if (payload) {
-        console.log(`[FCM] foreground message received: conversationId=${payload.conversationId} sender=${payload.senderName}`);
-        cb(payload);
+      if (!payload) return;
+      // Chat messages are delivered over the live socket while the app is in the
+      // foreground - showSystemNotification would duplicate the bubble. FCM chat while
+      // foregrounded can only happen in a foreground/background race, so drop it here.
+      if (payload.kind === 'chat') {
+        console.log(`[FCM] foreground chat skipped (socket renders it): sender=${payload.senderName}`);
+        return;
       }
+      console.log(`[FCM] foreground message received: conversationId=${payload.conversationId} sender=${payload.senderName}`);
+      cb(payload);
     });
   } catch (e) {
     return () => {};
@@ -400,9 +443,17 @@ export function registerBackgroundHandler() {
     messaging().setBackgroundMessageHandler(async (remoteMessage) => {
       // If the message already carries a `notification` payload, Android already
       // rendered it in the tray - creating another clone here would duplicate it.
+      // The exception is a nudge: its tray entry has only generic vibration, so
+      // still run the headless handler to fire the real nudge vibrate + chat head
+      // (without re-rendering the tray notification).
       if (remoteMessage && remoteMessage.notification) {
-        console.log(`[FCM] background (system-rendered notification, no JS render) type=${remoteMessage.data && remoteMessage.data.type}`);
-        return;
+        const d = remoteMessage.data || {};
+        if (d.nudge === '1' || d.type === 'tojey_nudge') {
+          if (await handleBackgroundChatOrNudge(d, { tray: false })) return;
+        } else {
+          console.log(`[FCM] background (system-rendered notification, no JS render) type=${d.type}`);
+          return;
+        }
       }
       try {
         const payload = extractNotifPayload(remoteMessage);

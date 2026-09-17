@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, PermissionsAndroid, BackHandler, useWindowDimensions, AppState } from 'react-native';
+import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, BackHandler, useWindowDimensions, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { loadSession, logout, fetchUsers } from './src/services/auth';
@@ -12,7 +12,6 @@ import ChatRoomScreen from './src/screens/ChatRoomScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
-import { ensureMediaPermission, ensureCameraPermission, ensureMicPermission } from './src/services/permissions';
 import {
   startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
   showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification,
@@ -20,31 +19,6 @@ import {
 
 const APP_LOCK_KEY = '@tojey_app_lock';
 const APP_LOCK_PIN_KEY = '@tojey_app_lock_pin';
-
-async function requestStartupPermissions() {
-  if (Platform.OS !== 'android') return;
-  try {
-    await ensureMediaPermission();
-    await ensureCameraPermission();
-    await ensureMicPermission();
-  } catch (e) {
-    console.warn('Startup permission request failed:', e);
-  }
-  if (Platform.Version >= 33) {
-    try {
-      const granted = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO,
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO,
-        PermissionsAndroid.PERMISSIONS.CAMERA,
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-      ]);
-      console.log('Android 13+ permissions:', granted);
-    } catch (e) {
-      console.warn('Android 13+ permission request failed:', e);
-    }
-  }
-}
 
 function Shell() {
   const { theme, booted: themeBooted } = useTheme();
@@ -139,7 +113,6 @@ function Shell() {
     let mounted = true;
     (async () => {
       try {
-        await requestStartupPermissions();
         const s = await loadSession();
         if (!mounted) return;
         setSession(s);
@@ -191,8 +164,7 @@ function Shell() {
     };
   }, [session, socket]);
 
-  // Online delivery over the socket (no FCM when connected) + foreground FCM ->
-      // Online delivery over the socket (no FCM when connected) + foreground FCM -> a real
+  // Online delivery over the socket (no FCM when connected) + foreground FCM -> a real
   // device system notification. No in-app popup is shown.
   useEffect(() => {
     if (!socket) return undefined;
