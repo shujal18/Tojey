@@ -172,6 +172,8 @@ ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user_active ON device_tokens(user_id, is_active) WHERE is_active = TRUE;
 `;
 
 async function initDB() {

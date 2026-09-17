@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client';
 import { SERVER_URL } from '../config';
+import { getDeviceId } from './notifications';
 
 let socket = null;
 
@@ -22,7 +23,13 @@ export function connect(token) {
     socket.disconnect();
   }
   socket = io(SERVER_URL, {
-    auth: { token },
+    // auth as an async callback: Socket.IO resolves it before the handshake, letting
+    // us attach the stable per-install deviceId so the server can route FCM per device.
+    auth: (cb) => {
+      getDeviceId()
+        .then((deviceId) => cb({ token, deviceId }))
+        .catch(() => cb({ token }));
+    },
     transports: ['websocket', 'polling'],
     autoConnect: true,
     forceNew: false,

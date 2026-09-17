@@ -15,6 +15,7 @@ import { TojeyColors } from './src/theme';
 import {
   startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
   showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification,
+  getDeviceId, nextDeviceSeq,
 } from './src/services/notifications';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
@@ -139,15 +140,22 @@ function Shell() {
 
   // Tell the server whether this app is on-screen or minimized. The backend decides
   // between Socket.IO (foreground -> live chat UI) and FCM (background -> real Android
-  // system notification) based on this. Without it, a backgrounded-but-connected app
-  // was treated as "online" and no notification was ever sent.
+  // system notification) PER DEVICE based on this. Without it, a backgrounded-but-connected
+  // app was treated as "online" and no notification was ever sent. Each report carries the
+  // stable deviceId + a monotonic seq so a stale report can never downgrade a newer one.
   useEffect(() => {
     if (!session) return undefined;
     const emitAppState = () => {
       const s = getSocket();
       if (!s) return;
       const active = AppState.currentState === 'active';
-      s.emit(active ? 'app:foreground' : 'app:background');
+      Promise.all([getDeviceId(), nextDeviceSeq()])
+        .then(([deviceId, seq]) => {
+          const so = getSocket();
+          if (!so || !so.connected) return;
+          so.emit(active ? 'app:foreground' : 'app:background', { deviceId, seq });
+        })
+        .catch(() => {});
     };
     const sendToServer = () => setTimeout(emitAppState, 600);
     const onConnect = () => {

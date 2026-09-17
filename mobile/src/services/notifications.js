@@ -69,8 +69,9 @@ let tokenUnsub = null;
 // backend replace the OLD token of THIS device when Firebase rotates the token, instead
 // of leaving the superseded token active.
 const DEVICE_ID_KEY = '@tojey_device_id';
+const DEVICE_SEQ_KEY = '@tojey_device_seq';
 let cachedDeviceId = null;
-async function getDeviceId() {
+export async function getDeviceId() {
   if (cachedDeviceId) return cachedDeviceId;
   try {
     let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
@@ -82,6 +83,20 @@ async function getDeviceId() {
     return id;
   } catch (e) {
     return 'unknown';
+  }
+}
+
+// Monotonic per-device sequence for app-state reports, persisted across app restarts so
+// a stale event emitted by a previous process can never overwrite a newer foreground
+// report on the server (out-of-order guard).
+export async function nextDeviceSeq() {
+  try {
+    const raw = await AsyncStorage.getItem(DEVICE_SEQ_KEY);
+    const next = (raw ? parseInt(raw, 10) : 0) + 1;
+    await AsyncStorage.setItem(DEVICE_SEQ_KEY, String(next));
+    return next;
+  } catch (e) {
+    return Date.now();
   }
 }
 
@@ -109,6 +124,20 @@ export function extractNotifPayload(remoteMessage) {
       receiverId: num(d.receiverId || d.toUserId),
       message: d.msgPreview || d.body || (remoteMessage.notification && remoteMessage.notification.body) || '',
       title: d.senderName || d.senderUsername || (remoteMessage.notification && remoteMessage.notification.title) || 'Tojey',
+    };
+  }
+  if (d.type === 'tojey_nudge') {
+    // Nudge popups must open the nudger's conversation on tap. They may or may not
+    // carry a conversationId (only when a chat already exists with that person).
+    return {
+      kind: 'nudge',
+      conversationId: num(d.conversationId),
+      senderId: num(d.senderId),
+      senderUsername: d.senderUsername,
+      senderName: d.senderName || d.senderUsername,
+      receiverId: num(d.receiverId),
+      message: d.body || (remoteMessage.notification && remoteMessage.notification.body) || '👋 nudged you!',
+      title: d.senderName || d.senderUsername || 'Tojey',
     };
   }
   if (d.type !== 'tojey_notification') return null;
@@ -165,10 +194,18 @@ export async function showSystemNotification(payload) {
       title: payload.title || payload.senderName || 'Tojey',
       body: payload.message || '',
       data: {
-        type: 'tojey_notification',
+        // Carry the REAL type through (chat/nudge/system) so a tap anywhere in the app
+        // resolves to the exact conversation instead of being forced through the
+        // notify-button flow. All fields use the same canonical names as FCM data so
+        // extractNotifPayload / press handlers behave identically for every source.
+        type: payload.type || 'tojey_notification',
         senderId: payload.senderId != null ? String(payload.senderId) : undefined,
         receiverId: payload.receiverId != null ? String(payload.receiverId) : undefined,
         conversationId: payload.conversationId != null ? String(payload.conversationId) : undefined,
+        senderUsername: payload.senderUsername != null ? String(payload.senderUsername) : undefined,
+        senderName: payload.senderName != null ? String(payload.senderName) : undefined,
+        title: payload.title != null ? String(payload.title) : undefined,
+        body: payload.message != null ? String(payload.message) : undefined,
       },
       android: {
         channelId: NOTIFICATION_CHANNEL_ID,
@@ -296,7 +333,21 @@ export async function startPush(userToken) {
   if (Platform.OS !== 'android') return false;
   try {
     await ensureNotifeeChannel();
-    const hasPerm = await requestNotificationPermission();
+    // Android 13+ POST_NOTIFICATIONS: ask at MOST once per install (no dialog spam on
+    // every boot). Later grants/revokes are always honored via a silent check. Older
+    // Android (6-12) has no runtime permission and is always "granted".
+    let hasPerm = Platform.Version < 33;
+    try {
+      const prompted = await AsyncStorage.getItem('@tojey_notif_perm_prompted');
+      if (!prompted) {
+        hasPerm = await requestNotificationPermission();
+        await AsyncStorage.setItem('@tojey_notif_perm_prompted', '1');
+      } else if (Platform.Version >= 33) {
+        hasPerm = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      }
+    } catch (e) {
+      console.warn('notification permission gate failed:', e.message);
+    }
     try {
       await notifee.requestPermission();
     } catch (e) {

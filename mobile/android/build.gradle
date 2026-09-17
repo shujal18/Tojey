@@ -2,7 +2,9 @@
 buildscript {
     ext {
         buildToolsVersion = "34.0.0"
-        minSdkVersion = 24
+        // Android 6.0+ floor (API 23). react-native-webrtc honors this value via
+        // safeExtGet and its jitsi webrtc AAR supports API 16+, so lowering to 23 is safe.
+        minSdkVersion = 23
         compileSdkVersion = 34
         targetSdkVersion = 34
         ndkVersion = "25.1.8937393"

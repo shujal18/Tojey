@@ -56,9 +56,13 @@ function normalizeMessage(m) {
     try { reactions = JSON.parse(reactions); } catch (e) { reactions = []; }
   }
   if (!Array.isArray(reactions)) reactions = [];
+  // Server ids are positive integers; coerce numeric-looking ids so identity checks
+  // (isServerId / dedup set) stay robust even after a JSON round-trip through cache.
+  const rawId = base.id;
+  const numId = /^\d+$/.test(String(rawId)) ? Number(rawId) : NaN;
   return {
     ...base,
-    id: base.id || `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: Number.isFinite(numId) && numId > 0 ? numId : (rawId || `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
     type: base.type || 'TEXT',
     sender_id: Number(base.sender_id) || 0,
     content: base.content == null ? null : String(base.content),
@@ -71,6 +75,42 @@ function normalizeMessage(m) {
     reactions,
     created_at: base.created_at || null,
   };
+}
+
+// True for rows with a real (positive numeric) server id. Temp/pending rows carry the
+// clientId string instead and are never treated as mergeable server identity.
+function isServerId(m) {
+  return !!m && typeof m.id === 'number' && m.id > 0;
+}
+function isLocalOnly(m) {
+  return !!m && (!isServerId(m) || !!(m._queued || m._uploading || m._pending || m._uploadError));
+}
+function sortKey(m) {
+  const t = m && m.created_at ? new Date(m.created_at).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+}
+// Insert one message into an array sorted by (created_at, id), returning a new array.
+// Fast path for the common chronological append avoids any scanning.
+function insertSorted(arr, msg) {
+  const k = sortKey(msg);
+  const id = typeof msg.id === 'number' ? msg.id : -1;
+  const last = arr[arr.length - 1];
+  if (!last || sortKey(last) < k || (sortKey(last) === k && ((typeof last.id !== 'number' ? -1 : last.id)) <= id)) {
+    return arr.concat(msg);
+  }
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const mk = sortKey(arr[mid]);
+    const midId = typeof arr[mid].id === 'number' ? arr[mid].id : -1;
+    if (mk > k || (mk === k && midId > id)) hi = mid;
+    else lo = mid + 1;
+  }
+  const next = arr.slice(0, lo);
+  next.push(msg);
+  next.push(...arr.slice(lo));
+  return next;
 }
 
 // Isolates a single failing row so one bad message can't blank the whole chat.
@@ -338,10 +378,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             prependOffsetRef.current = before.y;
             prependContentHRef.current = before.contentH || 0;
             setMessages((prev) => {
-              const existing = new Set(prev.map((m) => m.id));
-              const older = res.messages.filter((m) => !existing.has(m.id));
+              const ids = knownIdsRef.current || trackIds(prev);
+              const older = res.messages.filter((m) => isServerId(m) && !ids.has(m.id));
               if (!older.length) return prev;
-              const merged = [...older, ...prev];
+              for (const m of older) ids.add(m.id);
+              // `older` is strictly older than beforeId (== first local row), so a plain
+              // append keeps the array sorted with zero duplicate risk.
+              const merged = older.concat(prev);
               oldestIdRef.current = merged[0] ? merged[0].id : null;
               return merged;
             });
@@ -389,14 +432,149 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Layer 3 - centralized merge + dedup.
+  //
+  // EVERY server message that reaches this screen (history snapshot, incremental
+  // sync, Socket.IO receive, load-more) flows through the helpers below into the
+  // SAME `messages` state, which the memoized list observes directly. The numeric
+  // server id is the ONLY identity - never text/position/timestamp. Local-only rows
+  // (temp clientIds, _queued/_uploading/_pending/_uploadError) are preserved across
+  // server snapshots and reconciled into their canonical message on ack.
+  // ---------------------------------------------------------------------------
+  const knownIdsRef = useRef(null);        // Set<number> of known server ids (O(1) dedup)
+  const lastSyncedIdRef = useRef(null);    // incremental sync cursor (max server id seen)
+  const messagesRef2 = useRef([]);         // latest committed list (persist on unmount)
+  const persistTimerRef = useRef(null);
+
+  const trackIds = (list) => {
+    const set = new Set();
+    for (const m of list) if (isServerId(m)) set.add(Number(m.id));
+    knownIdsRef.current = set;
+    return set;
+  };
+  const addKnownId = (id) => {
+    const n = Number(id);
+    if (Number.isFinite(n) && n > 0) {
+      if (!knownIdsRef.current) knownIdsRef.current = new Set();
+      knownIdsRef.current.add(n);
+    }
+  };
+  const bumpCursor = (id) => {
+    const n = Number(id);
+    if (Number.isFinite(n) && n > 0 && n > (lastSyncedIdRef.current || 0)) {
+      lastSyncedIdRef.current = n;
+    }
+  };
+  const computeSyncCursor = (list) => {
+    let max = 0;
+    for (const m of list) if (isServerId(m) && Number(m.id) > max) max = Number(m.id);
+    return max || null;
+  };
+  // Merge a batch of server rows into the local array: new ids are inserted (sorted),
+  // existing ids are updated in place WITHOUT regression of delivery status and WITHOUT
+  // dropping local flags. Returns a brand-new array only when something actually changed,
+  // preserving object identity of untouched rows so memo(MessageRow) skips them.
+  const incrementalAdvance = (prev, incoming) => {
+    if (!Array.isArray(incoming) || !incoming.length) return prev;
+    const ids = knownIdsRef.current || trackIds(prev);
+    let next = prev;
+    for (const raw of incoming) {
+      const m = normalizeMessage(raw);
+      if (!isServerId(m)) continue;
+      const id = Number(m.id);
+      if (ids.has(id)) {
+        // Update-in-place (edits/reactions/deletions or a status-carrying row).
+        const idx = next.findIndex((x) => isServerId(x) && Number(x.id) === id);
+        if (idx < 0) continue;
+        const cur = next[idx];
+        const same = cur.content === m.content && cur.type === m.type &&
+          (cur.media_url || '') === (m.media_url || '') && (cur.thumb_url || '') === (m.thumb_url || '') &&
+          cur.is_edited === m.is_edited && cur.is_deleted_for_everyone === m.is_deleted_for_everyone &&
+          cur.reply_to === m.reply_to && cur.is_view_once === m.is_view_once &&
+          (cur.file_name || '') === (m.file_name || '') && (cur.duration || 0) === (m.duration || 0) &&
+          JSON.stringify(cur.reactions || []) === JSON.stringify(m.reactions || []);
+        if (same) continue;
+        const merged = {
+          ...m,
+          _local: cur._local,
+          _queued: cur._queued,
+          _uploading: cur._uploading,
+          _pending: cur._pending,
+          _uploadError: cur._uploadError,
+          _uploadProgress: cur._uploadProgress,
+          status: (cur.status === 'DELIVERED' || cur.status === 'READ') ? cur.status : m.status,
+        };
+        const copy = next.slice();
+        copy[idx] = merged;
+        next = copy;
+      } else {
+        ids.add(id);
+        bumpCursor(id);
+        const norm = { ...m, _local: m.sender_id === currentUser.id };
+        next = insertSorted(next, norm);
+      }
+    }
+    return next;
+  };
+  // Server snapshot (conversation:open last-200). The server wins on every server-owned
+  // row; rows that are still local-only (pending/queued/uploads) survive; cached rows that
+  // no longer exist on the server (deleted for everyone / beyond the window) are dropped.
+  // Pointer rows are close to the tail, so any rows in the oldest real runs get dropped
+  // exactly like the old "history replaces cache" behavior.
+  const historyAdvance = (prev, serverRows) => {
+    if (!Array.isArray(serverRows)) return prev;
+    const srv = [];
+    for (const raw of serverRows) {
+      const m = normalizeMessage(raw);
+      if (isServerId(m)) srv.push(m);
+    }
+    trackIds(srv);
+    lastSyncedIdRef.current = computeSyncCursor(srv);
+    srv.sort((a, b) => (sortKey(a) - sortKey(b)) || (Number(a.id) - Number(b.id)));
+    const localOnly = prev.filter((m) => isLocalOnly(m));
+    let merged = srv;
+    for (const m of localOnly) merged = insertSorted(merged, m);
+    return merged;
+  };
+
   useEffect(() => {
     if (!socket || !otherUserId || !currentUser?.id) return;
 
-    socket.emit('conversation:open', { otherUserId });
+    // Layer 2 - background server sync. Prefer incremental: fetch ONLY messages newer
+    // than the last locally-known server id (messages:after) instead of re-downloading
+    // the whole conversation. Falls back to the full last-200 snapshot when there is
+    // no cursor (first open) or the server errors (>200 new, hiccup).
+    const syncAfterCursor = (cursor) => {
+      if (!socket || !socket.connected) return;
+      if (cursor) {
+        socket.emit('messages:after', { otherUserId, afterId: cursor, limit: 200 }, (res) => {
+          if (res && res.ok && Array.isArray(res.messages)) {
+            if (res.messages.length) {
+              setMessages((prev) => incrementalAdvance(prev, res.messages));
+            }
+            if (res.hasMore) {
+              // More than 200 new messages - full snapshot once is cheaper than paging.
+              socket.emit('conversation:open', { otherUserId });
+            }
+          } else if (socket && socket.connected) {
+            // Incremental sync unavailable - fall back to the full snapshot.
+            socket.emit('conversation:open', { otherUserId });
+          }
+        });
+      } else if (socket && socket.connected) {
+        socket.emit('conversation:open', { otherUserId });
+      }
+    };
 
-    // Seed UI with offline cache immediately, then server history overwrites
+    // Layer 1: render cached messages instantly, never wait for the network. Then
+    // synchronize in the background only the messages that are actually missing.
+    let cancelled = false;
     loadMessages(currentUser.id, otherUserId).then((cached) => {
+      if (cancelled) return;
       if (cached && cached.length) {
+        trackIds(cached);
+        lastSyncedIdRef.current = computeSyncCursor(cached);
         setMessages(cached);
         atBottomRef.current = true;
         atBottomNearRef.current = true;
@@ -405,12 +583,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         scrolledToEndOnMount.current = true;
         scrollToLatestInstant();
       }
+      syncAfterCursor(lastSyncedIdRef.current);
     });
 
     const hHistory = (msgs) => {
       const list = Array.isArray(msgs) ? msgs : [];
-      setMessages(list);
-      saveMessages(currentUser.id, otherUserId, list);
+      setMessages((prev) => historyAdvance(prev, list));
       oldestIdRef.current = list.length ? list[0].id : null;
       hasMoreRef.current = list.length >= 200;
       atBottomNearRef.current = true;
@@ -421,10 +599,20 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       scrollToLatestInstant();
     };
     const hReceive = ({ message }) => {
-      // Deduplicate: check if message already exists
+      // Deduplicate by server id in O(1) (id-set) - a message arriving via socket AND
+      // a sync/retry can never produce a second row. The updater re-checks the same set
+      // so a concurrent duplicate is collapsed even between renders.
+      if (!message || !isServerId(message)) return;
       setMessages((prev) => {
-        if (prev.some((m) => m.id === message.id)) return prev;
-        return [...prev, { ...message, _local: message.sender_id === currentUser.id }];
+        const ids = knownIdsRef.current || trackIds(prev);
+        if (ids.has(message.id)) return prev;
+        ids.add(message.id);
+        bumpCursor(message.id);
+        const norm = normalizeMessage(message);
+        const row = { ...norm, _local: message.sender_id === currentUser.id };
+        const last = prev[prev.length - 1];
+        const append = !last || sortKey(last) < sortKey(row) || (sortKey(last) === sortKey(row) && (typeof last.id !== 'number' ? -1 : last.id) <= Number(row.id));
+        return append ? prev.concat(row) : insertSorted(prev, row);
       });
       // Warm the image caches right away so scrolling to a fresh media message
       // never shows a loader (prefetch both thumb + full so zooming is ready too).
@@ -477,7 +665,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:edited', hEdited);
     socket.on('message:deleted', hDeleted);
     socket.on('message:reaction', hReaction);
-    const hCleared = ({ conversationId }) => { setMessages([]); setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); oldestIdRef.current = null; hasMoreRef.current = false; clearConversationCache(currentUser.id, otherUserId); };
+    const hCleared = ({ conversationId }) => {
+      setMessages([]);
+      knownIdsRef.current = new Set();
+      lastSyncedIdRef.current = null;
+      setShowAttach(false); setReplyingTo(null); setEditing(null); setText(''); oldestIdRef.current = null; hasMoreRef.current = false; clearConversationCache(currentUser.id, otherUserId);
+    };
     socket.on('conversation:cleared', hCleared);
     const hNudge = ({ from }) => {
       headUnreadRef.current += 1;
@@ -518,7 +711,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
                     if (!hasTemp) return prev;
                     return prev.map((m) => (m.id === item.clientId ? ack.message : m));
                   });
-pendingScrollToBottomRef.current = true;
+                  addKnownId(ack.message && ack.message.id);
+                  bumpCursor(ack.message && ack.message.id);
+                  pendingScrollToBottomRef.current = true;
                   scrollToLatestInstant();
                   dequeueOutgoing(currentUser.id, item.clientId);
                 }
@@ -535,7 +730,21 @@ pendingScrollToBottomRef.current = true;
     };
     const onReconnect = () => {
       if (socket && otherUserId) {
-        socket.emit('conversation:open', { otherUserId });
+        // Incremental: only refetch what the cache is missing. If we never synced a
+        // cursor, fall back to the full snapshot.
+        const cursor = lastSyncedIdRef.current;
+        if (cursor) {
+          socket.emit('messages:after', { otherUserId, afterId: cursor, limit: 200 }, (res) => {
+            if (res && res.ok && Array.isArray(res.messages)) {
+              if (res.messages.length) setMessages((prev) => incrementalAdvance(prev, res.messages));
+              if (res.hasMore && socket && socket.connected) socket.emit('conversation:open', { otherUserId });
+            } else if (socket && socket.connected) {
+              socket.emit('conversation:open', { otherUserId });
+            }
+          });
+        } else {
+          socket.emit('conversation:open', { otherUserId });
+        }
       }
       flushOutgoingQueue();
     };
@@ -545,6 +754,7 @@ pendingScrollToBottomRef.current = true;
     if (socket.connected) flushOutgoingQueue();
 
     return () => {
+      cancelled = true;
       socket.off('messages:history', hHistory);
       socket.off('message:receive', hReceive);
       socket.off('message:delivered', hDelivered);
@@ -561,6 +771,28 @@ pendingScrollToBottomRef.current = true;
       socket.io?.off('reconnect', onReconnect);
     };
   }, [socket, otherUserId, currentUser.id]);
+
+  // Layer 1 persistence - debounced so a burst of socket events writes the cache once
+  // instead of serializing the whole list each time. Flushed synchronously on unmount.
+  useEffect(() => {
+    if (!currentUser?.id || !otherUserId) return undefined;
+    messagesRef2.current = messages;
+    clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      saveMessages(currentUser.id, otherUserId, messagesRef2.current);
+    }, 400);
+    return () => clearTimeout(persistTimerRef.current);
+  }, [messages, currentUser, otherUserId]);
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(persistTimerRef.current);
+      if (currentUser?.id && otherUserId) {
+        saveMessages(currentUser.id, otherUserId, messagesRef2.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Chat Head: show a floating bubble of the other person while the app is in the
   // background (only when enabled in Settings and overlay permission granted).
@@ -954,7 +1186,14 @@ pendingScrollToBottomRef.current = true;
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
   }
 
+  // Upload progress is emitted ~8x/sec by RNFetchBlob; we bucket it to 2.5% steps so a
+  // row (and the list memo) only re-renders ~40 times per upload instead of on every tick.
+  const progressBucketsRef = useRef(new Map());
   const setUploadProgress = useCallback((tempId, p) => {
+    const bucket = Math.round((p || 0) * 40);
+    if (progressBucketsRef.current.get(tempId) === bucket) return;
+    progressBucketsRef.current.set(tempId, bucket);
+    if (bucket >= 40) progressBucketsRef.current.delete(tempId);
     setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploadProgress: p } : m)));
   }, []);
 
@@ -1049,6 +1288,8 @@ pendingScrollToBottomRef.current = true;
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+          addKnownId(ack.message && ack.message.id);
+          bumpCursor(ack.message && ack.message.id);
           // Reference-parity: keep the freshly sent bubble flush above the composer
           // even after the ack swap changes row geometry.
           pendingScrollToBottomRef.current = true;
@@ -1109,6 +1350,8 @@ pendingScrollToBottomRef.current = true;
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+          addKnownId(ack.message && ack.message.id);
+          bumpCursor(ack.message && ack.message.id);
           pendingScrollToBottomRef.current = true;
           scrollToLatestInstant();
         }
@@ -1160,6 +1403,8 @@ pendingScrollToBottomRef.current = true;
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
+            addKnownId(ack.message && ack.message.id);
+            bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
             scrollToLatestInstant();
           } else {
@@ -1350,6 +1595,8 @@ pendingScrollToBottomRef.current = true;
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            addKnownId(ack.message && ack.message.id);
+            bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
             scrollToLatestInstant();
           } else {
@@ -1529,6 +1776,8 @@ pendingScrollToBottomRef.current = true;
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            addKnownId(ack.message && ack.message.id);
+            bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
             scrollToLatestInstant();
           } else {
@@ -1577,6 +1826,8 @@ pendingScrollToBottomRef.current = true;
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            addKnownId(ack.message && ack.message.id);
+            bumpCursor(ack.message && ack.message.id);
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1624,6 +1875,8 @@ pendingScrollToBottomRef.current = true;
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+            addKnownId(ack.message && ack.message.id);
+            bumpCursor(ack.message && ack.message.id);
           pendingScrollToBottomRef.current = true;
           scrollToLatestInstant();
           if (onDone) onDone();

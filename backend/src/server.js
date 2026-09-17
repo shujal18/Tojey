@@ -313,23 +313,26 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
     const notif = insert.rows[0];
 
     if (online) {
-      // Deliver to every active socket of the receiver. FCM is intentionally NOT used.
+      // Deliver to every active socket of the receiver.
       io.to(`user:${receiver.id}`).emit('notification:receive', {
         notification: notif,
         conversationId: convo.id,
         sender: { userId: sender.id, username: sender.username, displayName: sender.display_name, profilePic: sender.profile_pic_url || '' },
       });
-      return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
     }
 
-    // Offline: send via FCM to every registered device token of the receiver.
+    // FCM is sent to every device that is NOT currently foreground-with-socket, so a
+    // backgrounded second device of a connected user still gets its popup (multi-device).
     const tokensRes = await pool.query(
-      `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
       [receiver.id]
     );
-    const tokens = tokensRes.rows.map((r) => r.fcm_token);
+    const { tokens } = tokensNeedingFcm(tokensRes.rows, receiver.id, online);
 
     if (!tokens.length) {
+      if (online) {
+        return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
+      }
       const updated = (await pool.query(
         `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
         [notif.id]
@@ -354,8 +357,10 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
         senderId: String(sender.id),
         senderUsername: sender.username,
         senderName: sender.display_name || sender.username,
+        senderPic: sender.profile_pic_url || '',
         receiverId: String(receiver.id),
         conversationId: String(convo.id),
+        title: sender.display_name || sender.username,
         body,
       },
     });
@@ -374,7 +379,7 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
     return res.json({
       ok: true,
       notification: updated,
-      deliveryMethod: 'fcm',
+      deliveryMethod: online ? 'socket' : 'fcm',
       status: updated.status,
       note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
     });
@@ -489,6 +494,67 @@ const socketUserMap = new Map();
 // FCM - routing by socket presence alone misses exactly the backgrounded case.
 const userActivityMap = new Map(); // userId -> true(foreground) | false(background)
 
+// Per-device app state (multi-device): each device keeps its OWN foreground/background
+// flag, so Phone1 on-screen gets Socket.IO-only delivery while Phone2 (same account,
+// backgrounded) still receives a real FCM popup for the very same message.
+const deviceStateMap = new Map(); // deviceId -> { state: 'foreground'|'background', seq, ts }
+const deviceSockets = new Map();  // deviceId -> Set<socketId>
+const socketToDevice = new Map(); // socketId -> deviceId
+
+// A device is "foreground" only when it has a live socket AND last reported on-screen.
+// Unknown/missing state defaults to foreground while a socket exists (a client that
+// never sent app:foreground is either a legacy/desktop tab or still rendering - Socket.IO
+// already delivered the message there, and the client dedups by id, so skipping FCM is safe).
+function deviceIsForeground(deviceId) {
+  if (!deviceId || typeof deviceId !== 'string') return false;
+  const sockets = deviceSockets.get(deviceId);
+  if (!sockets || sockets.size === 0) return false;
+  const st = deviceStateMap.get(deviceId);
+  return !st || st.state === 'foreground';
+}
+
+// Record a device's foreground/background report with out-of-order protection.
+// Each device sends a monotonic seq (persisted across app restarts) so a stale
+// duplicate (reconnect echo, two processes) can never downgrade a newer report.
+function setDeviceState(deviceId, state, meta) {
+  if (!deviceId || typeof deviceId !== 'string') return;
+  const now = Date.now();
+  const rawSeq = meta && meta.seq;
+  let seq = -1;
+  if (typeof rawSeq === 'number' && Number.isFinite(rawSeq)) seq = rawSeq;
+  else if (typeof rawSeq === 'string' && /^\d+$/.test(rawSeq)) seq = parseInt(rawSeq, 10);
+  const cur = deviceStateMap.get(deviceId);
+  if (cur) {
+    if (seq >= 0 && cur.seq >= 0 && seq <= cur.seq) return; // duplicate / out-of-order
+    if (seq < 0 && now <= cur.ts) return;                   // legacy client, ts fallback
+  }
+  deviceStateMap.set(deviceId, { state, seq, ts: now });
+}
+
+function addDeviceSocket(socketId, deviceId) {
+  if (!deviceId || typeof deviceId !== 'string') return false;
+  socketToDevice.set(socketId, deviceId);
+  if (!deviceSockets.has(deviceId)) deviceSockets.set(deviceId, new Set());
+  deviceSockets.get(deviceId).add(socketId);
+  return true;
+}
+
+function removeDeviceSocket(socketId) {
+  const deviceId = socketToDevice.get(socketId);
+  if (!deviceId) return;
+  socketToDevice.delete(socketId);
+  const sockets = deviceSockets.get(deviceId);
+  if (sockets) {
+    sockets.delete(socketId);
+    if (sockets.size === 0) {
+      deviceSockets.delete(deviceId);
+      // No live socket means this device cannot be foreground anymore; drop its last
+      // state so a later message goes to FCM (the app re-reports on reconnect).
+      deviceStateMap.delete(deviceId);
+    }
+  }
+}
+
 // True when the recipient should render in their open chat UI (socket) instead of a
 // system notification. Unknown state defaults to foreground for backward compatibility.
 function isUserForeground(userId) {
@@ -511,6 +577,29 @@ function removeSocket(userId, socketId) {
   set.delete(socketId);
   if (set.size === 0) socketUserMap.delete(userId);
   return set.size === 0;
+}
+
+// Per-device FCM routing helper (also used by nudge + /api/notifications/send).
+// Given the receiver's active device_tokens rows, returns the tokens that need an FCM
+// push: every device that is NOT currently foreground-with-socket gets a popup. Tokens
+// without a device_id (legacy registrations / web) fall back to the user-level rule.
+function tokensNeedingFcm(rows, userId, legacyHasSocket) {
+  const tokens = [];
+  let phoneForeground = 0;
+  let legacySkip = 0;
+  for (const r of rows) {
+    if (!r || !r.fcm_token) continue;
+    if (r.device_id) {
+      if (deviceIsForeground(r.device_id)) { phoneForeground += 1; continue; }
+      tokens.push(r.fcm_token);
+    } else {
+      // Legacy rows: keep the old behavior - skip FCM only when the whole user is
+      // foreground (a live socket + an on-screen report on some device).
+      if (legacyHasSocket && isUserForeground(userId)) { legacySkip += 1; continue; }
+      tokens.push(r.fcm_token);
+    }
+  }
+  return { tokens, phoneForeground, legacySkip };
 }
 
 io.use((socket, next) => {
@@ -536,6 +625,14 @@ io.on('connection', async (socket) => {
     // Track every live socket for this user (multi-device / multi-tab support).
     addSocket(dbUser.userId, socket.id);
 
+    // Per-device tracking: the handshake auth carries this device's stable id so the
+    // FCM vs Socket.IO routing decision can be made independently for each device.
+    const handshakeDeviceId =
+      socket.handshake && socket.handshake.auth && typeof socket.handshake.auth.deviceId === 'string'
+        ? socket.handshake.auth.deviceId
+        : null;
+    if (handshakeDeviceId) addDeviceSocket(socket.id, handshakeDeviceId);
+
     await pool.query(
       `INSERT INTO user_presence (user_id, is_online, last_seen, socket_id)
        VALUES ($1, TRUE, NOW(), $2)
@@ -554,10 +651,22 @@ io.on('connection', async (socket) => {
     socket.emit('connected:ack', { userId: dbUser.userId, displayName: dbUser.displayName });
 
     // App foreground/background state (drives FCM vs Socket.IO routing for messages).
-    socket.on('app:foreground', () => {
+    socket.on('app:foreground', (meta) => {
+      const deviceId = socketToDevice.get(socket.id) || (meta && meta.deviceId);
+      if (deviceId) {
+        // Multi-device path: track this device independently, ignore stale/duplicate reports.
+        setDeviceState(deviceId, 'foreground', meta);
+        return;
+      }
+      // Legacy client (no deviceId): keep the old user-level behavior.
       userActivityMap.set(dbUser.userId, true);
     });
-    socket.on('app:background', () => {
+    socket.on('app:background', (meta) => {
+      const deviceId = socketToDevice.get(socket.id) || (meta && meta.deviceId);
+      if (deviceId) {
+        setDeviceState(deviceId, 'background', meta);
+        return;
+      }
       // Any live socket stopping means the UI is no longer on screen -> needs real
       // notifications. Only ever downgrade; a foreground report wins if it arrived late.
       if (userActivityMap.get(dbUser.userId) !== true) userActivityMap.set(dbUser.userId, false);
@@ -618,6 +727,40 @@ io.on('connection', async (socket) => {
       }
     });
 
+    // Incremental offline/reconnect sync: return ONLY the messages strictly newer than
+    // `afterId` (ascending). A client that already cached messages 1..105 asks for
+    // afterId=105 and gets 106.. up to `limit` instead of re-downloading the whole
+    // conversation. Rows carry the full server state (reactions, is_edited, deletion)
+    // so the merge step can update-in-place any message that changed while offline.
+    socket.on('messages:after', async ({ otherUserId, afterId, limit = 200 }, callback = () => {}) => {
+      try {
+        const convo = await getOrCreateConversation(dbUser.userId, otherUserId);
+        const afterRaw = Number.parseInt(afterId, 10);
+        const after = Number.isFinite(afterRaw) && afterRaw > 0 ? afterRaw : null;
+        const lim = Math.min(Math.max(parseInt(limit, 10) || 200, 10), 200);
+        const msgs = await pool.query(
+          `SELECT * FROM (
+             SELECT m.*,
+                    COALESCE((SELECT json_agg(r.*) FROM message_reactions r
+                              WHERE r.message_id = m.id), '[]') AS reactions
+             FROM messages m
+             WHERE m.conversation_id = $1
+               AND m.is_deleted_for_everyone = FALSE
+               AND ($2::int IS NULL OR m.id > $2)
+             ORDER BY m.id ASC
+             LIMIT $3
+           ) sub
+           ORDER BY id ASC`,
+          [convo.id, after, lim]
+        );
+        const sent = msgs.rows;
+        callback({ ok: true, messages: sent, hasMore: sent.length >= lim, afterId: after });
+      } catch (e) {
+        console.error('messages:after error', e);
+        callback({ error: e.message });
+      }
+    });
+
     socket.on('message:send', async (data, callback = () => {}) => {
       try {
         const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0, clientId = null } = data;
@@ -665,64 +808,61 @@ io.on('connection', async (socket) => {
         });
 
         // Chat routing is driven by the receiver's EXPLICIT app state (reported via
-        // app:foreground / app:background socket events), never by socket presence alone:
+        // app:foreground / app:background socket events), never by socket presence alone.
+        // With multi-device support the decision is PER DEVICE:
         //   foreground + socket        -> live chat UI is on screen: Socket.IO only (no popup)
         //   minimized (socket alive)   -> app backgrounded: real FCM popup (notification+data)
         //   terminated / offline       -> no socket at all: real FCM popup rendered natively
-        // A minimized-but-connected client was previously treated as "online" and silently
+        // A minimized-but-connected device was previously treated as "online" and silently
         // missed every chat message. The socket delivery below still runs for backgrounded
-        // clients so the message persists when the UI returns (deduped by id on receipt).
+        // devices so the message persists when the UI returns (deduped by id on receipt).
         const receiverHasSocket = userSockets(otherUserId).size > 0;
-        const receiverForeground = isUserForeground(otherUserId);
-        const needsFcmPopup = !receiverHasSocket || !receiverForeground;
-
-        if (needsFcmPopup) {
-          const msgPreview = String(content || '')
-            || (type === 'VOICE' ? 'Voice message'
-              : type === 'IMAGE' ? 'Photo'
-              : type === 'VIDEO' ? 'Video'
-              : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
-              : '');
-          try {
-            const tokensRes = await pool.query(
-              `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-              [otherUserId]
-            );
-            const tokens = tokensRes.rows.map((r) => r.fcm_token);
-            if (tokens.length) {
-              // notification+data: when the process is backgrounded or dead, Android's FCM
-              // client renders the tray popup itself (no dependence on JS waking up), and the
-              // `data` payload carries the ids the app needs to open the exact conversation
-              // on tap. `body` stays as the raw content so a foreground data handler (race
-              // only) can render without the auto-tray duplicate.
-              const push = await sendPush({
-                tokens,
-                notification: {
-                  title: `${dbUser.displayName || dbUser.username} • Tojey`,
-                  body: msgPreview,
-                },
-                data: {
-                  type: 'tojey_chat',
-                  conversationId: String(convo.id),
-                  messageId: String(message.id),
-                  senderId: String(dbUser.userId),
-                  senderUsername: dbUser.username,
-                  senderName: dbUser.displayName || dbUser.username,
-                  senderPic: dbProfilePic || '',
-                  receiverId: String(otherUserId),
-                  msgType: String(type),
-                  msgPreview,
-                  body: String(content || ''),
-                },
-              });
-              console.log(`[FCM] chat push to user ${otherUserId}: state=${receiverHasSocket ? 'background' : 'offline'} tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-              if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-            }
-          } catch (pushErr) {
-            console.error('[FCM] chat push failed:', pushErr.message);
+        const socketOnly = receiverHasSocket && isUserForeground(otherUserId);
+        try {
+          const tokensRes = await pool.query(
+            `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+            [otherUserId]
+          );
+          const { tokens, phoneForeground, legacySkip } = tokensNeedingFcm(tokensRes.rows, otherUserId, receiverHasSocket);
+          if (tokens.length) {
+            const msgPreview = String(content || '')
+              || (type === 'VOICE' ? 'Voice message'
+                : type === 'IMAGE' ? 'Photo'
+                : type === 'VIDEO' ? 'Video'
+                : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
+                : '');
+            // notification+data: when the process is backgrounded or dead, Android's FCM
+            // client renders the tray popup itself (no dependence on JS waking up), and the
+            // `data` payload carries the ids the app needs to open the exact conversation
+            // on tap. `body` stays as the raw content so a foreground data handler (race
+            // only) can render without the auto-tray duplicate.
+            const push = await sendPush({
+              tokens,
+              notification: {
+                title: `${dbUser.displayName || dbUser.username} • Tojey`,
+                body: msgPreview,
+              },
+              data: {
+                type: 'tojey_chat',
+                conversationId: String(convo.id),
+                messageId: String(message.id),
+                senderId: String(dbUser.userId),
+                senderUsername: dbUser.username,
+                senderName: dbUser.displayName || dbUser.username,
+                senderPic: dbProfilePic || '',
+                receiverId: String(otherUserId),
+                msgType: String(type),
+                msgPreview,
+                body: String(content || ''),
+              },
+            });
+            console.log(`[FCM] chat push to user ${otherUserId}: devices=${tokens.length} fg-skipped=${phoneForeground} legacy-skipped=${legacySkip} invalid=${push.invalidTokens.length} success=${push.success}`);
+            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+          } else {
+            console.log(`[DELIVERY] chat to user ${otherUserId}: no FCM needed (fg-phones=${phoneForeground} legacy-skipped=${legacySkip}) socketOnly=${socketOnly}`);
           }
-        } else {
-          console.log(`[DELIVERY] chat to user ${otherUserId}: foreground+socket via Socket.IO only`);
+        } catch (pushErr) {
+          console.error('[FCM] chat push failed:', pushErr.message);
         }
 
         if (receiverHasSocket) {
@@ -787,18 +927,24 @@ io.on('connection', async (socket) => {
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
 
       // Only recipients who are online AND on-screen get the socket nudge alone.
-      // Backgrounded/offline users get a real FCM notification (with vibration).
+      // Backgrounded/offline devices get a real FCM notification (with vibration).
       const hasSocket = userSockets(otherUserId).size > 0;
-      const receiverForeground = isUserForeground(otherUserId);
-      if (hasSocket && receiverForeground) return;
+      if (hasSocket && isUserForeground(otherUserId)) return;
 
       try {
         const tokensRes = await pool.query(
-          `SELECT fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+          `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
           [otherUserId]
         );
-        const tokens = tokensRes.rows.map((r) => r.fcm_token);
+        const { tokens } = tokensNeedingFcm(tokensRes.rows, otherUserId, hasSocket);
         if (!tokens.length) return;
+        // Carry the conversation id (if one exists) so tapping the nudge notification
+        // can open the exact chat instead of falling back to the sender.
+        const convo = (await pool.query(
+          `SELECT id FROM conversations
+           WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
+          [dbUser.userId, otherUserId]
+        )).rows[0];
         const banner = '👋 nudged you!';
         const push = await sendPush({
           tokens,
@@ -816,12 +962,13 @@ io.on('connection', async (socket) => {
             senderName: dbUser.displayName || dbUser.username,
             senderPic: dbUser.profile_pic_url || '',
             receiverId: String(otherUserId),
+            conversationId: convo ? String(convo.id) : undefined,
             title: dbUser.displayName || dbUser.username,
             body: banner,
             nudge: '1',
           },
         });
-        console.log(`[FCM] nudge push for offline user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+        console.log(`[FCM] nudge push for user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
         if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
       } catch (pushErr) {
         console.error('[FCM] nudge push failed:', pushErr.message);
@@ -1048,6 +1195,7 @@ io.on('connection', async (socket) => {
     });
 
     socket.on('disconnect', async () => {
+      removeDeviceSocket(socket.id);
       const wasTracked = userSockets(dbUser.userId).has(socket.id);
       const nowOffline = removeSocket(dbUser.userId, socket.id);
 
