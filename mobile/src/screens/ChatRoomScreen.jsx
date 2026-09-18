@@ -32,7 +32,7 @@ import {
   setVideoEnabled, startScreenShare, stopScreenShare, getScreenStream,
 } from '../services/videoCall';
 import VideoCallView from '../components/VideoCallView';
-import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing } from '../services/cache';
+import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing, flushAllOutgoingQueues } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
 import {
@@ -444,8 +444,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // ---------------------------------------------------------------------------
   const knownIdsRef = useRef(null);        // Set<number> of known server ids (O(1) dedup)
   const lastSyncedIdRef = useRef(null);    // incremental sync cursor (max server id seen)
-  const messagesRef2 = useRef([]);         // latest committed list (persist on unmount)
-  const persistTimerRef = useRef(null);
 
   const trackIds = (list) => {
     const set = new Set();
@@ -583,6 +581,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         scrolledToEndOnMount.current = true;
         scrollToLatestInstant();
       }
+      // Flush any pending outgoing messages for ALL conversations on initial connect
+      if (currentUser?.id && socket?.connected) {
+        flushAllOutgoingQueues(currentUser.id, socket, currentUser.id);
+      }
       syncAfterCursor(lastSyncedIdRef.current);
     });
 
@@ -685,51 +687,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     socket.on('presence:update', hPresence);
 
-    // Re-emit conversation:open on socket reconnect to ensure message sync, and
-    // drain any offline-queued outgoing messages (in order, idempotently).
-    const flushOutgoingQueue = async () => {
-      if (!socket || !currentUser?.id || !otherUserId) return;
-      try {
-        const queued = await loadOutgoingQueue(currentUser.id);
-        for (const item of queued) {
-          if (!item || typeof item.clientId !== 'string' || !item.otherId) continue;
-          if (String(item.otherId) !== String(otherUserId)) continue;
-          if (!socket.connected) break; // went offline again mid-flush
-          try {
-            await new Promise((resolve) => {
-              socket.emit('message:send', {
-                otherUserId,
-                type: item.type || 'TEXT',
-                content: item.content || '',
-                replyTo: item.replyTo || null,
-                clientId: item.clientId,
-              }, (ack) => {
-                if (ack && ack.ok) {
-                  // Reliable replace: the pending temp row uses id == clientId.
-                  setMessages((prev) => {
-                    const hasTemp = prev.some((m) => m.id === item.clientId);
-                    if (!hasTemp) return prev;
-                    return prev.map((m) => (m.id === item.clientId ? ack.message : m));
-                  });
-                  addKnownId(ack.message && ack.message.id);
-                  bumpCursor(ack.message && ack.message.id);
-                  pendingScrollToBottomRef.current = true;
-                  scrollToLatestInstant();
-                  dequeueOutgoing(currentUser.id, item.clientId);
-                }
-                resolve();
-              });
-            });
-          } catch (e2) {
-            // keep the item queued; retried on the next reconnect
-          }
-        }
-      } catch (e) {
-        console.warn('flushOutgoingQueue failed:', e);
-      }
-    };
     const onReconnect = () => {
-      if (socket && otherUserId) {
+      if (socket && otherUserId && currentUser?.id) {
         // Incremental: only refetch what the cache is missing. If we never synced a
         // cursor, fall back to the full snapshot.
         const cursor = lastSyncedIdRef.current;
@@ -746,12 +705,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           socket.emit('conversation:open', { otherUserId });
         }
       }
-      flushOutgoingQueue();
+      if (currentUser?.id) flushAllOutgoingQueues(currentUser.id, socket, currentUser.id);
     };
     socket.on('connect', onReconnect);
     socket.io?.off('reconnect', onReconnect);
     socket.io?.on('reconnect', onReconnect);
-    if (socket.connected) flushOutgoingQueue();
+    if (socket.connected && currentUser?.id) flushAllOutgoingQueues(currentUser.id, socket, currentUser.id);
 
     return () => {
       cancelled = true;
@@ -772,27 +731,22 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
   }, [socket, otherUserId, currentUser.id]);
 
-  // Layer 1 persistence - debounced so a burst of socket events writes the cache once
-  // instead of serializing the whole list each time. Flushed synchronously on unmount.
+  // Single efficient persistence: only write when meaningful state changes
+  // (status, reactions, edits, upload progress). Skip frequent _uploadProgress ticks.
+  const persistSigRef = useRef('');
   useEffect(() => {
-    if (!currentUser?.id || !otherUserId) return undefined;
-    messagesRef2.current = messages;
-    clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = setTimeout(() => {
-      saveMessages(currentUser.id, otherUserId, messagesRef2.current);
-    }, 400);
-    return () => clearTimeout(persistTimerRef.current);
-  }, [messages, currentUser, otherUserId]);
-
-  useEffect(() => {
-    return () => {
-      clearTimeout(persistTimerRef.current);
-      if (currentUser?.id && otherUserId) {
-        saveMessages(currentUser.id, otherUserId, messagesRef2.current);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!currentUser?.id || !otherUserId || !messages.length) return;
+    // Only the newest 200 affect the signature: pagination keeps growing the array
+    // and a full-text signature of thousands of messages is wasteful.
+    const tail = messages.slice(-200);
+    const sig = tail
+      .map((m) => [m.id, m.status, m._uploadError ? 1 : 0, m._uploadProgress != null ? Math.round(m._uploadProgress * 40) : 0, m.is_edited ? 1 : 0, m.is_deleted_for_everyone ? 1 : 0].join('|'))
+      .join(';');
+    if (sig === persistSigRef.current) return;
+    persistSigRef.current = sig;
+    const t = setTimeout(() => saveMessages(currentUser.id, otherUserId, messages), 300);
+    return () => clearTimeout(t);
+  }, [messages, otherUserId, currentUser.id]);
 
   // Chat Head: show a floating bubble of the other person while the app is in the
   // background (only when enabled in Settings and overlay permission granted).
@@ -1077,24 +1031,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }
     };
   }, [socket]);
-
-  // Persist messages to offline cache whenever meaningful state changes.
-  // Upload progress (_uploadProgress) ticks ~8x/sec; skip those to avoid
-  // constant AsyncStorage churn and app-jank while media is sending.
-  const persistSigRef = useRef('');
-  useEffect(() => {
-    if (!currentUser?.id || !otherUserId || !messages.length) return;
-    // Only the newest 200 affect the signature: pagination keeps growing the array
-    // and a full-text signature of thousands of messages is wasteful.
-    const tail = messages.slice(-200);
-    const sig = tail
-      .map((m) => [m.id, m.status, m._uploadError ? 1 : 0, m._uploadProgress != null ? Math.round(m._uploadProgress * 40) : 0, m.is_edited ? 1 : 0, m.is_deleted_for_everyone ? 1 : 0].join('|'))
-      .join(';');
-    if (sig === persistSigRef.current) return;
-    persistSigRef.current = sig;
-    const t = setTimeout(() => saveMessages(currentUser.id, otherUserId, messages), 300);
-    return () => clearTimeout(t);
-  }, [messages, otherUserId, currentUser.id]);
 
   // Ref mirror of the unread count so scroll handlers clear it without re-renders.
   useEffect(() => { pendingCountRef.current = pendingCount; }, [pendingCount]);
