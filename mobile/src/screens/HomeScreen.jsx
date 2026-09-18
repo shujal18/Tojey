@@ -168,6 +168,8 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
     setNotifResult(null);
     try {
       const conv = conversations.find((c) => c.other && c.other.id === notifTarget.id);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(`${SERVER_URL}/api/notifications/send`, {
         method: 'POST',
         headers: {
@@ -179,7 +181,9 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
           message: msg,
           conversationId: (conv && conv.conversationId) || null,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       let data = null;
       try {
         data = await res.json();
@@ -192,11 +196,15 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       }
       if (data && data.status === 'failed') {
         const offline = !notifTarget.online && notifTarget.online !== undefined;
-        setNotifResult({
-          error: offline
-            ? `${notifTarget.display_name || notifTarget.username} is offline and has no push token yet — the notification is saved but FCM delivery needs Firebase set up (google-services.json).`
-            : (data.note || 'Delivery failed — receiver has no device registered for push.'),
-        });
+        let errorMsg = data.note || 'Delivery failed';
+        if (data.fcmNote === 'fcm-unconfigured') {
+          errorMsg = 'Notification saved but push is disabled on the server. Configure FIREBASE_SERVICE_ACCOUNT_B64 (or FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY) in the Render backend environment to enable FCM.';
+        } else if (data.fcmNote === 'fcm-rejected') {
+          errorMsg = 'FCM rejected the token(s). The receiver may need to reinstall the app to get a fresh push token.';
+        } else if (offline && !data.fcmNote) {
+          errorMsg = `${notifTarget.display_name || notifTarget.username} is offline and has no active push token registered.`;
+        }
+        setNotifResult({ error: errorMsg });
         return;
       }
       if (!data || !data.ok) {
@@ -212,7 +220,11 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       }, 1600);
     } catch (e) {
       console.error('sendNotification failed:', e);
-      setNotifResult({ error: 'Cannot reach server — check your internet connection' });
+      if (e.name === 'AbortError') {
+        setNotifResult({ error: 'Request timed out — check your internet connection' });
+      } else {
+        setNotifResult({ error: 'Cannot reach server — check your internet connection' });
+      }
     } finally {
       setNotifSending(false);
     }

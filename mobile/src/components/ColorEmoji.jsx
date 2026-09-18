@@ -166,8 +166,12 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
   let emojiPx = Math.round(fontSize * 1.08);
   if (lineHeight > 0 && emojiPx > lineHeight) emojiPx = Math.max(1, Math.round(lineHeight * 0.96));
   const fallbackStyle = [baseNoColor, { fontFamily: EMOJI_FONT, fontWeight: '400' }];
+  // Ensure the text container has enough line height to fit emoji images without clipping.
+  // Add a small padding to the calculated emoji size to prevent bottom cut-off.
+  const effectiveLineHeight = lineHeight > 0 ? lineHeight : Math.max(emojiPx + 2, Math.round(fontSize * 1.3));
+  const textStyle = color != null ? baseNoColor : base;
   return (
-    <Text style={color != null ? baseNoColor : base} numberOfLines={numberOfLines} {...rest}>
+    <Text style={[{ ...textStyle, lineHeight: effectiveLineHeight, includeFontPadding: true }]} numberOfLines={numberOfLines} {...rest}>
       {runs.map((r, i) =>
         r.emoji
           ? splitEmoji(r.text).map((cluster, j) =>
@@ -194,15 +198,16 @@ export function EmojiOnlyView({ children, size }) {
     }
   }
   return (
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center' }}>
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', minHeight: size }}>
       {clusters.map((c, i) => (
-        <EmojiImg
-          key={`${i}-${c}`}
-          cluster={c}
-          size={size}
-          fallbackStyle={{ fontFamily: EMOJI_FONT, color: '#fff', fontWeight: '400' }}
-          candidates={emojiCandidates(c)}
-        />
+        <View key={`${i}-${c}`} style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+          <EmojiImg
+            cluster={c}
+            size={size}
+            fallbackStyle={{ fontFamily: EMOJI_FONT, color: '#fff', fontWeight: '400' }}
+            candidates={emojiCandidates(c)}
+          />
+        </View>
       ))}
     </View>
   );

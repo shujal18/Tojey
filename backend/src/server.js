@@ -53,6 +53,26 @@ const io = new Server(server, {
 
 app.get('/', (req, res) => res.json({ app: 'Tojey', status: 'running' }));
 
+// Startup FCM diagnostics - runs after initDB() so we can see config state
+function logFcmStartupStatus() {
+  const hasB64 = !!process.env.FIREBASE_SERVICE_ACCOUNT_B64;
+  const hasParts = !!(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
+  if (hasB64 || hasParts) {
+    try {
+      const creds = hasB64
+        ? JSON.parse(Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8'))
+        : { project_id: process.env.FIREBASE_PROJECT_ID };
+      console.log(`[FCM] Firebase Admin ENABLED for project: ${creds.project_id || creds.projectId || 'unknown'}`);
+    } catch (e) {
+      console.log('[FCM] Firebase Admin ENABLED (project ID not parseable from env)');
+    }
+  } else {
+    console.log('[FCM] Firebase Admin DISABLED - no server-side credentials configured');
+    console.log('[FCM] Missing Render env vars: FIREBASE_SERVICE_ACCOUNT_B64 (preferred) OR FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY');
+    console.log('[FCM] Android google-services.json cannot replace server credentials');
+  }
+}
+
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   const user = authenticate(username, password);
@@ -337,7 +357,7 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
         `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
         [notif.id]
       )).rows[0];
-      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token' });
+      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token', fcmNote: 'no-token' });
     }
 
     const push = await sendPush({
@@ -382,6 +402,7 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       deliveryMethod: online ? 'socket' : 'fcm',
       status: updated.status,
       note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
+      fcmNote: push.note, // 'fcm-unconfigured', 'fcm-rejected', 'fcm-error' - helps client distinguish failure type
     });
   } catch (e) {
     console.error('notifications:send error', e.message);
@@ -389,17 +410,45 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/profile', authMiddleware, async (req, res) => {
+app.get('/api/fcm/status', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, username, display_name, bio, profile_pic_url FROM users WHERE username = $1`,
-      [req.user.username]
+    const user = (await pool.query('SELECT id, username FROM users WHERE username = $1', [req.user.username])).rows[0];
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const adminEnabled = fcmEnabled();
+    const projectId = adminEnabled ? (() => {
+      try {
+        if (process.env.FIREBASE_SERVICE_ACCOUNT_B64) {
+          return JSON.parse(Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8')).project_id;
+        }
+        return process.env.FIREBASE_PROJECT_ID;
+      } catch (e) { return 'unknown'; }
+    })() : null;
+
+    const tokensRes = await pool.query(
+      `SELECT fcm_token, device_id, is_active, updated_at
+       FROM device_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 10`,
+      [user.id]
     );
-    const u = result.rows[0];
-    if (!u) return res.status(404).json({ error: 'User not found' });
-    res.json({ id: u.id, username: u.username, displayName: u.display_name, bio: u.bio, profilePic: u.profile_pic_url });
+
+    const activeTokens = tokensRes.rows.filter(r => r.is_active);
+    const userTokens = tokensRes.rows.map(r => ({
+      deviceId: r.device_id || 'legacy',
+      active: r.is_active,
+      tokenMasked: r.fcm_token ? (r.fcm_token.length > 12 ? r.fcm_token.slice(0, 8) + '…' + r.fcm_token.slice(-4) : '***') : null,
+      updatedAt: r.updated_at,
+    }));
+
+    res.json({
+      firebaseAdmin: adminEnabled ? 'ENABLED' : 'DISABLED',
+      firebaseProjectId: projectId,
+      totalActiveTokens: activeTokens.length,
+      tokens: userTokens,
+      note: adminEnabled ? 'FCM is configured. Test push with /api/devices/tokens/sendtest' : 'Set FIREBASE_SERVICE_ACCOUNT_B64 (or FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY) in Render env vars to enable FCM. Android google-services.json does NOT configure the backend.',
+    });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('fcm:status error', e.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1266,10 +1315,10 @@ if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
 }
 
 initDB().then(() => {
+  logFcmStartupStatus();
   const PORT = process.env.PORT || 5000;
   server.listen(PORT, () => {
     console.log(`🟣 Tojey backend running on port ${PORT}`);
-    console.log(`[FCM] firebase-admin ${fcmEnabled() ? 'ENABLED' : 'DISABLED'} (set FIREBASE_SERVICE_ACCOUNT_B64 to enable push)`);
   });
 }).catch(err => {
   console.error('Failed to init DB:', err);

@@ -492,6 +492,13 @@ export function onNotificationOpened(cb) {
 export function registerBackgroundHandler() {
   try {
     messaging().setBackgroundMessageHandler(async (remoteMessage) => {
+      console.log('[FCM] background handler invoked:', JSON.stringify({
+        hasNotification: !!remoteMessage?.notification,
+        hasData: !!remoteMessage?.data,
+        dataKeys: remoteMessage?.data ? Object.keys(remoteMessage.data) : [],
+        messageId: remoteMessage?.messageId,
+        type: remoteMessage?.data?.type,
+      }));
       // If the message already carries a `notification` payload, Android already
       // rendered it in the tray - creating another clone here would duplicate it.
       // The exception is a nudge: its tray entry has only generic vibration, so
