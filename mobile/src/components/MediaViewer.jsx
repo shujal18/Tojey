@@ -502,12 +502,6 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     return <ZoomableImage uri={uri} onExternal={onExternalImage ? () => onExternalImage(m) : null} />;
   }, [videoErrors, videoLoading, activeVideoId, videoPlay, drawMode, item, strokes, playExternal, onExternalImage]);
 
-  const onViewableItemsChanged = useRef(({ viewableItems }) => {
-    if (viewableItems && viewableItems.length) {
-      setIndex(viewableItems[0].index);
-    }
-  }).current;
-
   const doReact = (r) => {
     if (onReact && item) onReact(item.id, r);
     setShowMenu(false);
@@ -593,8 +587,11 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           pagingEnabled
           scrollEnabled={!drawMode}
           showsHorizontalScrollIndicator={false}
-          onViewableItemsChanged={onViewableItemsChanged}
-          viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
+          viewabilityConfigCallbackPairs={[{ viewabilityConfig: { itemVisiblePercentThreshold: 60 }, onViewableItemsChanged: ({ viewableItems }) => {
+            if (viewableItems && viewableItems.length) {
+              setIndex(viewableItems[0].index);
+            }
+          }}]}
           initialScrollIndex={startIndex}
           getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
           renderItem={renderItem}

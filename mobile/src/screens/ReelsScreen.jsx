@@ -12,7 +12,7 @@ import {
   RefreshControl,
   AppState,
 } from 'react-native';
-import Video from 'react-native-video';
+import { WebView } from 'react-native-webview';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
@@ -160,7 +160,7 @@ export default function ReelsScreen({ token, user }) {
   const onVideoRef = useCallback((index, ref) => {
     videoPlayersRef.current[index] = ref;
     if (prefetchedRef.current.has(index) && ref) {
-      ref.load();
+      // WebView doesn't need explicit load for YouTube embed
     }
   }, []);
 
@@ -168,8 +168,12 @@ export default function ReelsScreen({ token, user }) {
     if (index === activeIndexRef.current && isMountedRef.current) {
       const player = videoPlayersRef.current[index];
       if (player) {
-        player.seek(0);
-        player.play();
+        player.injectJavaScript(`
+          if (window.ytPlayer) {
+            window.ytPlayer.seekTo(0);
+            window.ytPlayer.playVideo();
+          }
+        `);
       }
     }
   }, []);
@@ -188,7 +192,13 @@ export default function ReelsScreen({ token, user }) {
   const handleVideoLoad = useCallback((index) => {
     if (index === activeIndexRef.current && !userInteractedRef.current && appVisibleRef.current) {
       const player = videoPlayersRef.current[index];
-      if (player) player.play();
+      if (player) {
+        player.injectJavaScript(`
+          if (window.ytPlayer) {
+            window.ytPlayer.playVideo();
+          }
+        `);
+      }
     }
   }, []);
 
@@ -199,7 +209,13 @@ export default function ReelsScreen({ token, user }) {
   const onTouchEnd = useCallback((index) => {
     if (index === activeIndexRef.current) {
       const player = videoPlayersRef.current[index];
-      if (player) player.pause();
+      if (player) {
+        player.injectJavaScript(`
+          if (window.ytPlayer) {
+            window.ytPlayer.pauseVideo();
+          }
+        `);
+      }
       userInteractedRef.current = true;
     }
   }, []);
@@ -207,7 +223,13 @@ export default function ReelsScreen({ token, user }) {
   const onTouchEndResume = useCallback((index) => {
     if (index === activeIndexRef.current) {
       const player = videoPlayersRef.current[index];
-      if (player) player.play();
+      if (player) {
+        player.injectJavaScript(`
+          if (window.ytPlayer) {
+            window.ytPlayer.playVideo();
+          }
+        `);
+      }
       userInteractedRef.current = false;
     }
   }, []);
@@ -220,10 +242,22 @@ export default function ReelsScreen({ token, user }) {
       appVisibleRef.current = nextState === 'active';
       if (nextState === 'active') {
         const player = videoPlayersRef.current[activeIndexRef.current];
-        if (player) player.play();
+        if (player) {
+          player.injectJavaScript(`
+            if (window.ytPlayer) {
+              window.ytPlayer.playVideo();
+            }
+          `);
+        }
       } else {
         Object.values(videoPlayersRef.current).forEach(p => {
-          if (p) p.pause();
+          if (p) {
+            p.injectJavaScript(`
+              if (window.ytPlayer) {
+                window.ytPlayer.pauseVideo();
+              }
+            `);
+          }
         });
       }
     });
@@ -232,7 +266,15 @@ export default function ReelsScreen({ token, user }) {
       isMountedRef.current = false;
       subscription.remove();
       Object.values(videoPlayersRef.current).forEach(p => {
-        try { if (p) p.pause(); } catch (e) {}
+        try { 
+          if (p) {
+            p.injectJavaScript(`
+              if (window.ytPlayer) {
+                window.ytPlayer.pauseVideo();
+              }
+            `);
+          }
+        } catch (e) {}
       });
     };
   }, [category]);
@@ -309,35 +351,38 @@ export default function ReelsScreen({ token, user }) {
         decelerationRate="fast"
         disableIntervalMomentum
         showsVerticalScrollIndicator={false}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={{
-          itemVisiblePercentThreshold: 75,
-          minimumViewTime: 100,
-          waitForInteraction: true,
-        }}
-        viewabilityConfigCallbackPairs={[{ viewabilityConfig: { itemVisiblePercentThreshold: 75 }, onViewableItemsChanged }]}
+        viewabilityConfigCallbackPairs={[{ viewabilityConfig: { itemVisiblePercentThreshold: 75, minimumViewTime: 100, waitForInteraction: true }, onViewableItemsChanged }]}
         onScrollEndDrag={loadMore}
         onMomentumScrollEnd={loadMore}
         renderItem={({ item, index }) => (
           <View style={styles.videoContainer} onTouchStart={onTouchStart}>
-            <Video
+            <WebView
               ref={ref => onVideoRef(index, ref)}
-              source={{ uri: `https://www.youtube.com/watch?v=${item.videoId}` }}
+              source={{ uri: `https://www.youtube.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1` }}
               style={styles.video}
-              resizeMode="cover"
-              paused={index !== activeIndexRef.current || !appVisibleRef.current}
-              repeat={true}
-              muted={false}
-              volume={1.0}
-              rate={1.0}
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              mediaPlaybackRequiresUserAction={false}
+              allowsInlineMediaPlayback={true}
               onLoad={() => handleVideoLoad(index)}
-              onEnd={() => handleVideoEnd(index)}
               onError={() => handleVideoError(index)}
               onTouchStart={onTouchStart}
               onTouchEnd={() => onTouchEnd(index)}
               onTouchCancel={() => onTouchEnd(index)}
-              progressUpdateInterval={500}
-              useTextureView={true}
+              scrollEnabled={false}
+              injectedJavaScript={`
+                // Get reference to the YouTube iframe player API
+                var iframe = document.querySelector('iframe');
+                if (iframe && iframe.contentWindow) {
+                  window.ytPlayer = {
+                    playVideo: function() { iframe.contentWindow.postMessage('{"event":"command","func":"playVideo","args":""}', '*'); },
+                    pauseVideo: function() { iframe.contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":""}', '*'); },
+                    seekTo: function(seconds) { iframe.contentWindow.postMessage('{"event":"command","func":"seekTo","args":[' + seconds + ',true]}', '*'); },
+                    getDuration: function() { return 0; },
+                    getCurrentTime: function() { return 0; }
+                  };
+                }
+              `}
             />
             <View style={styles.overlay}>
               <View style={styles.infoRow}>

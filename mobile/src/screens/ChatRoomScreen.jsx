@@ -1890,18 +1890,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
-const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
-  const lastSeen = presence !== null ? presence.lastSeen : otherUserLastSeen;
-  const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
+const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
   const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
   const composerBg = hexToRgba(theme.composerBg, 0.94);
-  // Fully measured bottom stack: every bar below the list + the composer height.
-  // The scroll-to-latest FAB floats just above this stack so it never overlaps
-  // the composer/mic or hides the newest message.
-  const fabBottom =
-    (barHeights.rec || 0) + (barHeights.attach || 0)
-    + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0)
-    + (composerH || 54) + 8;
   // How much of the window the soft keyboard actually shrank the message area. When the
   // OEM honors adjustResize this equals the keyboard height (nothing extra is needed).
   // When it fails (ColorOS/OPPO) the message area keeps its full height and the keyboard
@@ -1913,7 +1904,9 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
   // keyboard adds NO padding here - bigger pads (stack + overlap) created a large empty
   // gap between the newest message and the composer when the keyboard was open. Exact
   // padding is used ONLY if the window failed to shrink (measured kbOverlap > 0).
-  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 12;
+  // When keyboard is closed, account for all bars below the list: composer + reply + attach + emoji + rec + edit bars
+  const barsStack = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 54);
+  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 8 + barsStack;
   bottomInsetRef.current = bottomPad;
 
   return (
@@ -2138,31 +2131,6 @@ const isOnline = presence !== null ? presence.isOnline : otherUserOnline;
         )}
       </View>
 
-      {!atBottomNear  && !recording && (
-        <TouchableOpacity
-          onPress={() => {
-            // FAB: instant jump to latest (never animated), reset badge + flags.
-            pendingScrollToBottomRef.current = true;
-            atBottomRef.current = true;
-            atBottomNearRef.current = true;
-            setAtBottomNear(true);
-            setPendingCount(0);
-            scrollToLatestInstant();
-          }}
-          style={[styles.fab, { backgroundColor: '#23292E', borderColor: 'rgba(255,255,255,0.10)', bottom: fabBottom }]}
-          accessibilityLabel="Scroll to latest message"
-        >
-          {pendingCount > 0 && (
-            <View style={[styles.fabBadge, { backgroundColor: theme.danger }]}>
-              <Text style={styles.fabBadgeText}>{pendingCount > 99 ? '99+' : pendingCount}</Text>
-            </View>
-          )}
-          <View style={styles.fabChevrons}>
-            <Icon name="chevron-down" size={15} color="#fff" style={{ marginBottom: -7 }} />
-            <Icon name="chevron-down" size={15} color="#fff" />
-          </View>
-        </TouchableOpacity>
-      )}
 
       {/* More emojis (reached via the + on the reaction bar). Reactions only. */}
       {reactionMenu && (
@@ -3125,10 +3093,7 @@ const styles = StyleSheet.create({
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
-  fab: { position: 'absolute', right: fs(16), width: fs(46), height: fs(46), borderRadius: fs(23), alignItems: 'center', justifyContent: 'center', elevation: 6, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, zIndex: 30 },
-  fabChevrons: { alignItems: 'center', justifyContent: 'center' },
-  fabBadge: { position: 'absolute', top: -4, right: -4, minWidth: fs(20), height: fs(20), borderRadius: fs(10), alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
-  fabBadgeText: { color: '#fff', fontSize: fs(11), fontWeight: '700' },
+  
   videoPlayWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 6, alignItems: 'center', justifyContent: 'center' },
   videoPlay: { width: fs(48), height: fs(48), borderRadius: fs(24), alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
   mediaError: { alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginBottom: 4 },
