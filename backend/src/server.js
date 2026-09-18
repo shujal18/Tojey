@@ -6,6 +6,7 @@ const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
 const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
+const { getFeed, clearOldCache } = require('./youtube');
 const path = require('path');
 const { upload } = require('./media');
 
@@ -448,6 +449,65 @@ app.get('/api/fcm/status', authMiddleware, async (req, res) => {
     });
   } catch (e) {
     console.error('fcm:status error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reels feed endpoint - returns short video metadata from YouTube via backend proxy
+app.get('/api/reels/feed', authMiddleware, async (req, res) => {
+  try {
+    const { category = 'trending', refresh = 'false' } = req.query;
+    const validCategories = [
+      'trending', 'love', 'comedy', 'funny', 'education',
+      'motivation', 'nepali', 'hindi', 'foreign', 'music', 'memes'
+    ];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
+    const forceRefresh = refresh === 'true';
+    const result = await getFeed(category, forceRefresh);
+    res.json({
+      videos: result.videos.map(v => ({
+        videoId: v.video_id || v.videoId,
+        title: v.title,
+        thumbnailUrl: v.thumbnail_url || v.thumbnailUrl,
+        durationSeconds: v.duration_seconds || v.durationSeconds,
+        category: v.category,
+        channelTitle: v.channel_title || v.channelTitle,
+        publishedAt: v.published_at || v.publishedAt,
+      })),
+      cached: result.cached,
+      category,
+    });
+  } catch (e) {
+    console.error('reels:feed error', e.message);
+    if (e.message.includes('YOUTUBE_API_KEY')) {
+      return res.status(503).json({ error: 'Reels service unavailable - API key not configured' });
+    }
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reels categories list endpoint
+app.get('/api/reels/categories', authMiddleware, async (req, res) => {
+  try {
+    const categories = [
+      { id: 'trending', label: 'Trending' },
+      { id: 'love', label: 'Love' },
+      { id: 'comedy', label: 'Comedy' },
+      { id: 'funny', label: 'Funny' },
+      { id: 'education', label: 'Education' },
+      { id: 'motivation', label: 'Motivation' },
+      { id: 'nepali', label: 'Nepali' },
+      { id: 'hindi', label: 'Hindi' },
+      { id: 'foreign', label: 'Foreign' },
+      { id: 'music', label: 'Music' },
+      { id: 'memes', label: 'Memes' },
+    ];
+    res.json({ categories });
+  } catch (e) {
+    console.error('reels:categories error', e.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

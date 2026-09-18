@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS stored_media (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS reels_cache (
+  id SERIAL PRIMARY KEY,
+  category VARCHAR(50) NOT NULL,
+  video_id VARCHAR(50) NOT NULL,
+  title TEXT NOT NULL,
+  thumbnail_url TEXT NOT NULL,
+  duration_seconds INTEGER NOT NULL,
+  channel_title TEXT,
+  published_at TIMESTAMPTZ,
+  fetched_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(category, video_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reels_cache_category ON reels_cache(category);
+CREATE INDEX IF NOT EXISTS idx_reels_cache_fetched ON reels_cache(fetched_at);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id);

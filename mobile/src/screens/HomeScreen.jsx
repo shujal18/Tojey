@@ -12,7 +12,7 @@ import { playNudgeVibration } from '../services/nudge';
 import { getNudgeVibrationEnabled } from '../services/chatHead';
 import { absUrl, SERVER_URL } from '../config';
 import { fs } from '../utils/size';
-import ContactsScreen from './ContactsScreen';
+import ReelsScreen from './ReelsScreen';
 
 export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
@@ -353,8 +353,8 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         </View>
       )}
 
-      {tab === 'contacts' && (
-        <ContactsScreen users={filtered} presence={presence} onOpenChat={openChat} theme={theme} />
+      {tab === 'reels' && (
+        <ReelsScreen token={token} user={user} />
       )}
 
       {/* Long-press actions: send notification / clear messages */}
@@ -457,7 +457,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
 
       <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
         <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
-        <TabBtn label="Contacts" active={tab === 'contacts'} onPress={() => setTab('contacts')} icon="people-outline" theme={theme} activeIcon="people" />
+        <TabBtn label="Reels" active={tab === 'reels'} onPress={() => setTab('reels')} icon="videocam-outline" theme={theme} activeIcon="videocam" />
         <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
       </View>
 
