@@ -22,7 +22,7 @@ import Toast from '../components/Toast';
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 // Injected JavaScript for YouTube iframe API - defined as constant to avoid JSX quoting issues
-const YOUTUBE_IFRAME_API_JS = "                // Initialize YouTube iframe API player\n                (function() {\n                  var tag = document.createElement('script');\n                  tag.src = \"https://www.youtube.com/iframe_api\";\n                  var firstScriptTag = document.getElementsByTagName('script')[0];\n                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);\n\n                  window.onYouTubeIframeAPIReady = function() {\n                    window.ytPlayer = new YT.Player('player', {\n                      events: {\n                        'onReady': function(event) {\n                          event.target.playVideo();\n                        },\n                        'onStateChange': function(event) {\n                          if (event.data === YT.PlayerState.ENDED) {\n                            event.target.seekTo(0);\n                            event.target.playVideo();\n                          }\n                        }\n                      }\n                    });\n                  };\n\n                  // Add player ID to iframe\n                  var iframe = document.getElementById('player');\n                  if (!iframe) {\n                    var iframes = document.getElementsByTagName('iframe');\n                    if (iframes.length > 0) {\n                      iframe = iframes[0];\n                      iframe.id = 'player';\n                    }\n                  }\n                })();\n              ";
+const YOUTUBE_IFRAME_API_JS = "                // Initialize YouTube iframe API player\n                (function() {\n                  var tag = document.createElement('script');\n                  tag.src = \"https://www.youtube.com/iframe_api\";\n                  var firstScriptTag = document.getElementsByTagName('script')[0];\n                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);\n\n                  window.onYouTubeIframeAPIReady = function() {\n                    // Find the iframe and ensure it has an ID\n                    var iframe = document.getElementById('tojey-youtube-player');\n                    if (!iframe) {\n                      var iframes = document.getElementsByTagName('iframe');\n                      if (iframes.length > 0) {\n                        iframe = iframes[0];\n                        iframe.id = 'tojey-youtube-player';\n                      }\n                    }\n                    if (iframe) {\n                      window.ytPlayer = new YT.Player(iframe, {\n                        events: {\n                          'onReady': function(event) {\n                            event.target.playVideo();\n                            // Notify React Native that player is ready\n                            window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');\n                          },\n                          'onStateChange': function(event) {\n                            if (event.data === YT.PlayerState.ENDED) {\n                              event.target.seekTo(0);\n                              event.target.playVideo();\n                            } else if (event.data === YT.PlayerState.ERROR) {\n                              // Report error to React Native\n                              window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: event.data}), '*');\n                            }\n                          }\n                        }\n                      }\n                    });\n                  };\n\n                  // Add player ID to iframe\n                  var iframe = document.getElementById('tojey-youtube-player');\n                  if (!iframe) {\n                    var iframes = document.getElementsByTagName('iframe');\n                    if (iframes.length > 0) {\n                      iframe = iframes[0];\n                      iframe.id = 'tojey-youtube-player';\n                    }\n                  }\n                })();\n              ";
 
 const CATEGORIES = [
   { id: 'trending', label: 'Trending' },
@@ -223,8 +223,22 @@ const handleCategoryChange = useCallback((cat) => {
     }
   }, []);
 
-  const handleVideoError = useCallback((index) => {
+  const handleVideoError = useCallback((event) => {
     if (index === activeIndexRef.current && isMountedRef.current) {
+      const errorCode = event?.nativeEvent?.errorCode;
+      const errorMessage = event?.nativeEvent?.errorMessage || 'Video unavailable';
+      
+      console.error('[Reels] Video error:', errorCode, errorMessage, 'videoId:', videos[index]?.videoId);
+      
+      // Handle YouTube specific error codes
+      if (errorCode === 153) {
+        // Error 153: Missing Referer/API client identity - this is what we're fixing
+        console.warn('[Reels] YouTube Error 153 - Missing Referer/API Client ID for video:', videos[index]?.videoId);
+      } else if (errorCode === 101 || errorCode === 150) {
+        // Error 101/150: Video unavailable/embedding disabled - skip gracefully
+        console.warn('[Reels] Video embedding disabled/unavailable:', videos[index]?.videoId);
+      }
+      
       setToast('Video unavailable, skipping...');
       setTimeout(() => {
         if (index < videos.length - 1 && flatListRef.current) {
@@ -233,6 +247,11 @@ const handleCategoryChange = useCallback((cat) => {
       }, 1000);
     }
   }, [videos.length]);
+
+  const handleVideoLoadStart = useCallback((index) => {
+    // Track video load start - useful for debugging
+    console.log('[Reels] Video load started for index:', index, 'videoId:', videos[index]?.videoId);
+  }, [videos]);
 
   const handleVideoLoad = useCallback((index) => {
     if (index === activeIndexRef.current && !userInteractedRef.current && appVisibleRef.current) {
@@ -244,6 +263,24 @@ const handleCategoryChange = useCallback((cat) => {
           }
         `);
       }
+    }
+  }, []);
+
+  // Handle messages from WebView (YouTube iframe API)
+  const handleWebViewMessage = useCallback((event, index) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      
+      if (data.type === 'ytPlayerReady') {
+        console.log('[Reels] YouTube player ready for index:', index, 'videoId:', data.videoId);
+        // Player is ready, we can send commands now
+      } else if (data.type === 'ytPlayerError') {
+        console.error('[Reels] YouTube player error:', data.errorCode, 'for index:', index);
+        // Trigger error handling
+        handleVideoError(index, { nativeEvent: { errorCode: data.errorCode } });
+      }
+    } catch (e) {
+      // Ignore parsing errors
     }
   }, []);
 
@@ -403,14 +440,23 @@ const handleCategoryChange = useCallback((cat) => {
           <View style={styles.videoContainer} onTouchStart={onTouchStart}>
             <WebView
               ref={ref => onVideoRef(index, ref)}
-              source={{ uri: `https://www.youtube.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1` }}
+              source={{
+                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&origin=https://tojey.app`,
+                headers: {
+                  'Referer': 'https://tojey.app/',
+                }
+              }}
               style={styles.video}
               javaScriptEnabled={true}
               domStorageEnabled={true}
               mediaPlaybackRequiresUserAction={false}
               allowsInlineMediaPlayback={true}
+              mixedContentMode="always"
+              userAgent="Mozilla/5.0 (Linux; Android 10; Tojey) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
               onLoad={() => handleVideoLoad(index)}
-              onError={() => handleVideoError(index)}
+              onError={(event) => handleVideoError(index, event)}
+              onLoadStart={() => handleVideoLoadStart(index)}
+              onMessage={(event) => handleWebViewMessage(event, index)}
               onTouchStart={onTouchStart}
               onTouchEnd={() => onTouchEnd(index)}
               onTouchCancel={() => onTouchEnd(index)}
