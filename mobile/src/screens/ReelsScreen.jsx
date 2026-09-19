@@ -21,6 +21,9 @@ import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
+// Injected JavaScript for YouTube iframe API - defined as constant to avoid JSX quoting issues
+const YOUTUBE_IFRAME_API_JS = "                // Initialize YouTube iframe API player\n                (function() {\n                  var tag = document.createElement('script');\n                  tag.src = \"https://www.youtube.com/iframe_api\";\n                  var firstScriptTag = document.getElementsByTagName('script')[0];\n                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);\n\n                  window.onYouTubeIframeAPIReady = function() {\n                    window.ytPlayer = new YT.Player('player', {\n                      events: {\n                        'onReady': function(event) {\n                          event.target.playVideo();\n                        },\n                        'onStateChange': function(event) {\n                          if (event.data === YT.PlayerState.ENDED) {\n                            event.target.seekTo(0);\n                            event.target.playVideo();\n                          }\n                        }\n                      }\n                    });\n                  };\n\n                  // Add player ID to iframe\n                  var iframe = document.getElementById('player');\n                  if (!iframe) {\n                    var iframes = document.getElementsByTagName('iframe');\n                    if (iframes.length > 0) {\n                      iframe = iframes[0];\n                      iframe.id = 'player';\n                    }\n                  }\n                })();\n              ";
+
 const CATEGORIES = [
   { id: 'trending', label: 'Trending' },
   { id: 'love', label: 'Love' },
@@ -211,7 +214,7 @@ const handleCategoryChange = useCallback((cat) => {
       const player = videoPlayersRef.current[index];
       if (player) {
         player.injectJavaScript(`
-          if (window.ytPlayer) {
+          if (window.ytPlayer && typeof window.ytPlayer.seekTo === 'function') {
             window.ytPlayer.seekTo(0);
             window.ytPlayer.playVideo();
           }
@@ -236,7 +239,7 @@ const handleCategoryChange = useCallback((cat) => {
       const player = videoPlayersRef.current[index];
       if (player) {
         player.injectJavaScript(`
-          if (window.ytPlayer) {
+          if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
             window.ytPlayer.playVideo();
           }
         `);
@@ -253,7 +256,7 @@ const handleCategoryChange = useCallback((cat) => {
       const player = videoPlayersRef.current[index];
       if (player) {
         player.injectJavaScript(`
-          if (window.ytPlayer) {
+          if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
             window.ytPlayer.pauseVideo();
           }
         `);
@@ -267,7 +270,7 @@ const handleCategoryChange = useCallback((cat) => {
       const player = videoPlayersRef.current[index];
       if (player) {
         player.injectJavaScript(`
-          if (window.ytPlayer) {
+          if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
             window.ytPlayer.playVideo();
           }
         `);
@@ -286,7 +289,7 @@ const handleCategoryChange = useCallback((cat) => {
         const player = videoPlayersRef.current[activeIndexRef.current];
         if (player) {
           player.injectJavaScript(`
-            if (window.ytPlayer) {
+            if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
               window.ytPlayer.playVideo();
             }
           `);
@@ -295,7 +298,7 @@ const handleCategoryChange = useCallback((cat) => {
         Object.values(videoPlayersRef.current).forEach(p => {
           if (p) {
             p.injectJavaScript(`
-              if (window.ytPlayer) {
+              if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
                 window.ytPlayer.pauseVideo();
               }
             `);
@@ -400,7 +403,7 @@ const handleCategoryChange = useCallback((cat) => {
           <View style={styles.videoContainer} onTouchStart={onTouchStart}>
             <WebView
               ref={ref => onVideoRef(index, ref)}
-              source={{ uri: `https://www.youtube.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1` }}
+              source={{ uri: `https://www.youtube.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1` }}
               style={styles.video}
               javaScriptEnabled={true}
               domStorageEnabled={true}
@@ -412,19 +415,7 @@ const handleCategoryChange = useCallback((cat) => {
               onTouchEnd={() => onTouchEnd(index)}
               onTouchCancel={() => onTouchEnd(index)}
               scrollEnabled={false}
-              injectedJavaScript={`
-                // Get reference to the YouTube iframe player API
-                var iframe = document.querySelector('iframe');
-                if (iframe && iframe.contentWindow) {
-                  window.ytPlayer = {
-                    playVideo: function() { iframe.contentWindow.postMessage('{"event":"command","func":"playVideo","args":""}', '*'); },
-                    pauseVideo: function() { iframe.contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":""}', '*'); },
-                    seekTo: function(seconds) { iframe.contentWindow.postMessage('{"event":"command","func":"seekTo","args":[' + seconds + ',true]}', '*'); },
-                    getDuration: function() { return 0; },
-                    getCurrentTime: function() { return 0; }
-                  };
-                }
-              `}
+              injectedJavaScript={YOUTUBE_IFRAME_API_JS}
             />
             <View style={styles.overlay}>
               <View style={styles.infoRow}>
