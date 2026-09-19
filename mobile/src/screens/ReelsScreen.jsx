@@ -103,8 +103,18 @@ export default function ReelsScreen({ token, user }) {
     }
   }, [authHeaders]);
 
-  const handleCategoryChange = useCallback((cat) => {
+const handleCategoryChange = useCallback((cat) => {
     if (cat === category) return;
+    
+    // Pause all current videos before switching category
+    const players = videoPlayersRef.current;
+    Object.keys(players).forEach(key => {
+      const p = players[key];
+      if (p) {
+        p.injectJavaScript("if (window.ytPlayer) { window.ytPlayer.pauseVideo(); }");
+      }
+    });
+    
     setCategory(cat);
     setVideos([]);
     fetchFeed(cat, false, false);
@@ -125,15 +135,25 @@ export default function ReelsScreen({ token, user }) {
 
       const newPlayer = videoPlayersRef.current[newIndex];
       if (newPlayer) {
-        newPlayer.seek(0);
-        newPlayer.play();
+        newPlayer.injectJavaScript(`
+          if (window.ytPlayer) {
+            window.ytPlayer.seekTo(0);
+            window.ytPlayer.playVideo();
+          }
+        `);
       }
 
       Object.keys(videoPlayersRef.current).forEach(key => {
         const idx = parseInt(key, 10);
         if (idx !== newIndex) {
           const player = videoPlayersRef.current[idx];
-          if (player) player.pause();
+          if (player) {
+            player.injectJavaScript(`
+              if (window.ytPlayer) {
+                window.ytPlayer.pauseVideo();
+              }
+            `);
+          }
         }
       });
 
@@ -143,12 +163,24 @@ export default function ReelsScreen({ token, user }) {
       if (nextIdx < videos.length && !prefetchedRef.current.has(nextIdx)) {
         prefetchedRef.current.add(nextIdx);
         const nextPlayer = videoPlayersRef.current[nextIdx];
-        if (nextPlayer) nextPlayer.load();
+        if (nextPlayer) {
+          nextPlayer.injectJavaScript(`
+            if (window.ytPlayer) {
+              window.ytPlayer.loadVideoById('');
+            }
+          `);
+        }
       }
       if (prevIdx >= 0 && !prefetchedRef.current.has(prevIdx)) {
         prefetchedRef.current.add(prevIdx);
         const prevPlayer = videoPlayersRef.current[prevIdx];
-        if (prevPlayer) prevPlayer.load();
+        if (prevPlayer) {
+          prevPlayer.injectJavaScript(`
+            if (window.ytPlayer) {
+              window.ytPlayer.loadVideoById('');
+            }
+          `);
+        }
       }
 
       if (nextIdx >= videos.length - 3) {
@@ -398,20 +430,6 @@ export default function ReelsScreen({ token, user }) {
                   </Text>
                 </View>
               </View>
-              <View style={styles.actions}>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => {}}>
-                  <Icon name="heart-outline" size={28} color="#fff" />
-                  <Text style={styles.actionLabel}>Like</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => {}}>
-                  <Icon name="chatbubble-outline" size={28} color="#fff" />
-                  <Text style={styles.actionLabel}>Comment</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => {}}>
-                  <Icon name="share-outline" size={28} color="#fff" />
-                  <Text style={styles.actionLabel}>Share</Text>
-                </TouchableOpacity>
-              </View>
             </View>
             <TouchableOpacity
               onPress={() => onTouchEndResume(index)}
@@ -496,18 +514,6 @@ const styles = StyleSheet.create({
   titleContainer: { flex: 1, marginTop: 2 },
   title: { color: '#fff', fontSize: fs(15), fontWeight: '600', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
   meta: { color: 'rgba(255,255,255,0.8)', fontSize: fs(12), marginTop: 2 },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    paddingBottom: 30,
-    paddingHorizontal: 20,
-  },
-  actionBtn: {
-    alignItems: 'center',
-    gap: 4,
-    opacity: 0.9,
-  },
-  actionLabel: { color: '#fff', fontSize: fs(11), fontWeight: '500' },
   separator: { height: 1, backgroundColor: 'rgba(255,255,255,0.05)' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
   emptyText: { fontSize: fs(15), marginTop: 12 },

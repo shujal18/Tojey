@@ -2129,8 +2129,6 @@ const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(
             />
           </View>
         )}
-      </View>
-
 
       {/* More emojis (reached via the + on the reaction bar). Reactions only. */}
       {reactionMenu && (
@@ -2354,6 +2352,7 @@ const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(
       )}
 
       <Toast message={nudgeToast} bottom={(barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 6} />
+    </View>
     </KeyboardAvoidingView>
   );
 }
