@@ -56,6 +56,16 @@ export default function ReelsScreen({ token, user }) {
   const appVisibleRef = useRef(true);
   const userInteractedRef = useRef(false);
 
+  // Stable viewability config to avoid "Changing viewabilityConfigCallbackPairs on the fly" error
+  const viewabilityConfigCallbackPairsRef = useRef([{
+    viewabilityConfig: {
+      itemVisiblePercentThreshold: 75,
+      minimumViewTime: 100,
+      waitForInteraction: true,
+    },
+    onViewableItemsChanged,
+  }]);
+
   const authHeaders = useMemo(() => ({
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token || ''}`,
@@ -383,7 +393,7 @@ const handleCategoryChange = useCallback((cat) => {
         decelerationRate="fast"
         disableIntervalMomentum
         showsVerticalScrollIndicator={false}
-        viewabilityConfigCallbackPairs={[{ viewabilityConfig: { itemVisiblePercentThreshold: 75, minimumViewTime: 100, waitForInteraction: true }, onViewableItemsChanged }]}
+        viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairsRef.current}
         onScrollEndDrag={loadMore}
         onMomentumScrollEnd={loadMore}
         renderItem={({ item, index }) => (

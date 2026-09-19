@@ -214,6 +214,16 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   const [drawingBusy, setDrawingBusy] = useState(false);
   const drawRef = useRef(null);
 
+  // Stable viewability config to avoid "Changing viewabilityConfigCallbackPairs on the fly" error
+  const viewabilityConfigCallbackPairsRef = useRef([{
+    viewabilityConfig: { itemVisiblePercentThreshold: 60 },
+    onViewableItemsChanged: ({ viewableItems }) => {
+      if (viewableItems && viewableItems.length) {
+        setIndex(viewableItems[0].index);
+      }
+    },
+  }]);
+
   const colorRef = useRef(color);
   const brushRef = useRef(brush);
   const drawModeRef = useRef(drawMode);
@@ -587,11 +597,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           pagingEnabled
           scrollEnabled={!drawMode}
           showsHorizontalScrollIndicator={false}
-          viewabilityConfigCallbackPairs={[{ viewabilityConfig: { itemVisiblePercentThreshold: 60 }, onViewableItemsChanged: ({ viewableItems }) => {
-            if (viewableItems && viewableItems.length) {
-              setIndex(viewableItems[0].index);
-            }
-          }}]}
+          viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairsRef.current}
           initialScrollIndex={startIndex}
           getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
           renderItem={renderItem}

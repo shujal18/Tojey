@@ -1890,7 +1890,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
-const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
+const isOnline = presence?.isOnline ?? false;
+  const lastSeen = presence?.lastSeen ?? null;
+  const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
   const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
   const composerBg = hexToRgba(theme.composerBg, 0.94);
   // How much of the window the soft keyboard actually shrank the message area. When the
