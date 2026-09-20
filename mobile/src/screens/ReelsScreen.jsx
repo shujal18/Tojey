@@ -6,77 +6,60 @@ import {
   FlatList,
   StyleSheet,
   Dimensions,
-  Platform,
-  Image,
   ActivityIndicator,
-  RefreshControl,
   AppState,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
-import { absUrl, SERVER_URL } from '../config';
+import { SERVER_URL } from '../config';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
-// Injected JavaScript for YouTube iframe API - defined as constant to avoid JSX quoting issues
 const YOUTUBE_IFRAME_API_JS = `
-                // Initialize YouTube iframe API player
-                (function() {
-                  var tag = document.createElement('script');
-                  tag.src = "https://www.youtube.com/iframe_api";
-                  var firstScriptTag = document.getElementsByTagName('script')[0];
-                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+  (function() {
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
 
-                  window.onYouTubeIframeAPIReady = function() {
-                    // Find the iframe and ensure it has an ID
-                    var iframe = document.getElementById('tojey-youtube-player');
-                    if (!iframe) {
-                      var iframes = document.getElementsByTagName('iframe');
-                      if (iframes.length > 0) {
-                        iframe = iframes[0];
-                        iframe.id = 'tojey-youtube-player';
-                      }
-                    }
-                    if (iframe) {
-                      window.ytPlayer = new YT.Player(iframe, {
-                        events: {
-                          'onReady': function(event) {
-                            event.target.playVideo();
-                            // Notify React Native that player is ready
-                            window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');
-                          },
-                          'onStateChange': function(event) {
-                            if (event.data === YT.PlayerState.ENDED) {
-                              event.target.seekTo(0);
-                              event.target.playVideo();
-                            } else if (event.data === YT.PlayerState.ERROR) {
-                              // Report error to React Native
-                              window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: event.data}), '*');
-                            } else if (event.data === YT.PlayerState.PLAYING) {
-                              window.postMessage(JSON.stringify({type: 'ytPlayerPlaying'}), '*');
-                            } else if (event.data === YT.PlayerState.BUFFERING) {
-                              window.postMessage(JSON.stringify({type: 'ytPlayerBuffering'}), '*');
-                            }
-                          }
-                        }
-                      });
-                    };
-
-                    // Add player ID to iframe
-                    var iframe = document.getElementById('tojey-youtube-player');
-                    if (!iframe) {
-                      var iframes = document.getElementsByTagName('iframe');
-                      if (iframes.length > 0) {
-                        iframe = iframes[0];
-                        iframe.id = 'tojey-youtube-player';
-                      }
-                    }
-                  };
-                })();
-              `;
+    window.onYouTubeIframeAPIReady = function() {
+      var iframe = document.getElementById('tojey-youtube-player');
+      if (!iframe) {
+        var iframes = document.getElementsByTagName('iframe');
+        if (iframes.length > 0) {
+          iframe = iframes[0];
+          iframe.id = 'tojey-youtube-player';
+        }
+      }
+      if (iframe && !window.ytPlayer) {
+        window.ytPlayer = new YT.Player(iframe, {
+          events: {
+            'onReady': function(event) {
+              window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');
+            },
+            'onStateChange': function(event) {
+              if (event.data === YT.PlayerState.ENDED) {
+                event.target.seekTo(0);
+                event.target.playVideo();
+              } else if (event.data === YT.PlayerState.PLAYING) {
+                window.postMessage(JSON.stringify({type: 'ytPlayerPlaying'}), '*');
+              } else if (event.data === YT.PlayerState.BUFFERING) {
+                window.postMessage(JSON.stringify({type: 'ytPlayerBuffering'}), '*');
+              }
+            },
+            'onError': function(event) {
+              var errorCode = event.data;
+              window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: errorCode}), '*');
+            }
+          }
+        });
+      }
+    };
+  })();
+`;
 
 const CATEGORIES = [
   { id: 'trending', label: 'Trending' },
@@ -93,7 +76,7 @@ const CATEGORIES = [
 ];
 
 const ITEM_HEIGHT = SCREEN_H;
-const PRELOAD_WINDOW = 2;
+const PERMANENT_YT_ERRORS = new Set([2, 5, 100, 101, 150, 153]);
 
 export default function ReelsScreen({ token, user }) {
   const { theme } = useTheme();
@@ -107,91 +90,23 @@ export default function ReelsScreen({ token, user }) {
   const flatListRef = useRef(null);
   const activeIndexRef = useRef(0);
   const videoPlayersRef = useRef({});
+  const playerReadyRef = useRef({});
   const isMountedRef = useRef(true);
-  const prefetchedRef = useRef(new Set());
+  const requestIdRef = useRef(0);
   const loadingPageRef = useRef(false);
   const appVisibleRef = useRef(true);
   const userInteractedRef = useRef(false);
+  const touchStartYRef = useRef(0);
+  const touchStartXRef = useRef(0);
+  const touchStartTimeRef = useRef(0);
+  const failedVideoIdsRef = useRef(new Set());
+  const pendingSkipRef = useRef(false);
 
-  // Stable viewability config to avoid "Changing viewabilityConfigCallbackPairs on the fly" error
-  const viewabilityConfigCallbackPairsRef = useRef([{
-    viewabilityConfig: {
-      itemVisiblePercentThreshold: 75,
-      minimumViewTime: 100,
-      waitForInteraction: true,
-    },
-    onViewableItemsChanged,
-  }]);
-
-  const authHeaders = useMemo(() => ({
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token || ''}`,
-  }), [token]);
-
-  const fetchFeed = useCallback(async (cat, isRefresh = false, append = false) => {
-    if (loadingPageRef.current) return;
-    loadingPageRef.current = true;
-
-    try {
-      if (!append) setLoading(true);
-      if (isRefresh) setRefreshing(true);
-      setError(null);
-
-      const res = await fetch(`${SERVER_URL}/api/reels/feed?category=${cat}&refresh=${isRefresh}`, {
-        headers: authHeaders,
-      });
-      const data = await res.json();
-
-      if (!isMountedRef.current) return;
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to load feed');
-      }
-
-      if (append) {
-        setVideos(prev => {
-          const existingIds = new Set(prev.map(v => v.videoId));
-          const newVideos = data.videos.filter(v => !existingIds.has(v.videoId));
-          return [...prev, ...newVideos];
-        });
-      } else {
-        setVideos(data.videos);
-      }
-    } catch (e) {
-      if (!isMountedRef.current) return;
-      setError(e.message);
-      setToast(e.message);
-    } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-        setRefreshing(false);
-        loadingPageRef.current = false;
-      }
-    }
-  }, [authHeaders]);
-
-const handleCategoryChange = useCallback((cat) => {
-    if (cat === category) return;
-    
-    // Pause all current videos before switching category
-    const players = videoPlayersRef.current;
-    Object.keys(players).forEach(key => {
-      const p = players[key];
-      if (p) {
-        p.injectJavaScript("if (window.ytPlayer) { window.ytPlayer.pauseVideo(); }");
-      }
-    });
-    
-    setCategory(cat);
-    setVideos([]);
-    fetchFeed(cat, false, false);
-  }, [category, fetchFeed]);
-
-  const loadMore = useCallback(() => {
-    if (videos.length && !loading && !loadingPageRef.current) {
-      fetchFeed(category, false, true);
-    }
-  }, [category, videos.length, loading, fetchFeed]);
+  const viewabilityConfig = useMemo(() => ({
+    itemVisiblePercentThreshold: 75,
+    minimumViewTime: 100,
+    waitForInteraction: true,
+  }), []);
 
   const onViewableItemsChanged = useCallback(({ viewableItems }) => {
     if (!viewableItems || !viewableItems.length) return;
@@ -199,11 +114,13 @@ const handleCategoryChange = useCallback((cat) => {
     if (newIndex !== activeIndexRef.current) {
       activeIndexRef.current = newIndex;
       userInteractedRef.current = false;
+      pendingSkipRef.current = false;
 
       const newPlayer = videoPlayersRef.current[newIndex];
-      if (newPlayer) {
+      const newPlayerReady = playerReadyRef.current[newIndex];
+      if (newPlayer && newPlayerReady) {
         newPlayer.injectJavaScript(`
-          if (window.ytPlayer) {
+          if (window.ytPlayer && typeof window.ytPlayer.seekTo === 'function' && typeof window.ytPlayer.playVideo === 'function') {
             window.ytPlayer.seekTo(0);
             window.ytPlayer.playVideo();
           }
@@ -216,7 +133,7 @@ const handleCategoryChange = useCallback((cat) => {
           const player = videoPlayersRef.current[idx];
           if (player) {
             player.injectJavaScript(`
-              if (window.ytPlayer) {
+              if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
                 window.ytPlayer.pauseVideo();
               }
             `);
@@ -225,130 +142,194 @@ const handleCategoryChange = useCallback((cat) => {
       });
 
       const nextIdx = newIndex + 1;
-      const prevIdx = newIndex - 1;
-
-      if (nextIdx < videos.length && !prefetchedRef.current.has(nextIdx)) {
-        prefetchedRef.current.add(nextIdx);
-        const nextPlayer = videoPlayersRef.current[nextIdx];
-        if (nextPlayer) {
-          nextPlayer.injectJavaScript(`
-            if (window.ytPlayer) {
-              window.ytPlayer.loadVideoById('');
-            }
-          `);
-        }
-      }
-      if (prevIdx >= 0 && !prefetchedRef.current.has(prevIdx)) {
-        prefetchedRef.current.add(prevIdx);
-        const prevPlayer = videoPlayersRef.current[prevIdx];
-        if (prevPlayer) {
-          prevPlayer.injectJavaScript(`
-            if (window.ytPlayer) {
-              window.ytPlayer.loadVideoById('');
-            }
-          `);
-        }
-      }
-
       if (nextIdx >= videos.length - 3) {
         loadMore();
       }
     }
-  }, [videos.length, loadMore]);
-
-  const onVideoRef = useCallback((index, ref) => {
-    videoPlayersRef.current[index] = ref;
-    if (prefetchedRef.current.has(index) && ref) {
-      // WebView doesn't need explicit load for YouTube embed
-    }
-  }, []);
-
-  const handleVideoEnd = useCallback((index) => {
-    if (index === activeIndexRef.current && isMountedRef.current) {
-      const player = videoPlayersRef.current[index];
-      if (player) {
-        player.injectJavaScript(`
-          if (window.ytPlayer && typeof window.ytPlayer.seekTo === 'function') {
-            window.ytPlayer.seekTo(0);
-            window.ytPlayer.playVideo();
-          }
-        `);
-      }
-    }
-  }, []);
-
-  const handleVideoError = useCallback((event) => {
-    const currentIndex = activeIndexRef.current;
-    if (currentIndex === activeIndexRef.current && isMountedRef.current) {
-      const errorCode = event?.nativeEvent?.errorCode;
-      const errorMessage = event?.nativeEvent?.errorMessage || 'Video unavailable';
-      
-      console.error('[Reels] Video error:', errorCode, errorMessage, 'videoId:', videos[currentIndex]?.videoId);
-      
-      // Handle YouTube specific error codes
-      if (errorCode === 153) {
-        // Error 153: Missing Referer/API client identity - this is what we're fixing
-        console.warn('[Reels] YouTube Error 153 - Missing Referer/API Client ID for video:', videos[activeIndexRef.current]?.videoId);
-      } else if (errorCode === 101 || errorCode === 150) {
-        // Error 101/150: Video unavailable/embedding disabled - skip gracefully
-        console.warn('[Reels] Video embedding disabled/unavailable:', videos[activeIndexRef.current]?.videoId);
-      }
-      
-      setToast('Video unavailable, skipping...');
-      setTimeout(() => {
-        if (activeIndexRef.current < videos.length - 1 && flatListRef.current) {
-          flatListRef.current.scrollToIndex({ index: activeIndexRef.current + 1, animated: true });
-        }
-      }, 1000);
-    }
   }, [videos.length]);
 
-  const handleVideoLoadStart = useCallback((index) => {
-    // Track video load start - useful for debugging
-    console.log('[Reels] Video load started for index:', index, 'videoId:', videos[index]?.videoId);
-  }, [videos]);
+  const authHeaders = useMemo(() => ({
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token || ''}`,
+  }), [token]);
 
-  const handleVideoLoadEnd = useCallback((index) => {
-    // Track video load end - useful for debugging
-    console.log('[Reels] Video load ended for index:', index, 'videoId:', videos[index]?.videoId);
-  }, [videos]);
+  const fetchFeed = useCallback(async (cat, isRefresh = false, append = false, pageToken = null) => {
+    const currentRequestId = ++requestIdRef.current;
+    if (loadingPageRef.current) return;
+    loadingPageRef.current = true;
 
-  const handleVideoLoad = useCallback((index) => {
-    if (index === activeIndexRef.current && !userInteractedRef.current && appVisibleRef.current) {
-      const player = videoPlayersRef.current[index];
-      if (player) {
-        player.injectJavaScript(`
-          if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
-            window.ytPlayer.playVideo();
-          }
-        `);
+    try {
+      if (!append) setLoading(true);
+      if (isRefresh) setRefreshing(true);
+      setError(null);
+
+      const url = new URL(`${SERVER_URL}/api/reels/feed`);
+      url.searchParams.set('category', cat);
+      url.searchParams.set('refresh', isRefresh ? 'true' : 'false');
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+      const res = await fetch(url.toString(), { headers: authHeaders });
+      const data = await res.json();
+
+      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to load feed');
       }
+
+      const validVideos = (data.videos || []).filter(v => 
+        v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
+        !failedVideoIdsRef.current.has(v.videoId)
+      );
+
+      if (append) {
+        setVideos(prev => {
+          const existingIds = new Set(prev.map(v => v.videoId));
+          const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
+          return [...prev, ...newVideos];
+        });
+      } else {
+        setVideos(validVideos);
+        failedVideoIdsRef.current.clear();
+      }
+    } catch (e) {
+      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
+      setError(e.message);
+      setToast(e.message);
+    } finally {
+      if (isMountedRef.current && currentRequestId === requestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+        loadingPageRef.current = false;
+      }
+    }
+  }, [authHeaders]);
+
+  const handleCategoryChange = useCallback((cat) => {
+    if (cat === category) return;
+
+    Object.values(videoPlayersRef.current).forEach(p => {
+      if (p) {
+        p.injectJavaScript("if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') { window.ytPlayer.pauseVideo(); }");
+      }
+    });
+
+    playerReadyRef.current = {};
+    videoPlayersRef.current = {};
+    activeIndexRef.current = 0;
+    failedVideoIdsRef.current.clear();
+    prefetchedRef.current.clear();
+
+    setCategory(cat);
+    setVideos([]);
+    fetchFeed(cat, false, false);
+  }, [category, fetchFeed]);
+
+  const loadMore = useCallback(() => {
+    if (videos.length && !loading && !loadingPageRef.current) {
+      fetchFeed(category, false, true);
+    }
+  }, [category, videos.length, loading, fetchFeed]);
+
+  const onVideoRef = useCallback((index, ref) => {
+    if (ref) {
+      videoPlayersRef.current[index] = ref;
+    } else {
+      delete videoPlayersRef.current[index];
+      delete playerReadyRef.current[index];
     }
   }, []);
 
-  const onTouchEndResume = useCallback((index) => {
-    if (index === activeIndexRef.current) {
+  const handleWebViewMessage = useCallback((event, index) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'ytPlayerReady') {
+        playerReadyRef.current[index] = true;
+        if (index === activeIndexRef.current && !userInteractedRef.current && appVisibleRef.current) {
+          const player = videoPlayersRef.current[index];
+          if (player) {
+            player.injectJavaScript(`
+              if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
+                window.ytPlayer.playVideo();
+              }
+            `);
+          }
+        }
+      } else if (data.type === 'ytPlayerError') {
+        const errorCode = data.errorCode;
+        const currentIndex = activeIndexRef.current;
+        
+        if (index === currentIndex && isMountedRef.current && !pendingSkipRef.current) {
+          console.error('[Reels] YouTube player error:', errorCode, 'videoId:', videos[currentIndex]?.videoId);
+          
+          if (PERMANENT_YT_ERRORS.has(errorCode)) {
+            failedVideoIdsRef.current.add(videos[currentIndex]?.videoId);
+            pendingSkipRef.current = true;
+            
+            setTimeout(() => {
+              if (isMountedRef.current && activeIndexRef.current === currentIndex) {
+                const nextIdx = currentIndex + 1;
+                if (nextIdx < videos.length && flatListRef.current) {
+                  flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
+                } else if (videos.length === 0) {
+                  setToast('No more videos available');
+                }
+              }
+            }, 300);
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore parse errors
+    }
+  }, [videos]);
+
+  const onTouchStart = useCallback((event) => {
+    touchStartYRef.current = event.nativeEvent?.pageY ?? 0;
+    touchStartXRef.current = event.nativeEvent?.pageX ?? 0;
+    touchStartTimeRef.current = Date.now();
+  }, []);
+
+  const onTouchEnd = useCallback((event) => {
+    const touchEndY = event.nativeEvent?.pageY ?? 0;
+    const touchEndX = event.nativeEvent?.pageX ?? 0;
+    const deltaY = Math.abs(touchEndY - touchStartYRef.current);
+    const deltaX = Math.abs(touchEndX - touchStartXRef.current);
+    const deltaTime = Date.now() - touchStartTimeRef.current;
+
+    const isTap = deltaY < 15 && deltaX < 15 && deltaTime < 200;
+
+    if (isTap) {
+      const index = activeIndexRef.current;
       const player = videoPlayersRef.current[index];
-      if (player) {
+      const ready = playerReadyRef.current[index];
+      if (player && ready) {
         player.injectJavaScript(`
-          if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
-            window.ytPlayer.playVideo();
+          if (window.ytPlayer) {
+            var state = window.ytPlayer.getPlayerState();
+            if (state === YT.PlayerState.PLAYING) {
+              window.ytPlayer.pauseVideo();
+            } else {
+              window.ytPlayer.playVideo();
+            }
           }
         `);
       }
-      userInteractedRef.current = false;
+      userInteractedRef.current = !userInteractedRef.current;
     }
   }, []);
 
   useEffect(() => {
     isMountedRef.current = true;
+    requestIdRef.current = 0;
     fetchFeed(category, false, false);
 
     const subscription = AppState.addEventListener('change', (nextState) => {
       appVisibleRef.current = nextState === 'active';
       if (nextState === 'active') {
         const player = videoPlayersRef.current[activeIndexRef.current];
-        if (player) {
+        const ready = playerReadyRef.current[activeIndexRef.current];
+        if (player && ready && !userInteractedRef.current) {
           player.injectJavaScript(`
             if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
               window.ytPlayer.playVideo();
@@ -356,9 +337,10 @@ const handleCategoryChange = useCallback((cat) => {
           `);
         }
       } else {
-        Object.values(videoPlayersRef.current).forEach(p => {
-          if (p) {
-            p.injectJavaScript(`
+        Object.keys(videoPlayersRef.current).forEach(key => {
+          const player = videoPlayersRef.current[key];
+          if (player) {
+            player.injectJavaScript(`
               if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
                 window.ytPlayer.pauseVideo();
               }
@@ -371,11 +353,12 @@ const handleCategoryChange = useCallback((cat) => {
     return () => {
       isMountedRef.current = false;
       subscription.remove();
-      Object.values(videoPlayersRef.current).forEach(p => {
-        try { 
-          if (p) {
-            p.injectJavaScript(`
-              if (window.ytPlayer) {
+      Object.keys(videoPlayersRef.current).forEach(key => {
+        try {
+          const player = videoPlayersRef.current[key];
+          if (player) {
+            player.injectJavaScript(`
+              if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
                 window.ytPlayer.pauseVideo();
               }
             `);
@@ -383,20 +366,9 @@ const handleCategoryChange = useCallback((cat) => {
         } catch (e) {}
       });
     };
-  }, [category]);
+  }, [category, fetchFeed]);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      clearOldCache();
-    }, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const clearOldCache = async () => {
-    try {
-      await fetch(`${SERVER_URL}/api/reels/feed?category=trending&refresh=true`, { method: 'GET', headers: authHeaders });
-    } catch (e) {}
-  };
+  const prefetchedRef = useRef(new Set());
 
   if (loading && !videos.length) {
     return (
@@ -457,35 +429,27 @@ const handleCategoryChange = useCallback((cat) => {
         decelerationRate="fast"
         disableIntervalMomentum
         showsVerticalScrollIndicator={false}
-        viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairsRef.current}
+        viewabilityConfig={viewabilityConfig}
+        onViewableItemsChanged={onViewableItemsChanged}
         onScrollEndDrag={loadMore}
         onMomentumScrollEnd={loadMore}
         renderItem={({ item, index }) => (
-          <View style={styles.videoContainer} onTouchStart={onTouchStart}>
+          <View style={styles.videoContainer}>
             <WebView
               ref={ref => onVideoRef(index, ref)}
               source={{
-                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&origin=https://tojey.app&widgetid=1&mute=0`,
-                headers: {
-                  'Referer': 'https://tojey.app/',
-                  'Origin': 'https://tojey.app',
-                }
+                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`,
               }}
               style={styles.video}
               javaScriptEnabled={true}
               domStorageEnabled={true}
               mediaPlaybackRequiresUserAction={false}
               allowsInlineMediaPlayback={true}
-              mixedContentMode="always"
               userAgent="Mozilla/5.0 (Linux; Android 10; Tojey) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-              onLoad={() => handleVideoLoad(index)}
-              onError={(event) => handleVideoError(index, event)}
-              onLoadStart={() => handleVideoLoadStart(index)}
-              onLoadEnd={() => handleVideoLoadEnd(index)}
               onMessage={(event) => handleWebViewMessage(event, index)}
               onTouchStart={onTouchStart}
-              onTouchEnd={() => onTouchEnd(index)}
-              onTouchCancel={() => onTouchEnd(index)}
+              onTouchEnd={onTouchEnd}
+              onTouchCancel={onTouchEnd}
               scrollEnabled={false}
               injectedJavaScript={YOUTUBE_IFRAME_API_JS}
               allowsBackForwardNavigationGestures={false}
@@ -507,11 +471,6 @@ const handleCategoryChange = useCallback((cat) => {
                 </View>
               </View>
             </View>
-            <TouchableOpacity
-              onPress={() => onTouchEndResume(index)}
-              style={StyleSheet.absoluteFill}
-              activeOpacity={1}
-            />
           </View>
         )}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
@@ -526,6 +485,7 @@ const handleCategoryChange = useCallback((cat) => {
         windowSize={4}
         removeClippedSubviews={true}
       />
+      {toast && <Toast message={toast} onDismiss={() => setToast('')} />}
     </View>
   );
 }
@@ -597,4 +557,3 @@ const styles = StyleSheet.create({
   errorText: { fontSize: fs(15), textAlign: 'center' },
   retryBtn: { paddingHorizontal: fs(24), paddingVertical: fs(10), borderRadius: fs(10) },
 });
-

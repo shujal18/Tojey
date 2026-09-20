@@ -85,6 +85,7 @@ async function searchYouTube(query, options = {}) {
     regionCode,
     relevanceLanguage,
     publishedAfter,
+    pageToken,
   } = options;
 
   const params = {
@@ -103,6 +104,7 @@ async function searchYouTube(query, options = {}) {
   if (regionCode) params.regionCode = regionCode;
   if (relevanceLanguage) params.relevanceLanguage = relevanceLanguage;
   if (publishedAfter) params.publishedAfter = publishedAfter;
+  if (pageToken) params.pageToken = pageToken;
 
   const response = await youtube.search.list(params);
   return response.data;
@@ -180,7 +182,11 @@ async function fetchCategoryVideos(category, pageToken = null) {
     }
   }
 
-  return allVideos.slice(0, BATCH_SIZE);
+  return {
+    videos: allVideos.slice(0, BATCH_SIZE),
+    nextPageToken: allVideos.length >= BATCH_SIZE ? 'continue' : null,
+    hasMore: allVideos.length >= BATCH_SIZE,
+  };
 }
 
 async function getCachedFeed(category) {
@@ -235,14 +241,19 @@ async function getFeed(category, forceRefresh = false) {
       const oldest = new Date(cached[cached.length - 1].fetched_at);
       const age = Date.now() - oldest.getTime();
       if (age < CACHE_TTL_MS) {
-        return { videos: cached, cached: true };
+        return { videos: cached, cached: true, nextPageToken: null, hasMore: false };
       }
     }
   }
 
-  const videos = await fetchCategoryVideos(category);
-  await cacheFeed(category, videos);
-  return { videos, cached: false };
+  const result = await fetchCategoryVideos(category);
+  await cacheFeed(category, result.videos);
+  return { 
+    videos: result.videos, 
+    cached: false,
+    nextPageToken: result.nextPageToken,
+    hasMore: result.hasMore,
+  };
 }
 
 function clearOldCache() {

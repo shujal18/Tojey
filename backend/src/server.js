@@ -456,7 +456,7 @@ app.get('/api/fcm/status', authMiddleware, async (req, res) => {
 // Reels feed endpoint - returns short video metadata from YouTube via backend proxy
 app.get('/api/reels/feed', authMiddleware, async (req, res) => {
   try {
-    const { category = 'trending', refresh = 'false' } = req.query;
+    const { category = 'trending', refresh = 'false', pageToken } = req.query;
     const validCategories = [
       'trending', 'love', 'comedy', 'funny', 'education',
       'motivation', 'nepali', 'hindi', 'foreign', 'music', 'memes'
@@ -466,6 +466,7 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
     }
 
     const forceRefresh = refresh === 'true';
+    const { getFeed } = require('./youtube');
     const result = await getFeed(category, forceRefresh);
     res.json({
       videos: result.videos.map(v => ({
@@ -479,6 +480,8 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
       })),
       cached: result.cached,
       category,
+      nextPageToken: result.nextPageToken,
+      hasMore: result.hasMore,
     });
   } catch (e) {
     console.error('reels:feed error', e.message);
