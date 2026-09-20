@@ -1,4 +1,4 @@
-## 🎬 Reels Section - Complete YouTube Quota Fix
+## 🎬 Reels Section - Complete YouTube Quota Fix + Error 153 Fix
 
 ### Root Cause
 The Reels system was making **66 YouTube API calls per full refresh** (11 categories × 3 queries × 2 API calls each). With multiple users and frequent category switching, the daily quota (10,000 units) was exhausted within hours.
@@ -27,12 +27,20 @@ The Reels system was making **66 YouTube API calls per full refresh** (11 catego
 #### Database (db.js)
 - Added `source` column to `reels_cache` table (youtube/local)
 
-#### Mobile (ReelsScreen.jsx)
+#### Mobile (ReelsScreen.jsx) - v1.7.1
+- **Fixed Error 153**: Added proper Referer/Origin headers (`https://www.youtube.com/`) to YouTube embed WebView
+- Added `mixedContentMode="always"` for youtube-nocookie.com compatibility
 - Handles `warning` messages from backend (shows as toast)
 - Displays quota status in empty state
 - Supports local video playback via HTML5 video in WebView
 - Improved empty state with retry button and descriptive messages
 - Logs quota events for debugging
+
+#### Mobile (ChatRoomScreen.jsx) - v1.7.1
+- **Fixed online/offline presence**: Initialize presence state from `otherUser` prop
+- Presence now falls back to `otherUser.online/last_seen` when socket event not yet received
+- Header status properly shows online/offline with typing indicator
+- Presence updates from socket `presence:update` event properly override initial state
 
 ### API Call Reduction
 
@@ -73,7 +81,8 @@ The Reels system was making **66 YouTube API calls per full refresh** (11 catego
 - `backend/src/youtube.js` - Complete rewrite with quota protection
 - `backend/src/server.js` - Enhanced Reels endpoints
 - `backend/src/db.js` - Added source column migration
-- `mobile/src/screens/ReelsScreen.jsx` - Local video support, quota warnings
+- `mobile/src/screens/ReelsScreen.jsx` - Local video support, quota warnings, Error 153 fix
+- `mobile/src/screens/ChatRoomScreen.jsx` - Presence tracking fix
 
 ### APK
-- `tojey-v1.7.0-fixed.apk` (109 MB) - Release build with all fixes
+- `tojey-v1.7.1-fixed.apk` (109 MB) - Release build with all fixes

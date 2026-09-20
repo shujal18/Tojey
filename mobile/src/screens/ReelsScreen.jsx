@@ -52,6 +52,7 @@ const YOUTUBE_IFRAME_API_JS = `
             },
             'onError': function(event) {
               var errorCode = event.data;
+              console.log('[YouTube Player] Error:', errorCode);
               window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: errorCode}), '*');
             }
           }
@@ -81,7 +82,22 @@ const CATEGORIES = [
 ];
 
 const ITEM_HEIGHT = SCREEN_H;
-const PERMANENT_YT_ERRORS = new Set([2, 5, 100, 101, 150, 153]);
+const PERMANENT_YT_ERRORS = new Set([2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155]);
+
+function parseYTErrorCode(errorCode) {
+  if (typeof errorCode === 'number') return errorCode;
+  if (typeof errorCode === 'string') {
+    const parts = errorCode.trim().split(/[\s,-]+/);
+    const code = parseInt(parts[0], 10);
+    if (!isNaN(code)) return code;
+  }
+  return null;
+}
+
+function isPermanentYTError(errorCode) {
+  const code = parseYTErrorCode(errorCode);
+  return code !== null && PERMANENT_YT_ERRORS.has(code);
+}
 
 export default function ReelsScreen({ token, user }) {
   const { theme } = useTheme();
@@ -215,6 +231,41 @@ export default function ReelsScreen({ token, user }) {
     }
   }, [authHeaders]);
 
+  const loadMoreFromCache = useCallback(async () => {
+    if (videos.length && !loading && !loadingPageRef.current) {
+      loadingPageRef.current = true;
+      try {
+        const authHeaders = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token || ''}`,
+        };
+        const res = await fetch(`${SERVER_URL}/api/reels/feed?category=${encodeURIComponent(category)}&refresh=false`, { headers: authHeaders });
+        const data = await res.json();
+        
+        if (!isMountedRef.current) return;
+        
+        if (res.ok && data.videos && data.videos.length > videos.length) {
+          const validVideos = data.videos.filter(v => 
+            v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
+            !failedVideoIdsRef.current.has(v.videoId)
+          );
+          
+          setVideos(prev => {
+            const existingIds = new Set(prev.map(v => v.videoId));
+            const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
+            return [...prev, ...newVideos];
+          });
+        }
+      } catch (e) {
+        console.warn('[Reels] loadMore failed:', e.message);
+      } finally {
+        if (isMountedRef.current) {
+          loadingPageRef.current = false;
+        }
+      }
+    }
+  }, [category, token, videos.length, loading]);
+
   const handleCategoryChange = useCallback((cat) => {
     if (cat === category) return;
 
@@ -235,11 +286,7 @@ export default function ReelsScreen({ token, user }) {
     fetchFeed(cat, false, false);
   }, [category, fetchFeed]);
 
-  const loadMore = useCallback(() => {
-    if (videos.length && !loading && !loadingPageRef.current) {
-      fetchFeed(category, false, true);
-    }
-  }, [category, videos.length, loading, fetchFeed]);
+  const loadMore = loadMoreFromCache;
 
   const onVideoRef = useCallback((index, ref) => {
     if (ref) {
@@ -272,20 +319,34 @@ export default function ReelsScreen({ token, user }) {
         if (index === currentIndex && isMountedRef.current && !pendingSkipRef.current) {
           console.error('[Reels] YouTube player error:', errorCode, 'videoId:', videos[currentIndex]?.videoId);
           
-          if (PERMANENT_YT_ERRORS.has(errorCode)) {
+          if (isPermanentYTError(errorCode)) {
             failedVideoIdsRef.current.add(videos[currentIndex]?.videoId);
             pendingSkipRef.current = true;
             
-            setTimeout(() => {
-              if (isMountedRef.current && activeIndexRef.current === currentIndex) {
-                const nextIdx = currentIndex + 1;
-                if (nextIdx < videos.length && flatListRef.current) {
-                  flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
-                } else if (videos.length === 0) {
-                  setToast('No more videos available');
+            const parsedCode = parseYTErrorCode(errorCode);
+            if (parsedCode !== null && typeof fetchFeed === 'function') {
+              fetchFeed(category, false, false).then(() => {
+                if (isMountedRef.current && activeIndexRef.current === currentIndex) {
+                  const nextIdx = currentIndex + 1;
+                  if (nextIdx < videos.length && flatListRef.current) {
+                    flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
+                  } else if (videos.length === 0) {
+                    setToast('No more videos available');
+                  }
                 }
-              }
-            }, 300);
+              });
+            } else {
+              setTimeout(() => {
+                if (isMountedRef.current && activeIndexRef.current === currentIndex) {
+                  const nextIdx = currentIndex + 1;
+                  if (nextIdx < videos.length && flatListRef.current) {
+                    flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
+                  } else if (videos.length === 0) {
+                    setToast('No more videos available');
+                  }
+                }
+              }, 300);
+            }
           }
         }
       }
@@ -511,6 +572,29 @@ export default function ReelsScreen({ token, user }) {
                     allowsInlineMediaPlayback={true}
                     userAgent="Mozilla/5.0 (Linux; Android 10; Tojey) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
                     onMessage={(event) => handleWebViewMessage(event, index)}
+                    onError={(event) => {
+                      console.error('[Reels WebView] Error:', event.nativeEvent);
+                      handleWebViewMessage({
+                        nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.message || 'WEBVIEW_ERROR' }) }
+                      }, index);
+                    }}
+                    onHttpError={(event) => {
+                      console.error('[Reels WebView] HTTP Error:', event.nativeEvent);
+                      if (event.nativeEvent.statusCode >= 400) {
+                        handleWebViewMessage({
+                          nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.statusCode }) }
+                        }, index);
+                      }
+                    }}
+                    onLoadStart={() => {
+                      console.log('[Reels WebView] Load start for index:', index);
+                    }}
+                    onLoad={() => {
+                      console.log('[Reels WebView] Load complete for index:', index);
+                    }}
+                    onLoadEnd={() => {
+                      console.log('[Reels WebView] Load end for index:', index);
+                    }}
                     onTouchStart={onTouchStart}
                     onTouchEnd={onTouchEnd}
                     onTouchCancel={onTouchEnd}

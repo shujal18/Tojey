@@ -165,11 +165,21 @@ CREATE TABLE IF NOT EXISTS reels_cache (
   published_at TIMESTAMPTZ,
   source VARCHAR(20) DEFAULT 'youtube',
   fetched_at TIMESTAMPTZ DEFAULT NOW(),
+  availability VARCHAR(20) DEFAULT 'unknown',
+  failure_count INTEGER DEFAULT 0,
+  last_failed_at TIMESTAMPTZ,
+  failure_reason TEXT,
   UNIQUE(category, video_id)
+);
+
+CREATE TABLE IF NOT EXISTS app_config (
+  key VARCHAR(100) PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_reels_cache_category ON reels_cache(category);
 CREATE INDEX IF NOT EXISTS idx_reels_cache_fetched ON reels_cache(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_reels_cache_availability ON reels_cache(availability);
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
@@ -192,6 +202,11 @@ ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRU
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user_active ON device_tokens(user_id, is_active) WHERE is_active = TRUE;
 ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'youtube';
+ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS availability VARCHAR(20) DEFAULT 'unknown';
+ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 0;
+ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMPTZ;
+ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS failure_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_reels_cache_availability ON reels_cache(availability);
 `;
 
 async function initDB() {
