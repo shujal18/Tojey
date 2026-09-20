@@ -163,9 +163,9 @@ async function getVideoDetails(videoIds) {
   try {
     const response = await youtube.videos.list({
       key: getApiKey(),
-      part: 'contentDetails,snippet',
+      part: 'contentDetails,snippet,status',
       id: videoIds.join(','),
-      fields: 'items(id,contentDetails/duration,snippet(title,thumbnails,channelTitle,publishedAt))',
+      fields: 'items(id,contentDetails/duration,snippet(title,thumbnails,channelTitle,publishedAt),status(embeddable,privacyStatus,uploadStatus))',
     });
     recordQuotaUsage(QUOTA_PER_VIDEOS_LIST * videoIds.length);
     return response.data.items || [];
@@ -277,6 +277,17 @@ async function fetchCategoryVideos(category) {
     const filtered = filterByDuration(details);
 
     for (const video of filtered) {
+      // Validate video is embeddable and playable
+      const status = video.status || {};
+      const isEmbeddable = status.embeddable === true;
+      const isPublic = status.privacyStatus === 'public';
+      const isProcessed = status.uploadStatus === 'processed';
+      
+      if (!isEmbeddable || !isPublic || !isProcessed) {
+        console.log(`[YouTube] Skipping non-embeddable/unplayable video: ${video.id} (embeddable=${isEmbeddable}, privacy=${status.privacyStatus}, uploadStatus=${status.uploadStatus})`);
+        continue;
+      }
+
       if (!seenIds.has(video.id) && !isVideoFailed(category, video.id)) {
         seenIds.add(video.id);
         allVideos.push({

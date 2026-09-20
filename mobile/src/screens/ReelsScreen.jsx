@@ -20,12 +20,19 @@ const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 const YOUTUBE_IFRAME_API_JS = `
   (function() {
+    // Prevent multiple initializations
+    if (window.tojeyYTInitialized) {
+      return;
+    }
+    window.tojeyYTInitialized = true;
+
     var tag = document.createElement('script');
     tag.src = "https://www.youtube.com/iframe_api";
     var firstScriptTag = document.getElementsByTagName('script')[0];
     firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
 
     window.onYouTubeIframeAPIReady = function() {
+      // Find the iframe and ensure it has an ID
       var iframe = document.getElementById('tojey-youtube-player');
       if (!iframe) {
         var iframes = document.getElementsByTagName('iframe');
@@ -38,7 +45,13 @@ const YOUTUBE_IFRAME_API_JS = `
         window.ytPlayer = new YT.Player(iframe, {
           events: {
             'onReady': function(event) {
-              window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');
+              // Ensure we can get video data
+              try {
+                var videoData = event.target.getVideoData();
+                window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: videoData?.video_id}), '*');
+              } catch (e) {
+                window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: 'unknown'}), '*');
+              }
             },
             'onStateChange': function(event) {
               if (event.data === YT.PlayerState.ENDED) {
@@ -70,8 +83,8 @@ const YOUTUBE_IFRAME_API_JS = `
 `;
 
 const YOUTUBE_EMBED_HEADERS = {
-  'Referer': 'https://www.youtube.com/',
-  'Origin': 'https://www.youtube.com',
+  'Referer': 'https://www.youtube-nocookie.com/',
+  'Origin': 'https://www.youtube-nocookie.com',
 };
 
 const CATEGORIES = [
@@ -104,6 +117,27 @@ function parseYTErrorCode(errorCode) {
 function isPermanentYTError(errorCode) {
   const code = parseYTErrorCode(errorCode);
   return code !== null && PERMANENT_YT_ERRORS.has(code);
+}
+
+function isPlayableError(errorCode) {
+  // Error codes that indicate the video cannot be played at all
+  const code = parseYTErrorCode(errorCode);
+  if (code === null) return false;
+  // 2 = invalid parameter, 5 = HTML5 player error, 100 = video not found, 101/150 = embedding disabled, 152 = unavailable, 153 = embedding disabled
+  return [2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155].includes(code);
+}
+
+function validateVideoId(videoId) {
+  if (!videoId || typeof videoId !== 'string') return false;
+  // YouTube video IDs are 11 characters, alphanumeric plus hyphen and underscore
+  return /^[a-zA-Z0-9_-]{11}$/.test(videoId.trim());
+}
+
+function sanitizeVideoId(videoId) {
+  if (!videoId || typeof videoId !== 'string') return null;
+  const trimmed = videoId.trim();
+  if (validateVideoId(trimmed)) return trimmed;
+  return null;
 }
 
 export default function ReelsScreen({ token, user }) {
@@ -300,18 +334,21 @@ export default function ReelsScreen({ token, user }) {
   const handleCategoryChange = useCallback((cat) => {
     if (cat === category) return;
 
+    // Pause all current players before switching
     Object.values(videoPlayersRef.current).forEach(p => {
       if (p) {
         p.injectJavaScript("if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') { window.ytPlayer.pauseVideo(); }");
       }
     });
 
+    // Clear all player references and state
     playerReadyRef.current = {};
     videoPlayersRef.current = {};
     playerStateRef.current = {};
     activeIndexRef.current = 0;
     failedVideoIdsRef.current.clear();
     preloadTriggeredRef.current.clear();
+    pendingSkipRef.current = false;
 
     setCategory(cat);
     setVideos([]);
@@ -354,18 +391,20 @@ export default function ReelsScreen({ token, user }) {
         if (index === currentIndex && isMountedRef.current && !pendingSkipRef.current) {
           console.error('[Reels] YouTube player error:', errorCode, 'videoId:', videos[currentIndex]?.videoId);
           
-          // Check if this is an error we should skip (permanent OR any error for current video)
-          const parsedCode = parseYTErrorCode(errorCode);
-          const shouldSkip = parsedCode !== null && (isPermanentYTError(errorCode) || parsedCode === 152 || parsedCode === 2 || parsedCode === 5 || parsedCode === 100 || parsedCode === 101 || parsedCode === 102 || parsedCode === 103 || parsedCode === 104 || parsedCode === 105 || parsedCode === 150 || parsedCode === 153 || parsedCode === 154 || parsedCode === 155);
+          // Check if this is an error we should skip (any playable error)
+          const shouldSkip = isPlayableError(errorCode);
           
           if (shouldSkip) {
-            failedVideoIdsRef.current.add(videos[currentIndex]?.videoId);
+            const failedVideoId = videos[currentIndex]?.videoId;
+            if (failedVideoId) {
+              failedVideoIdsRef.current.add(failedVideoId);
+            }
             pendingSkipRef.current = true;
             
             // IMMEDIATE SKIP - no waiting, no fetchFeed call
             const nextIdx = currentIndex + 1;
             if (nextIdx < videos.length && flatListRef.current) {
-              console.log('[Reels] Skipping failed video, scrolling to next:', nextIdx);
+              console.log('[Reels] Skipping failed video (error:', errorCode, '), scrolling to next:', nextIdx);
               flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
             } else if (videos.length === 0) {
               setToast('No more videos available');
@@ -460,18 +499,29 @@ export default function ReelsScreen({ token, user }) {
     return () => {
       isMountedRef.current = false;
       subscription.remove();
+      
+      // Properly destroy all players on unmount
       Object.keys(videoPlayersRef.current).forEach(key => {
         try {
           const player = videoPlayersRef.current[key];
           if (player) {
             player.injectJavaScript(`
-              if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
-                window.ytPlayer.pauseVideo();
+              if (window.ytPlayer) {
+                if (typeof window.ytPlayer.destroy === 'function') {
+                  window.ytPlayer.destroy();
+                } else if (typeof window.ytPlayer.pauseVideo === 'function') {
+                  window.ytPlayer.pauseVideo();
+                }
               }
             `);
           }
         } catch (e) {}
       });
+      
+      // Clear all refs
+      videoPlayersRef.current = {};
+      playerReadyRef.current = {};
+      playerStateRef.current = {};
     };
   }, [category, fetchFeed]);
 
@@ -542,9 +592,18 @@ export default function ReelsScreen({ token, user }) {
         onMomentumScrollEnd={loadMore}
         renderItem={({ item, index }) => {
             const isLocal = item.source === 'local';
+            const rawVideoId = item.videoId;
+            const videoId = sanitizeVideoId(rawVideoId);
+            
+            // Skip invalid video IDs
+            if (!isLocal && !videoId) {
+              console.warn('[Reels] Invalid videoId, skipping:', rawVideoId);
+              return <View style={styles.videoContainer} />;
+            }
+            
             const videoUri = isLocal 
               ? `${SERVER_URL}${item.localUrl}` 
-              : `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1&origin=https://www.youtube.com`;
+              : `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`;
             
             const isActive = index === activeIndexRef.current;
             const playerState = playerStateRef.current[index] || 'loading';
@@ -613,23 +672,19 @@ export default function ReelsScreen({ token, user }) {
                     onMessage={(event) => handleWebViewMessage(event, index)}
                     onError={(event) => {
                       console.error('[Reels WebView] Error:', event.nativeEvent);
+                      const errorCode = event.nativeEvent?.message || 'WEBVIEW_ERROR';
                       handleWebViewMessage({
-                        nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.message || 'WEBVIEW_ERROR' }) }
+                        nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode }) }
                       }, index);
                     }}
                     onHttpError={(event) => {
                       console.error('[Reels WebView] HTTP Error:', event.nativeEvent);
-                      if (event.nativeEvent.statusCode >= 400) {
+                      const statusCode = event.nativeEvent?.statusCode;
+                      if (statusCode >= 400) {
                         handleWebViewMessage({
-                          nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.statusCode }) }
+                          nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: statusCode }) }
                         }, index);
                       }
-                    }}
-                    onError={(event) => {
-                      console.error('[Reels WebView] Error:', event.nativeEvent);
-                      handleWebViewMessage({
-                        nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.message || 'WEBVIEW_ERROR' }) }
-                      }, index);
                     }}
                     onLoadStart={() => {
                       console.log('[Reels WebView] Load start for index:', index);
@@ -648,8 +703,6 @@ export default function ReelsScreen({ token, user }) {
                     allowsBackForwardNavigationGestures={false}
                     hardwareAccelerationEnabled={true}
                     rendersToHardwareTextureAndroid={true}
-                    mixedContentMode="always"
-                    startInLoadingState={true}
                   />
                 )}
                 <View style={[
