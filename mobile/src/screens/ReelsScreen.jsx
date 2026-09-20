@@ -22,7 +22,61 @@ import Toast from '../components/Toast';
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 // Injected JavaScript for YouTube iframe API - defined as constant to avoid JSX quoting issues
-const YOUTUBE_IFRAME_API_JS = "                // Initialize YouTube iframe API player\n                (function() {\n                  var tag = document.createElement('script');\n                  tag.src = \"https://www.youtube.com/iframe_api\";\n                  var firstScriptTag = document.getElementsByTagName('script')[0];\n                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);\n\n                  window.onYouTubeIframeAPIReady = function() {\n                    // Find the iframe and ensure it has an ID\n                    var iframe = document.getElementById('tojey-youtube-player');\n                    if (!iframe) {\n                      var iframes = document.getElementsByTagName('iframe');\n                      if (iframes.length > 0) {\n                        iframe = iframes[0];\n                        iframe.id = 'tojey-youtube-player';\n                      }\n                    }\n                    if (iframe) {\n                      window.ytPlayer = new YT.Player(iframe, {\n                        events: {\n                          'onReady': function(event) {\n                            event.target.playVideo();\n                            // Notify React Native that player is ready\n                            window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');\n                          },\n                          'onStateChange': function(event) {\n                            if (event.data === YT.PlayerState.ENDED) {\n                              event.target.seekTo(0);\n                              event.target.playVideo();\n                            } else if (event.data === YT.PlayerState.ERROR) {\n                              // Report error to React Native\n                              window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: event.data}), '*');\n                            }\n                          }\n                        }\n                      }\n                    });\n                  };\n\n                  // Add player ID to iframe\n                  var iframe = document.getElementById('tojey-youtube-player');\n                  if (!iframe) {\n                    var iframes = document.getElementsByTagName('iframe');\n                    if (iframes.length > 0) {\n                      iframe = iframes[0];\n                      iframe.id = 'tojey-youtube-player';\n                    }\n                  }\n                })();\n              ";
+const YOUTUBE_IFRAME_API_JS = `
+                // Initialize YouTube iframe API player
+                (function() {
+                  var tag = document.createElement('script');
+                  tag.src = "https://www.youtube.com/iframe_api";
+                  var firstScriptTag = document.getElementsByTagName('script')[0];
+                  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+                  window.onYouTubeIframeAPIReady = function() {
+                    // Find the iframe and ensure it has an ID
+                    var iframe = document.getElementById('tojey-youtube-player');
+                    if (!iframe) {
+                      var iframes = document.getElementsByTagName('iframe');
+                      if (iframes.length > 0) {
+                        iframe = iframes[0];
+                        iframe.id = 'tojey-youtube-player';
+                      }
+                    }
+                    if (iframe) {
+                      window.ytPlayer = new YT.Player(iframe, {
+                        events: {
+                          'onReady': function(event) {
+                            event.target.playVideo();
+                            // Notify React Native that player is ready
+                            window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: event.target.getVideoData().video_id}), '*');
+                          },
+                          'onStateChange': function(event) {
+                            if (event.data === YT.PlayerState.ENDED) {
+                              event.target.seekTo(0);
+                              event.target.playVideo();
+                            } else if (event.data === YT.PlayerState.ERROR) {
+                              // Report error to React Native
+                              window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: event.data}), '*');
+                            } else if (event.data === YT.PlayerState.PLAYING) {
+                              window.postMessage(JSON.stringify({type: 'ytPlayerPlaying'}), '*');
+                            } else if (event.data === YT.PlayerState.BUFFERING) {
+                              window.postMessage(JSON.stringify({type: 'ytPlayerBuffering'}), '*');
+                            }
+                          }
+                        }
+                      });
+                    };
+
+                    // Add player ID to iframe
+                    var iframe = document.getElementById('tojey-youtube-player');
+                    if (!iframe) {
+                      var iframes = document.getElementsByTagName('iframe');
+                      if (iframes.length > 0) {
+                        iframe = iframes[0];
+                        iframe.id = 'tojey-youtube-player';
+                      }
+                    }
+                  };
+                })();
+              `;
 
 const CATEGORIES = [
   { id: 'trending', label: 'Trending' },
@@ -224,25 +278,26 @@ const handleCategoryChange = useCallback((cat) => {
   }, []);
 
   const handleVideoError = useCallback((event) => {
-    if (index === activeIndexRef.current && isMountedRef.current) {
+    const currentIndex = activeIndexRef.current;
+    if (currentIndex === activeIndexRef.current && isMountedRef.current) {
       const errorCode = event?.nativeEvent?.errorCode;
       const errorMessage = event?.nativeEvent?.errorMessage || 'Video unavailable';
       
-      console.error('[Reels] Video error:', errorCode, errorMessage, 'videoId:', videos[index]?.videoId);
+      console.error('[Reels] Video error:', errorCode, errorMessage, 'videoId:', videos[currentIndex]?.videoId);
       
       // Handle YouTube specific error codes
       if (errorCode === 153) {
         // Error 153: Missing Referer/API client identity - this is what we're fixing
-        console.warn('[Reels] YouTube Error 153 - Missing Referer/API Client ID for video:', videos[index]?.videoId);
+        console.warn('[Reels] YouTube Error 153 - Missing Referer/API Client ID for video:', videos[activeIndexRef.current]?.videoId);
       } else if (errorCode === 101 || errorCode === 150) {
         // Error 101/150: Video unavailable/embedding disabled - skip gracefully
-        console.warn('[Reels] Video embedding disabled/unavailable:', videos[index]?.videoId);
+        console.warn('[Reels] Video embedding disabled/unavailable:', videos[activeIndexRef.current]?.videoId);
       }
       
       setToast('Video unavailable, skipping...');
       setTimeout(() => {
-        if (index < videos.length - 1 && flatListRef.current) {
-          flatListRef.current.scrollToIndex({ index: index + 1, animated: true });
+        if (activeIndexRef.current < videos.length - 1 && flatListRef.current) {
+          flatListRef.current.scrollToIndex({ index: activeIndexRef.current + 1, animated: true });
         }
       }, 1000);
     }
@@ -251,6 +306,11 @@ const handleCategoryChange = useCallback((cat) => {
   const handleVideoLoadStart = useCallback((index) => {
     // Track video load start - useful for debugging
     console.log('[Reels] Video load started for index:', index, 'videoId:', videos[index]?.videoId);
+  }, [videos]);
+
+  const handleVideoLoadEnd = useCallback((index) => {
+    // Track video load end - useful for debugging
+    console.log('[Reels] Video load ended for index:', index, 'videoId:', videos[index]?.videoId);
   }, [videos]);
 
   const handleVideoLoad = useCallback((index) => {
@@ -263,42 +323,6 @@ const handleCategoryChange = useCallback((cat) => {
           }
         `);
       }
-    }
-  }, []);
-
-  // Handle messages from WebView (YouTube iframe API)
-  const handleWebViewMessage = useCallback((event, index) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      
-      if (data.type === 'ytPlayerReady') {
-        console.log('[Reels] YouTube player ready for index:', index, 'videoId:', data.videoId);
-        // Player is ready, we can send commands now
-      } else if (data.type === 'ytPlayerError') {
-        console.error('[Reels] YouTube player error:', data.errorCode, 'for index:', index);
-        // Trigger error handling
-        handleVideoError(index, { nativeEvent: { errorCode: data.errorCode } });
-      }
-    } catch (e) {
-      // Ignore parsing errors
-    }
-  }, []);
-
-  const onTouchStart = useCallback(() => {
-    userInteractedRef.current = true;
-  }, []);
-
-  const onTouchEnd = useCallback((index) => {
-    if (index === activeIndexRef.current) {
-      const player = videoPlayersRef.current[index];
-      if (player) {
-        player.injectJavaScript(`
-          if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
-            window.ytPlayer.pauseVideo();
-          }
-        `);
-      }
-      userInteractedRef.current = true;
     }
   }, []);
 
@@ -441,9 +465,10 @@ const handleCategoryChange = useCallback((cat) => {
             <WebView
               ref={ref => onVideoRef(index, ref)}
               source={{
-                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&origin=https://tojey.app`,
+                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&origin=https://tojey.app&widgetid=1&mute=0`,
                 headers: {
                   'Referer': 'https://tojey.app/',
+                  'Origin': 'https://tojey.app',
                 }
               }}
               style={styles.video}
@@ -456,12 +481,16 @@ const handleCategoryChange = useCallback((cat) => {
               onLoad={() => handleVideoLoad(index)}
               onError={(event) => handleVideoError(index, event)}
               onLoadStart={() => handleVideoLoadStart(index)}
+              onLoadEnd={() => handleVideoLoadEnd(index)}
               onMessage={(event) => handleWebViewMessage(event, index)}
               onTouchStart={onTouchStart}
               onTouchEnd={() => onTouchEnd(index)}
               onTouchCancel={() => onTouchEnd(index)}
               scrollEnabled={false}
               injectedJavaScript={YOUTUBE_IFRAME_API_JS}
+              allowsBackForwardNavigationGestures={false}
+              hardwareAccelerationEnabled={true}
+              rendersToHardwareTextureAndroid={true}
             />
             <View style={styles.overlay}>
               <View style={styles.infoRow}>
