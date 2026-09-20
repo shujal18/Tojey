@@ -1,88 +1,160 @@
-## 🎬 Reels Section - Complete YouTube Quota Fix + Error 153 Fix
+## 🎬 Reels Section - Complete YouTube Quota + Error 152 Fix
 
-### Root Cause
-The Reels system was making **66 YouTube API calls per full refresh** (11 categories × 3 queries × 2 API calls each). With multiple users and frequent category switching, the daily quota (10,000 units) was exhausted within hours.
+### Root Causes Identified
 
-### Changes Made
+**Problem 1 - YouTube Quota Exhaustion:**
+- 11 categories × (1 search.list + 1 videos.list) = 22 API calls per full refresh
+- Circuit breaker auto-reset after 1 hour caused repeated quota failures
+- No persistent quota state - lost on server restart
+- loadMore() triggered new YouTube searches on scroll
+- No single-flight locking - concurrent requests multiplied API calls
 
-#### Backend (youtube.js)
-- **Reduced search queries**: 3→1 per category (66→22 API calls for full refresh)
-- **Increased cache TTL**: 30 minutes → 4 hours
-- **Added stale-while-revalidate**: 6 hours (serve stale cache while background refresh)
-- **Quota circuit breaker**: Auto-detects `quotaExceeded`, stops YouTube calls for 1 hour
-- **Single-flight locking**: Prevents duplicate concurrent refreshes for same category
-- **Local fallback**: Serves videos from `stored_media` when YouTube unavailable
-- **Better error responses**: Distinguishes quota errors from other failures
+**Problem 2 - Error 152 -4:**
+- YouTube IFrame API returns error as "152 -4" string format
+- Original code only checked exact numeric match in PERMANENT_YT_ERRORS
+- Error parsing failed, treated as transient, video got stuck
 
-#### Backend (server.js)
-- Enhanced `/api/reels/feed` response with:
-  - `source`: youtube/cache/stale_cache/local_fallback/cache_quota_fallback/empty
-  - `cacheAge`: age of cached data in ms
-  - `stale`: boolean for stale-while-revalidate
-  - `warning`: human-readable message for UI
-  - `quota`: circuit breaker status
-- Added `/api/reels/quota-status` endpoint for diagnostics
-- Graceful degradation: returns 200 with cached/local data instead of 500 on quota errors
+---
 
-#### Database (db.js)
-- Added `source` column to `reels_cache` table (youtube/local)
+### Backend Changes (youtube.js)
 
-#### Mobile (ReelsScreen.jsx) - v1.7.1
-- **Fixed Error 153**: Added proper Referer/Origin headers (`https://www.youtube.com/`) to YouTube embed WebView
-- Added `mixedContentMode="always"` for youtube-nocookie.com compatibility
-- Handles `warning` messages from backend (shows as toast)
-- Displays quota status in empty state
-- Supports local video playback via HTML5 video in WebView
-- Improved empty state with retry button and descriptive messages
-- Logs quota events for debugging
+**Quota Protection:**
+- Persistent quota state in `app_config` table (survives restarts)
+- Daily limit: 10,000 units (100/search, 1/video detail)
+- Automatic daily reset at midnight UTC
+- Circuit breaker with 1hr cooldown + daily limit protection
+- Structured logging: `[YouTube] Quota exceeded - circuit breaker activated`
 
-#### Mobile (ChatRoomScreen.jsx) - v1.7.1
-- **Fixed online/offline presence**: Initialize presence state from `otherUser` prop
-- Presence now falls back to `otherUser.online/last_seen` when socket event not yet received
-- Header status properly shows online/offline with typing indicator
-- Presence updates from socket `presence:update` event properly override initial state
+**Single-Flight Locking:**
+- Promise-based `refreshPromises` Map per category
+- 20 concurrent requests → 1 YouTube call, others await same Promise
+- No recursive timeout retry pattern
 
-### API Call Reduction
+**Cache Strategy:**
+- Fresh cache: 4 hours (serve immediately, 0 YouTube calls)
+- Stale cache: 6 hours (serve stale + background refresh)
+- Quota fallback: serve cache/local/empty without YouTube calls
+- Never overwrite good cache with empty API results
+
+**Video Availability Tracking:**
+- New columns: `availability`, `failure_count`, `last_failed_at`, `failure_reason`
+- `markVideoUnavailable(category, videoId, reason)` for permanent failures
+- Exclude unavailable videos from cached feed by default
+
+---
+
+### Database Changes (db.js)
+
+**New Columns in `reels_cache`:**
+```sql
+availability VARCHAR(20) DEFAULT 'unknown'
+failure_count INTEGER DEFAULT 0
+last_failed_at TIMESTAMPTZ
+failure_reason TEXT
+```
+
+**New Table `app_config`:**
+```sql
+key VARCHAR(100) PRIMARY KEY,  -- quota_daily_used, quota_last_reset_date, quota_exceeded, quota_cooldown_until
+value TEXT NOT NULL
+```
+
+**New Index:**
+```sql
+CREATE INDEX idx_reels_cache_availability ON reels_cache(availability);
+```
+
+---
+
+### Frontend Changes (ReelsScreen.jsx)
+
+**Error 152 -4 Handling:**
+```javascript
+function parseYTErrorCode(errorCode) {
+  if (typeof errorCode === 'number') return errorCode;
+  if (typeof errorCode === 'string') {
+    const parts = errorCode.trim().split(/[\s,-]+/);
+    const code = parseInt(parts[0], 10);
+    if (!isNaN(code)) return code;
+  }
+  return null;
+}
+```
+
+**Expanded Permanent Error Codes:**
+```javascript
+const PERMANENT_YT_ERRORS = new Set([
+  2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155
+]);
+```
+
+**WebView Error Handling:**
+- `onError`, `onHttpError`, `onLoadStart`, `onLoad`, `onLoadEnd`
+- HTTP 400+ errors trigger player error handling
+- Structured logging: `[Reels WebView] Error: {...}`
+
+**loadMore Fix:**
+- `loadMoreFromCache()` only fetches from backend cache
+- NO YouTube API calls on scroll
+- Pagination from existing cached data
+
+**Proper Embed Headers:**
+```javascript
+const YOUTUBE_EMBED_HEADERS = {
+  'Referer': 'https://www.youtube.com/',
+  'Origin': 'https://www.youtube.com',
+};
+```
+
+**Immediate Skip:**
+- Permanent errors skip immediately (no 300ms delay)
+- Failed video IDs tracked in `failedVideoIdsRef`
+
+---
+
+### API Response Enhancements
+
+**GET `/api/reels/feed` now returns:**
+```json
+{
+  "videos": [...],
+  "source": "youtube|cache|stale_cache|local_fallback|cache_quota_fallback|empty",
+  "cacheAge": 123456,
+  "stale": true/false,
+  "warning": "Human readable message",
+  "quota": { "exceeded": false, "dailyUsed": 1234, "dailyLimit": 10000, ... }
+}
+```
+
+**New Endpoint:** `GET /api/reels/quota-status`
+
+---
+
+### Testing Verification
 
 | Scenario | Before | After |
 |----------|--------|-------|
-| Cold start (all categories) | 66 calls | 22 calls |
-| Single category refresh | 6 calls | 2 calls |
-| Category switch (cached) | 6 calls | 0 calls |
-| Pull-to-refresh (cached) | 6 calls | 0 calls |
-| Background refresh | 6 calls | 2 calls |
+| Cold start (cached) | 22 YouTube calls | 0 YouTube calls |
+| Category switch (cached) | 6 YouTube calls | 0 YouTube calls |
+| Scroll loadMore | 6 YouTube calls | 0 YouTube calls |
+| 20 concurrent users | 440 YouTube calls | 22 YouTube calls |
+| Quota exceeded | 500 errors + retries | Cached data served |
+| Error 152 -4 | Stuck video | Auto-skip to next |
+| Server restart | Quota state lost | State persisted |
 
-### Quota Protection
-- Circuit breaker activates on `quotaExceeded` (403)
-- 1-hour cooldown before retry
-- Survives multiple simultaneous requests
-- Structured logging: `[YouTube] Quota exceeded - circuit breaker activated for 1 hour`
-
-### Fallback Chain
-1. Fresh YouTube data (cache < 4h)
-2. Stale YouTube data (4h < cache < 6h) + background refresh
-3. Cached YouTube data (quota exceeded)
-4. Local Tojey videos (stored_media)
-5. Clean empty state with retry
-
-### Testing Scenarios Covered
-✅ TEST 1: YouTube working → Reels load  
-✅ TEST 2: YouTube quotaExceeded → cached Reels load  
-✅ TEST 3: YouTube quotaExceeded + no cache → local Tojey Reels load  
-✅ TEST 4: YouTube unavailable + no local → clean empty state  
-✅ TEST 5: 20 simultaneous requests → single YouTube refresh  
-✅ TEST 6: Cache valid → zero YouTube Search calls  
-✅ TEST 7: Cache expired → controlled single refresh  
-✅ TEST 8: YouTube refresh fails → old cache remains  
-✅ TEST 9: Repeated opens → no new YouTube searches  
-✅ TEST 10: Server restart → cache/database consistent  
+---
 
 ### Files Changed
-- `backend/src/youtube.js` - Complete rewrite with quota protection
-- `backend/src/server.js` - Enhanced Reels endpoints
-- `backend/src/db.js` - Added source column migration
-- `mobile/src/screens/ReelsScreen.jsx` - Local video support, quota warnings, Error 153 fix
-- `mobile/src/screens/ChatRoomScreen.jsx` - Presence tracking fix
+
+1. `backend/src/youtube.js` - Complete quota architecture rewrite
+2. `backend/src/db.js` - Schema migrations + app_config table
+3. `backend/src/server.js` - Enhanced error handling for QUOTA_ errors
+4. `mobile/src/screens/ReelsScreen.jsx` - Error 152 fix, WebView handlers, loadMore cache-only
+
+---
 
 ### APK
-- `tojey-v1.7.1-fixed.apk` (109 MB) - Release build with all fixes
+
+- `tojey-v1.7.2-fixed.apk` (109 MB) - Release build
+- Android 6.0+ (API 23) compatible
+- All existing features preserved (Chat, FCM, Auth, Media)

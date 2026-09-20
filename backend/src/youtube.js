@@ -1,5 +1,4 @@
 const { google } = require('googleapis');
-const { pool } = require('./db');
 
 const youtube = google.youtube('v3');
 
@@ -22,6 +21,7 @@ const STALE_WHILE_REVALIDATE_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_DURATION_MIN = 5;
 const DEFAULT_DURATION_MAX = 90;
 const BATCH_SIZE = 25;
+const MAX_ITEMS_PER_CATEGORY = 100;
 
 const QUOTA_DAILY_LIMIT = 10000;
 const QUOTA_PER_SEARCH = 100;
@@ -34,7 +34,12 @@ const quotaState = {
   cooldownUntil: 0,
 };
 
-const refreshPromises = new Map();
+const refreshLocks = new Map();
+
+const reelsMemoryCache = new Map();
+
+const failedVideoMemory = new Map();
+const FAILED_VIDEO_TTL_MS = 30 * 60 * 1000;
 
 function getApiKey() {
   const key = process.env.YOUTUBE_API_KEY;
@@ -48,58 +53,6 @@ function getTodayDateString() {
   return new Date().toISOString().split('T')[0];
 }
 
-async function loadQuotaState() {
-  try {
-    const result = await pool.query(
-      `SELECT key, value FROM app_config WHERE key IN ('quota_daily_used', 'quota_last_reset_date', 'quota_exceeded')`
-    );
-    const config = {};
-    for (const row of result.rows) {
-      config[row.key] = row.value;
-    }
-    
-    const today = getTodayDateString();
-    const lastReset = config.quota_last_reset_date;
-    
-    if (lastReset !== today) {
-      quotaState.dailyUsed = 0;
-      quotaState.lastResetDate = today;
-      quotaState.exceeded = false;
-      quotaState.cooldownUntil = 0;
-      await saveQuotaState();
-    } else {
-      quotaState.dailyUsed = parseInt(config.quota_daily_used || '0', 10);
-      quotaState.lastResetDate = lastReset;
-      quotaState.exceeded = config.quota_exceeded === 'true';
-      quotaState.cooldownUntil = parseInt(config.quota_cooldown_until || '0', 10);
-    }
-  } catch (e) {
-    console.warn('[YouTube] Could not load quota state from DB, using defaults:', e.message);
-    quotaState.lastResetDate = getTodayDateString();
-  }
-}
-
-async function saveQuotaState() {
-  try {
-    await pool.query(
-      `INSERT INTO app_config (key, value) VALUES 
-       ('quota_daily_used', $1),
-       ('quota_last_reset_date', $2),
-       ('quota_exceeded', $3),
-       ('quota_cooldown_until', $4)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      [
-        String(quotaState.dailyUsed),
-        quotaState.lastResetDate || getTodayDateString(),
-        String(quotaState.exceeded),
-        String(quotaState.cooldownUntil),
-      ]
-    );
-  } catch (e) {
-    console.error('[YouTube] Failed to save quota state:', e.message);
-  }
-}
-
 function checkAndResetDailyQuota() {
   const today = getTodayDateString();
   if (quotaState.lastResetDate !== today) {
@@ -107,7 +60,6 @@ function checkAndResetDailyQuota() {
     quotaState.lastResetDate = today;
     quotaState.exceeded = false;
     quotaState.cooldownUntil = 0;
-    saveQuotaState();
     console.log('[YouTube] Daily quota reset for new day');
   }
 }
@@ -132,7 +84,6 @@ function checkQuotaCircuitBreaker() {
   if (quotaState.exceeded && now >= quotaState.cooldownUntil) {
     quotaState.exceeded = false;
     quotaState.cooldownUntil = 0;
-    saveQuotaState();
     console.log('[YouTube] Quota circuit breaker cooldown expired - allowing requests again');
   }
   
@@ -143,7 +94,6 @@ function markQuotaExceeded() {
   const now = Date.now();
   quotaState.exceeded = true;
   quotaState.cooldownUntil = now + 60 * 60 * 1000;
-  saveQuotaState();
   console.warn('[YouTube] Quota exceeded - circuit breaker activated for 1 hour');
 }
 
@@ -152,7 +102,6 @@ function recordQuotaUsage(units) {
   if (quotaState.dailyUsed >= QUOTA_DAILY_LIMIT * 0.95) {
     markQuotaExceeded();
   }
-  saveQuotaState();
 }
 
 async function searchYouTube(query, options = {}) {
@@ -245,6 +194,60 @@ function filterByDuration(videos, minSec = DEFAULT_DURATION_MIN, maxSec = DEFAUL
   });
 }
 
+function getCacheEntry(category) {
+  return reelsMemoryCache.get(category);
+}
+
+function setCacheEntry(category, videos) {
+  const now = Date.now();
+  reelsMemoryCache.set(category, {
+    items: videos,
+    fetchedAt: now,
+    expiresAt: now + CACHE_TTL_MS,
+    staleAt: now + STALE_WHILE_REVALIDATE_MS,
+  });
+  
+  if (reelsMemoryCache.size > 50) {
+    const oldestKey = reelsMemoryCache.keys().next().value;
+    if (oldestKey) reelsMemoryCache.delete(oldestKey);
+  }
+}
+
+function getStaleCacheEntry(category) {
+  const entry = reelsMemoryCache.get(category);
+  if (!entry) return null;
+  const now = Date.now();
+  if (now > entry.staleAt) return null;
+  return entry;
+}
+
+function isVideoFailed(category, videoId) {
+  const key = `${category}:${videoId}`;
+  const entry = failedVideoMemory.get(key);
+  if (!entry) return false;
+  const now = Date.now();
+  if (now > entry.expiresAt) {
+    failedVideoMemory.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function markVideoFailed(category, videoId, reason) {
+  const key = `${category}:${videoId}`;
+  const now = Date.now();
+  failedVideoMemory.set(key, {
+    reason,
+    expiresAt: now + FAILED_VIDEO_TTL_MS,
+  });
+  
+  if (failedVideoMemory.size > 200) {
+    const oldestKey = failedVideoMemory.keys().next().value;
+    if (oldestKey) failedVideoMemory.delete(oldestKey);
+  }
+  console.log(`[Reels] Marked video ${videoId} as failed in category ${category}: ${reason}`);
+}
+
 async function fetchCategoryVideos(category) {
   const query = CATEGORY_QUERIES[category] || CATEGORY_QUERIES.trending;
   const allVideos = [];
@@ -274,7 +277,7 @@ async function fetchCategoryVideos(category) {
     const filtered = filterByDuration(details);
 
     for (const video of filtered) {
-      if (!seenIds.has(video.id)) {
+      if (!seenIds.has(video.id) && !isVideoFailed(category, video.id)) {
         seenIds.add(video.id);
         allVideos.push({
           videoId: video.id,
@@ -289,8 +292,9 @@ async function fetchCategoryVideos(category) {
       }
     }
 
+    const result = allVideos.slice(0, BATCH_SIZE);
     return {
-      videos: allVideos.slice(0, BATCH_SIZE),
+      videos: result,
       nextPageToken: allVideos.length >= BATCH_SIZE ? data.nextPageToken || 'continue' : null,
       hasMore: allVideos.length >= BATCH_SIZE,
     };
@@ -303,114 +307,6 @@ async function fetchCategoryVideos(category) {
   }
 }
 
-async function getCachedFeed(category, excludeUnavailable = true) {
-  let query = `
-    SELECT video_id, title, thumbnail_url, duration_seconds, category, channel_title, published_at, source, fetched_at, availability, failure_count
-    FROM reels_cache
-    WHERE category = $1
-  `;
-  
-  if (excludeUnavailable) {
-    query += ` AND (availability IS NULL OR availability != 'unavailable')`;
-  }
-  
-  query += ` ORDER BY fetched_at DESC LIMIT 50`;
-  
-  const result = await pool.query(query, [category]);
-  return result.rows.map(row => ({
-    ...row,
-    videoId: row.video_id,
-    thumbnailUrl: row.thumbnail_url,
-    durationSeconds: row.duration_seconds,
-    channelTitle: row.channel_title,
-    publishedAt: row.published_at,
-    source: row.source || 'youtube',
-    availability: row.availability,
-    failureCount: row.failure_count,
-  }));
-}
-
-async function getLocalReels(category) {
-  try {
-    const result = await pool.query(
-      `SELECT sm.filename, sm.mimetype, sm.size, sm.created_at,
-              COALESCE(NULLIF(sm.filename, ''), 'local-video') as video_id,
-              'Local Video' as title,
-              '' as thumbnail_url,
-              30 as duration_seconds,
-              'Tojey' as channel_title,
-              sm.created_at as published_at,
-              'local' as source
-       FROM stored_media sm
-       WHERE sm.mimetype LIKE 'video/%'
-       ORDER BY sm.created_at DESC
-       LIMIT 20`
-    );
-    return result.rows.map(row => ({
-      videoId: `/uploads/${row.filename}`,
-      title: row.title,
-      thumbnailUrl: row.thumbnail_url,
-      durationSeconds: row.duration_seconds,
-      category: category,
-      channelTitle: row.channel_title,
-      publishedAt: row.published_at,
-      source: 'local',
-      localUrl: `/uploads/${row.filename}`,
-    }));
-  } catch (error) {
-    console.error('[Reels] Error fetching local reels:', error.message);
-    return [];
-  }
-}
-
-async function cacheFeed(category, videos) {
-  if (!videos.length) return;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    for (const v of videos) {
-      await client.query(
-        `INSERT INTO reels_cache (category, video_id, title, thumbnail_url, duration_seconds, channel_title, published_at, source, fetched_at, availability, failure_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), COALESCE($9, 'unknown'), 0)
-         ON CONFLICT (category, video_id) DO UPDATE SET
-           title = EXCLUDED.title,
-           thumbnail_url = EXCLUDED.thumbnail_url,
-           duration_seconds = EXCLUDED.duration_seconds,
-           channel_title = EXCLUDED.channel_title,
-           published_at = EXCLUDED.published_at,
-           source = EXCLUDED.source,
-           fetched_at = NOW(),
-           availability = COALESCE(reels_cache.availability, 'unknown'),
-           failure_count = COALESCE(reels_cache.failure_count, 0)`,
-        [category, v.videoId, v.title, v.thumbnailUrl, v.durationSeconds, v.channelTitle, v.publishedAt, v.source || 'youtube', v.availability || 'unknown']
-      );
-    }
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('Cache feed error:', e.message);
-  } finally {
-    client.release();
-  }
-}
-
-async function markVideoUnavailable(category, videoId, reason) {
-  try {
-    await pool.query(
-      `UPDATE reels_cache 
-       SET availability = 'unavailable', 
-           failure_count = failure_count + 1,
-           last_failed_at = NOW(),
-           failure_reason = $3
-       WHERE category = $1 AND video_id = $2`,
-      [category, videoId, reason]
-    );
-    console.log(`[Reels] Marked video ${videoId} as unavailable in category ${category}: ${reason}`);
-  } catch (e) {
-    console.error('[Reels] Failed to mark video unavailable:', e.message);
-  }
-}
-
 async function getFeed(category, forceRefresh = false) {
   const validCategories = Object.keys(CATEGORY_QUERIES);
   if (!validCategories.includes(category)) {
@@ -420,7 +316,7 @@ async function getFeed(category, forceRefresh = false) {
   const lockKey = `refresh:${category}`;
   
   if (!forceRefresh) {
-    const existingPromise = refreshPromises.get(lockKey);
+    const existingPromise = refreshLocks.get(lockKey);
     if (existingPromise) {
       console.log(`[Reels] Refresh already in progress for ${category}, waiting for existing...`);
       return existingPromise;
@@ -428,14 +324,14 @@ async function getFeed(category, forceRefresh = false) {
   }
 
   if (!forceRefresh) {
-    const cached = await getCachedFeed(category);
-    if (cached.length) {
-      const oldest = new Date(cached[cached.length - 1].fetched_at);
-      const age = Date.now() - oldest.getTime();
+    const cached = getCacheEntry(category);
+    if (cached) {
+      const now = Date.now();
+      const age = now - cached.fetchedAt;
       if (age < CACHE_TTL_MS) {
-        console.log(`[Reels] Serving fresh cache for ${category} (age: ${Math.round(age/60000)}min, ${cached.length} videos)`);
+        console.log(`[Reels] Serving fresh cache for ${category} (age: ${Math.round(age/60000)}min, ${cached.items.length} videos)`);
         return { 
-          videos: cached, 
+          videos: cached.items, 
           cached: true, 
           nextPageToken: null, 
           hasMore: false,
@@ -447,7 +343,7 @@ async function getFeed(category, forceRefresh = false) {
         console.log(`[Reels] Serving stale cache for ${category} (age: ${Math.round(age/60000)}min), triggering background refresh`);
         refreshCategoryInBackground(category);
         return { 
-          videos: cached, 
+          videos: cached.items, 
           cached: true, 
           nextPageToken: null, 
           hasMore: false,
@@ -460,27 +356,16 @@ async function getFeed(category, forceRefresh = false) {
   }
 
   if (checkQuotaCircuitBreaker()) {
-    console.warn(`[Reels] Quota circuit breaker active, serving cached/stale data for ${category}`);
-    const cached = await getCachedFeed(category, false);
-    if (cached.length) {
+    console.warn(`[Reels] Quota circuit breaker active, serving cached data for ${category}`);
+    const cached = getCacheEntry(category);
+    if (cached) {
       return { 
-        videos: cached, 
+        videos: cached.items, 
         cached: true, 
         nextPageToken: null, 
         hasMore: false,
         source: 'cache_quota_fallback',
         warning: 'YouTube quota exceeded - showing cached results',
-      };
-    }
-    const local = await getLocalReels(category);
-    if (local.length) {
-      return { 
-        videos: local, 
-        cached: true, 
-        nextPageToken: null, 
-        hasMore: false,
-        source: 'local_fallback',
-        warning: 'YouTube quota exceeded - showing local videos',
       };
     }
     return { 
@@ -497,7 +382,7 @@ async function getFeed(category, forceRefresh = false) {
     try {
       console.log(`[Reels] Fetching fresh YouTube data for ${category} (forceRefresh=${forceRefresh})`);
       const result = await fetchCategoryVideos(category);
-      await cacheFeed(category, result.videos);
+      setCacheEntry(category, result.videos);
       return { 
         videos: result.videos, 
         cached: false,
@@ -508,26 +393,15 @@ async function getFeed(category, forceRefresh = false) {
     } catch (error) {
       if (error.message.startsWith('QUOTA_')) {
         console.warn(`[Reels] YouTube quota error for ${category}: ${error.message}`);
-        const cached = await getCachedFeed(category, false);
-        if (cached.length) {
+        const cached = getCacheEntry(category);
+        if (cached) {
           return { 
-            videos: cached, 
+            videos: cached.items, 
             cached: true, 
             nextPageToken: null, 
             hasMore: false,
             source: 'cache_quota_fallback',
             warning: 'YouTube quota exceeded - showing cached results',
-          };
-        }
-        const local = await getLocalReels(category);
-        if (local.length) {
-          return { 
-            videos: local, 
-            cached: true, 
-            nextPageToken: null, 
-            hasMore: false,
-            source: 'local_fallback',
-            warning: 'YouTube quota exceeded - showing local videos',
           };
         }
         return { 
@@ -543,18 +417,18 @@ async function getFeed(category, forceRefresh = false) {
     }
   })();
 
-  refreshPromises.set(lockKey, refreshPromise);
+  refreshLocks.set(lockKey, refreshPromise);
   
   try {
     return await refreshPromise;
   } finally {
-    refreshPromises.delete(lockKey);
+    refreshLocks.delete(lockKey);
   }
 }
 
 function refreshCategoryInBackground(category) {
   const lockKey = `refresh:${category}`;
-  if (refreshPromises.has(lockKey)) return;
+  if (refreshLocks.has(lockKey)) return;
   if (checkQuotaCircuitBreaker()) return;
   
   const promise = (async () => {
@@ -562,7 +436,7 @@ function refreshCategoryInBackground(category) {
       console.log(`[Reels] Background refresh for ${category}`);
       const result = await fetchCategoryVideos(category);
       if (result.videos.length > 0) {
-        await cacheFeed(category, result.videos);
+        setCacheEntry(category, result.videos);
         console.log(`[Reels] Background refresh completed for ${category}: ${result.videos.length} videos`);
       }
     } catch (error) {
@@ -570,17 +444,11 @@ function refreshCategoryInBackground(category) {
         console.error(`[Reels] Background refresh failed for ${category}:`, error.message);
       }
     } finally {
-      refreshPromises.delete(lockKey);
+      refreshLocks.delete(lockKey);
     }
   })();
   
-  refreshPromises.set(lockKey, promise);
-}
-
-function clearOldCache() {
-  return pool.query(
-    `DELETE FROM reels_cache WHERE fetched_at < NOW() - INTERVAL '7 days'`
-  );
+  refreshLocks.set(lockKey, promise);
 }
 
 function getQuotaStatus() {
@@ -598,21 +466,24 @@ function getQuotaStatus() {
   };
 }
 
-loadQuotaState();
+function clearMemoryCache() {
+  reelsMemoryCache.clear();
+  failedVideoMemory.clear();
+  refreshLocks.clear();
+  console.log('[Reels] Memory cache cleared');
+}
 
 module.exports = {
   getFeed,
   fetchCategoryVideos,
-  getCachedFeed,
-  cacheFeed,
-  clearOldCache,
-  getLocalReels,
   getQuotaStatus,
-  markVideoUnavailable,
+  markVideoFailed,
+  isVideoFailed,
   CATEGORY_QUERIES,
   CACHE_TTL_MS,
   STALE_WHILE_REVALIDATE_MS,
   DEFAULT_DURATION_MIN,
   DEFAULT_DURATION_MAX,
   BATCH_SIZE,
+  clearMemoryCache,
 };
