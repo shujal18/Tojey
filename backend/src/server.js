@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
 const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
-const { getFeed, clearOldCache } = require('./youtube');
+const { getFeed } = require('./youtube');
 const path = require('path');
 const { upload } = require('./media');
 
