@@ -190,6 +190,13 @@ export default function ReelsScreen({ token, user }) {
         setVideos(validVideos);
         failedVideoIdsRef.current.clear();
       }
+
+      if (data.warning) {
+        setToast(data.warning);
+      }
+      if (data.quota?.exceeded) {
+        console.warn('[Reels] YouTube quota exceeded:', data.quota);
+      }
     } catch (e) {
       if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
       setError(e.message);
@@ -431,51 +438,114 @@ export default function ReelsScreen({ token, user }) {
         onViewableItemsChanged={onViewableItemsChanged}
         onScrollEndDrag={loadMore}
         onMomentumScrollEnd={loadMore}
-        renderItem={({ item, index }) => (
-          <View style={styles.videoContainer}>
-            <WebView
-              ref={ref => onVideoRef(index, ref)}
-              source={{
-                uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`,
-              }}
-              style={styles.video}
-              javaScriptEnabled={true}
-              domStorageEnabled={true}
-              mediaPlaybackRequiresUserAction={false}
-              allowsInlineMediaPlayback={true}
-              userAgent="Mozilla/5.0 (Linux; Android 10; Tojey) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-              onMessage={(event) => handleWebViewMessage(event, index)}
-              onTouchStart={onTouchStart}
-              onTouchEnd={onTouchEnd}
-              onTouchCancel={onTouchEnd}
-              scrollEnabled={false}
-              injectedJavaScript={YOUTUBE_IFRAME_API_JS}
-              allowsBackForwardNavigationGestures={false}
-              hardwareAccelerationEnabled={true}
-              rendersToHardwareTextureAndroid={true}
-            />
-            <View style={styles.overlay}>
-              <View style={styles.infoRow}>
-                <TouchableOpacity style={styles.avatar}>
-                  <Text style={styles.avatarText}>
-                    @{(item.channelTitle ? item.channelTitle.slice(0, 10) : '') || '?'}
-                  </Text>
-                </TouchableOpacity>
-                <View style={styles.titleContainer}>
-                  <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
-                  <Text style={styles.meta}>
-                    {item.channelTitle} • {formatDuration(item.durationSeconds)}
-                  </Text>
+        renderItem={({ item, index }) => {
+            const isLocal = item.source === 'local';
+            const videoUri = isLocal 
+              ? `${SERVER_URL}${item.localUrl}` 
+              : `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`;
+            
+            return (
+              <View style={styles.videoContainer}>
+                {isLocal ? (
+                  <WebView
+                    ref={ref => onVideoRef(index, ref)}
+                    source={{ 
+                      html: `
+                        <html>
+                          <head>
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <style>
+                              body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; }
+                              video { width: 100%; height: 100%; object-fit: cover; }
+                            </style>
+                          </head>
+                          <body>
+                            <video id="localVideo" playsinline webkit-playsinline controls="false" loop muted>
+                              <source src="${videoUri}" type="video/mp4">
+                            </video>
+                            <script>
+                              const video = document.getElementById('localVideo');
+                              video.play().catch(e => console.log('Autoplay prevented:', e));
+                              window.onVideoReady = () => {
+                                window.postMessage(JSON.stringify({type: 'ytPlayerReady', videoId: 'local'}), '*');
+                              };
+                              video.oncanplay = window.onVideoReady;
+                              video.onerror = (e) => {
+                                window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: 5}), '*');
+                              };
+                            </script>
+                          </body>
+                        </html>
+                      `
+                    }}
+                    style={styles.video}
+                    javaScriptEnabled={true}
+                    domStorageEnabled={true}
+                    mediaPlaybackRequiresUserAction={false}
+                    allowsInlineMediaPlayback={true}
+                    onMessage={(event) => handleWebViewMessage(event, index)}
+                    onTouchStart={onTouchStart}
+                    onTouchEnd={onTouchEnd}
+                    onTouchCancel={onTouchEnd}
+                    scrollEnabled={false}
+                    allowsBackForwardNavigationGestures={false}
+                    hardwareAccelerationEnabled={true}
+                    rendersToHardwareTextureAndroid={true}
+                  />
+                ) : (
+                  <WebView
+                    ref={ref => onVideoRef(index, ref)}
+                    source={{ uri: videoUri }}
+                    style={styles.video}
+                    javaScriptEnabled={true}
+                    domStorageEnabled={true}
+                    mediaPlaybackRequiresUserAction={false}
+                    allowsInlineMediaPlayback={true}
+                    userAgent="Mozilla/5.0 (Linux; Android 10; Tojey) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    onMessage={(event) => handleWebViewMessage(event, index)}
+                    onTouchStart={onTouchStart}
+                    onTouchEnd={onTouchEnd}
+                    onTouchCancel={onTouchEnd}
+                    scrollEnabled={false}
+                    injectedJavaScript={YOUTUBE_IFRAME_API_JS}
+                    allowsBackForwardNavigationGestures={false}
+                    hardwareAccelerationEnabled={true}
+                    rendersToHardwareTextureAndroid={true}
+                  />
+                )}
+                <View style={styles.overlay}>
+                  <View style={styles.infoRow}>
+                    <TouchableOpacity style={styles.avatar}>
+                      <Text style={styles.avatarText}>
+                        @{(item.channelTitle ? item.channelTitle.slice(0, 10) : '') || '?'}
+                      </Text>
+                    </TouchableOpacity>
+                    <View style={styles.titleContainer}>
+                      <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
+                      <Text style={styles.meta}>
+                        {item.channelTitle} • {formatDuration(item.durationSeconds)}
+                      </Text>
+                    </View>
+                  </View>
                 </View>
               </View>
-            </View>
-          </View>
-        )}
+            );
+          }}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Icon name="video-outline" size={52} color={theme.primaryLight} />
-            <Text style={[styles.emptyText, { color: theme.textSecondary }]}>No videos found</Text>
+            <Text style={[styles.emptyText, { color: theme.textSecondary }]}>
+              {toast || 'No videos available right now'}
+            </Text>
+            {toast && (
+              <TouchableOpacity 
+                onPress={() => fetchFeed(category, true)} 
+                style={[styles.retryBtn, { backgroundColor: theme.primary, marginTop: 16 }]}
+              >
+                <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
+              </TouchableOpacity>
+            )}
           </View>
         }
         initialNumToRender={3}

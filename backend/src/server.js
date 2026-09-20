@@ -468,6 +468,9 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
     const forceRefresh = refresh === 'true';
     const { getFeed } = require('./youtube');
     const result = await getFeed(category, forceRefresh);
+    
+    const quotaStatus = require('./youtube').getQuotaStatus();
+    
     res.json({
       videos: result.videos.map(v => ({
         videoId: v.video_id || v.videoId,
@@ -477,16 +480,71 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
         category: v.category,
         channelTitle: v.channel_title || v.channelTitle,
         publishedAt: v.published_at || v.publishedAt,
+        source: v.source,
+        localUrl: v.localUrl,
       })),
       cached: result.cached,
       category,
       nextPageToken: result.nextPageToken,
       hasMore: result.hasMore,
+      source: result.source,
+      cacheAge: result.cacheAge,
+      stale: result.stale,
+      warning: result.warning,
+      quota: quotaStatus,
     });
   } catch (e) {
     console.error('reels:feed error', e.message);
     if (e.message.includes('YOUTUBE_API_KEY')) {
       return res.status(503).json({ error: 'Reels service unavailable - API key not configured' });
+    }
+    if (e.message.startsWith('QUOTA_')) {
+      const { getQuotaStatus, getCachedFeed, getLocalReels } = require('./youtube');
+      const cached = await getCachedFeed(category);
+      if (cached.length) {
+        return res.json({
+          videos: cached.map(v => ({
+            videoId: v.video_id || v.videoId,
+            title: v.title,
+            thumbnailUrl: v.thumbnail_url || v.thumbnailUrl,
+            durationSeconds: v.duration_seconds || v.durationSeconds,
+            category: v.category,
+            channelTitle: v.channel_title || v.channelTitle,
+            publishedAt: v.published_at || v.publishedAt,
+            source: v.source || 'youtube',
+          })),
+          cached: true,
+          category,
+          nextPageToken: null,
+          hasMore: false,
+          source: 'cache_quota_fallback',
+          warning: 'YouTube quota exceeded - showing cached results',
+          quota: getQuotaStatus(),
+        });
+      }
+      const local = await getLocalReels(category);
+      if (local.length) {
+        return res.json({
+          videos: local,
+          cached: true,
+          category,
+          nextPageToken: null,
+          hasMore: false,
+          source: 'local_fallback',
+          warning: 'YouTube quota exceeded - showing local videos',
+          quota: getQuotaStatus(),
+        });
+      }
+      return res.status(200).json({
+        videos: [],
+        cached: false,
+        category,
+        nextPageToken: null,
+        hasMore: false,
+        source: 'empty',
+        warning: 'No videos available - YouTube quota exceeded and no cached content',
+        quota: getQuotaStatus(),
+      });
     }
     res.status(500).json({ error: 'Server error' });
   }
@@ -511,6 +569,21 @@ app.get('/api/reels/categories', authMiddleware, async (req, res) => {
     res.json({ categories });
   } catch (e) {
     console.error('reels:categories error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Reels YouTube quota status endpoint
+app.get('/api/reels/quota-status', authMiddleware, async (req, res) => {
+  try {
+    const { getQuotaStatus } = require('./youtube');
+    const status = getQuotaStatus();
+    res.json({
+      quota: status,
+      youtubeApiConfigured: !!process.env.YOUTUBE_API_KEY,
+    });
+  } catch (e) {
+    console.error('reels:quota-status error', e.message);
     res.status(500).json({ error: 'Server error' });
   }
 });

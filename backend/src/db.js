@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS reels_cache (
   duration_seconds INTEGER NOT NULL,
   channel_title TEXT,
   published_at TIMESTAMPTZ,
+  source VARCHAR(20) DEFAULT 'youtube',
   fetched_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(category, video_id)
 );
@@ -190,6 +191,7 @@ ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAUL
 ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user_active ON device_tokens(user_id, is_active) WHERE is_active = TRUE;
+ALTER TABLE reels_cache ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'youtube';
 `;
 
 async function initDB() {
