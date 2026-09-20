@@ -181,7 +181,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const h = Math.round(e.nativeEvent.layout.height);
     setBarHeights((prev) => (prev[k] === h ? prev : { ...prev, [k]: h }));
   };
-  const [presence, setPresence] = useState(null);
+  const [presence, setPresence] = useState(() => ({
+    isOnline: otherUserOnline,
+    lastSeen: otherUserLastSeen,
+  }));
   const listRef = useRef(null);
   const voicePathRef = useRef(null);
   const recListenUnsub = useRef(null);
@@ -1890,8 +1893,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   }, []);
 
-const isOnline = presence?.isOnline ?? false;
-  const lastSeen = presence?.lastSeen ?? null;
+const isOnline = presence?.isOnline ?? otherUserOnline;
+  const lastSeen = presence?.lastSeen ?? otherUserLastSeen;
   const headerStatus = typing ? 'typing…' : (isOnline ? 'Online' : lastSeenText(lastSeen));
   const chatBg = theme.isDark ? '#16141C' : '#F2F0F9';
   const composerBg = hexToRgba(theme.composerBg, 0.94);

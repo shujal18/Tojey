@@ -61,6 +61,11 @@ const YOUTUBE_IFRAME_API_JS = `
   })();
 `;
 
+const YOUTUBE_EMBED_HEADERS = {
+  'Referer': 'https://www.youtube.com/',
+  'Origin': 'https://www.youtube.com',
+};
+
 const CATEGORIES = [
   { id: 'trending', label: 'Trending' },
   { id: 'love', label: 'Love' },
@@ -495,7 +500,10 @@ export default function ReelsScreen({ token, user }) {
                 ) : (
                   <WebView
                     ref={ref => onVideoRef(index, ref)}
-                    source={{ uri: videoUri }}
+                    source={{
+                      uri: videoUri,
+                      headers: YOUTUBE_EMBED_HEADERS,
+                    }}
                     style={styles.video}
                     javaScriptEnabled={true}
                     domStorageEnabled={true}
@@ -511,6 +519,7 @@ export default function ReelsScreen({ token, user }) {
                     allowsBackForwardNavigationGestures={false}
                     hardwareAccelerationEnabled={true}
                     rendersToHardwareTextureAndroid={true}
+                    mixedContentMode="always"
                   />
                 )}
                 <View style={styles.overlay}>
