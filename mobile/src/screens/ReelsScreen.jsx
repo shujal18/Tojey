@@ -48,12 +48,19 @@ const YOUTUBE_IFRAME_API_JS = `
                 window.postMessage(JSON.stringify({type: 'ytPlayerPlaying'}), '*');
               } else if (event.data === YT.PlayerState.BUFFERING) {
                 window.postMessage(JSON.stringify({type: 'ytPlayerBuffering'}), '*');
+              } else if (event.data === YT.PlayerState.PAUSED) {
+                window.postMessage(JSON.stringify({type: 'ytPlayerPaused'}), '*');
+              } else if (event.data === YT.PlayerState.CUED) {
+                window.postMessage(JSON.stringify({type: 'ytPlayerCued'}), '*');
               }
             },
             'onError': function(event) {
               var errorCode = event.data;
               console.log('[YouTube Player] Error:', errorCode);
               window.postMessage(JSON.stringify({type: 'ytPlayerError', errorCode: errorCode}), '*');
+            },
+            'onPlaybackQualityChange': function(event) {
+              window.postMessage(JSON.stringify({type: 'ytPlaybackQualityChange', quality: event.data}), '*');
             }
           }
         });
@@ -112,6 +119,7 @@ export default function ReelsScreen({ token, user }) {
   const activeIndexRef = useRef(0);
   const videoPlayersRef = useRef({});
   const playerReadyRef = useRef({});
+  const playerStateRef = useRef({}); // playing, paused, buffering, ended, error
   const isMountedRef = useRef(true);
   const requestIdRef = useRef(0);
   const loadingPageRef = useRef(false);
@@ -122,6 +130,7 @@ export default function ReelsScreen({ token, user }) {
   const touchStartTimeRef = useRef(0);
   const failedVideoIdsRef = useRef(new Set());
   const pendingSkipRef = useRef(false);
+  const preloadTriggeredRef = useRef(new Set());
 
   const viewabilityConfig = useMemo(() => ({
     itemVisiblePercentThreshold: 75,
@@ -133,10 +142,25 @@ export default function ReelsScreen({ token, user }) {
     if (!viewableItems || !viewableItems.length) return;
     const newIndex = viewableItems[0].index;
     if (newIndex !== activeIndexRef.current) {
+      const oldIndex = activeIndexRef.current;
       activeIndexRef.current = newIndex;
       userInteractedRef.current = false;
       pendingSkipRef.current = false;
 
+      // Pause old player
+      if (oldIndex !== newIndex) {
+        const oldPlayer = videoPlayersRef.current[oldIndex];
+        if (oldPlayer && playerReadyRef.current[oldIndex]) {
+          oldPlayer.injectJavaScript(`
+            if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
+              window.ytPlayer.pauseVideo();
+            }
+          `);
+        }
+        playerStateRef.current[oldIndex] = 'paused';
+      }
+
+      // Play new player
       const newPlayer = videoPlayersRef.current[newIndex];
       const newPlayerReady = playerReadyRef.current[newIndex];
       if (newPlayer && newPlayerReady) {
@@ -146,23 +170,29 @@ export default function ReelsScreen({ token, user }) {
             window.ytPlayer.playVideo();
           }
         `);
+        playerStateRef.current[newIndex] = 'playing';
       }
 
-      Object.keys(videoPlayersRef.current).forEach(key => {
-        const idx = parseInt(key, 10);
-        if (idx !== newIndex) {
-          const player = videoPlayersRef.current[idx];
-          if (player) {
-            player.injectJavaScript(`
-              if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
-                window.ytPlayer.pauseVideo();
-              }
-            `);
-          }
-        }
-      });
-
+      // Trigger preload for next video (nextIdx + 1)
       const nextIdx = newIndex + 1;
+      if (nextIdx < videos.length && !preloadTriggeredRef.current.has(nextIdx)) {
+        preloadTriggeredRef.current.add(nextIdx);
+        const nextPlayer = videoPlayersRef.current[nextIdx];
+        if (nextPlayer && playerReadyRef.current[nextIdx]) {
+          nextPlayer.injectJavaScript(`
+            if (window.ytPlayer && typeof window.ytPlayer.cueVideoById === 'function') {
+              var nextVideo = document.getElementById('tojey-youtube-player');
+              if (nextVideo && nextVideo.getVideoData) {
+                var data = nextVideo.getVideoData();
+                if (data && data.video_id) {
+                  window.ytPlayer.cueVideoById(data.video_id);
+                }
+              }
+            }
+          `);
+        }
+      }
+
       if (nextIdx >= videos.length - 3) {
         loadMore();
       }
@@ -210,6 +240,7 @@ export default function ReelsScreen({ token, user }) {
       } else {
         setVideos(validVideos);
         failedVideoIdsRef.current.clear();
+        preloadTriggeredRef.current.clear();
       }
 
       if (data.warning) {
@@ -277,9 +308,10 @@ export default function ReelsScreen({ token, user }) {
 
     playerReadyRef.current = {};
     videoPlayersRef.current = {};
+    playerStateRef.current = {};
     activeIndexRef.current = 0;
     failedVideoIdsRef.current.clear();
-    prefetchedRef.current.clear();
+    preloadTriggeredRef.current.clear();
 
     setCategory(cat);
     setVideos([]);
@@ -294,6 +326,7 @@ export default function ReelsScreen({ token, user }) {
     } else {
       delete videoPlayersRef.current[index];
       delete playerReadyRef.current[index];
+      delete playerStateRef.current[index];
     }
   }, []);
 
@@ -302,6 +335,7 @@ export default function ReelsScreen({ token, user }) {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'ytPlayerReady') {
         playerReadyRef.current[index] = true;
+        playerStateRef.current[index] = 'cued';
         if (index === activeIndexRef.current && !userInteractedRef.current && appVisibleRef.current) {
           const player = videoPlayersRef.current[index];
           if (player) {
@@ -310,6 +344,7 @@ export default function ReelsScreen({ token, user }) {
                 window.ytPlayer.playVideo();
               }
             `);
+            playerStateRef.current[index] = 'playing';
           }
         }
       } else if (data.type === 'ytPlayerError') {
@@ -324,7 +359,7 @@ export default function ReelsScreen({ token, user }) {
             pendingSkipRef.current = true;
             
             const parsedCode = parseYTErrorCode(errorCode);
-            if (parsedCode !== null && typeof fetchFeed === 'function') {
+            if (parsedCode !== null) {
               fetchFeed(category, false, false).then(() => {
                 if (isMountedRef.current && activeIndexRef.current === currentIndex) {
                   const nextIdx = currentIndex + 1;
@@ -349,11 +384,21 @@ export default function ReelsScreen({ token, user }) {
             }
           }
         }
+      } else if (data.type === 'ytPlayerPlaying') {
+        playerStateRef.current[index] = 'playing';
+      } else if (data.type === 'ytPlayerBuffering') {
+        playerStateRef.current[index] = 'buffering';
+      } else if (data.type === 'ytPlayerPaused') {
+        playerStateRef.current[index] = 'paused';
+      } else if (data.type === 'ytPlayerCued') {
+        playerStateRef.current[index] = 'cued';
+      } else if (data.type === 'ytPlaybackQualityChange') {
+        console.log('[Reels] Quality change:', data.quality);
       }
     } catch (e) {
       // Ignore parse errors
     }
-  }, [videos]);
+  }, [videos, category]);
 
   const onTouchStart = useCallback((event) => {
     touchStartYRef.current = event.nativeEvent?.pageY ?? 0;
@@ -508,8 +553,11 @@ export default function ReelsScreen({ token, user }) {
             const isLocal = item.source === 'local';
             const videoUri = isLocal 
               ? `${SERVER_URL}${item.localUrl}` 
-              : `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`;
+              : `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1&origin=https://www.youtube.com`;
             
+            const isActive = index === activeIndexRef.current;
+            const playerState = playerStateRef.current[index] || 'loading';
+
             return (
               <View style={styles.videoContainer}>
                 {isLocal ? (
@@ -526,7 +574,7 @@ export default function ReelsScreen({ token, user }) {
                             </style>
                           </head>
                           <body>
-                            <video id="localVideo" playsinline webkit-playsinline controls="false" loop muted>
+                            <video id="localVideo" playsinline webkit-playsinline controls="false" loop muted preload="metadata">
                               <source src="${videoUri}" type="video/mp4">
                             </video>
                             <script>
@@ -604,9 +652,26 @@ export default function ReelsScreen({ token, user }) {
                     hardwareAccelerationEnabled={true}
                     rendersToHardwareTextureAndroid={true}
                     mixedContentMode="always"
+                    startInLoadingState={true}
                   />
                 )}
-                <View style={styles.overlay}>
+                <View style={[
+                  styles.overlay,
+                  playerState === 'buffering' && styles.bufferingOverlay,
+                  playerState === 'error' && styles.errorOverlay,
+                ]}>
+                  {playerState === 'buffering' && (
+                    <View style={styles.bufferingIndicator}>
+                      <ActivityIndicator size="small" color="#fff" />
+                      <Text style={styles.bufferingText}>Loading...</Text>
+                    </View>
+                  )}
+                  {playerState === 'error' && (
+                    <View style={styles.errorIndicator}>
+                      <Icon name="alert-circle" size={24} color="#fff" />
+                      <Text style={styles.errorText}>Video unavailable</Text>
+                    </View>
+                  )}
                   <View style={styles.infoRow}>
                     <TouchableOpacity style={styles.avatar}>
                       <Text style={styles.avatarText}>
@@ -693,6 +758,34 @@ const styles = StyleSheet.create({
     padding: fs(16),
     justifyContent: 'space-between',
   },
+  bufferingOverlay: {
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  errorOverlay: {
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  bufferingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bufferingText: {
+    color: '#fff',
+    fontSize: fs(14),
+  },
+  errorIndicator: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 8,
+  },
+  errorText: {
+    color: '#fff',
+    fontSize: fs(14),
+  },
   infoRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -715,6 +808,5 @@ const styles = StyleSheet.create({
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
   emptyText: { fontSize: fs(15), marginTop: 12 },
   errorContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 16 },
-  errorText: { fontSize: fs(15), textAlign: 'center' },
   retryBtn: { paddingHorizontal: fs(24), paddingVertical: fs(10), borderRadius: fs(10) },
 });
