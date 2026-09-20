@@ -354,33 +354,24 @@ export default function ReelsScreen({ token, user }) {
         if (index === currentIndex && isMountedRef.current && !pendingSkipRef.current) {
           console.error('[Reels] YouTube player error:', errorCode, 'videoId:', videos[currentIndex]?.videoId);
           
-          if (isPermanentYTError(errorCode)) {
+          // Check if this is an error we should skip (permanent OR any error for current video)
+          const parsedCode = parseYTErrorCode(errorCode);
+          const shouldSkip = parsedCode !== null && (isPermanentYTError(errorCode) || parsedCode === 152 || parsedCode === 2 || parsedCode === 5 || parsedCode === 100 || parsedCode === 101 || parsedCode === 102 || parsedCode === 103 || parsedCode === 104 || parsedCode === 105 || parsedCode === 150 || parsedCode === 153 || parsedCode === 154 || parsedCode === 155);
+          
+          if (shouldSkip) {
             failedVideoIdsRef.current.add(videos[currentIndex]?.videoId);
             pendingSkipRef.current = true;
             
-            const parsedCode = parseYTErrorCode(errorCode);
-            if (parsedCode !== null) {
-              fetchFeed(category, false, false).then(() => {
-                if (isMountedRef.current && activeIndexRef.current === currentIndex) {
-                  const nextIdx = currentIndex + 1;
-                  if (nextIdx < videos.length && flatListRef.current) {
-                    flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
-                  } else if (videos.length === 0) {
-                    setToast('No more videos available');
-                  }
-                }
-              });
-            } else {
-              setTimeout(() => {
-                if (isMountedRef.current && activeIndexRef.current === currentIndex) {
-                  const nextIdx = currentIndex + 1;
-                  if (nextIdx < videos.length && flatListRef.current) {
-                    flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
-                  } else if (videos.length === 0) {
-                    setToast('No more videos available');
-                  }
-                }
-              }, 300);
+            // IMMEDIATE SKIP - no waiting, no fetchFeed call
+            const nextIdx = currentIndex + 1;
+            if (nextIdx < videos.length && flatListRef.current) {
+              console.log('[Reels] Skipping failed video, scrolling to next:', nextIdx);
+              flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
+            } else if (videos.length === 0) {
+              setToast('No more videos available');
+            } else if (nextIdx >= videos.length) {
+              // Try to load more videos
+              loadMore();
             }
           }
         }
@@ -633,6 +624,12 @@ export default function ReelsScreen({ token, user }) {
                           nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.statusCode }) }
                         }, index);
                       }
+                    }}
+                    onError={(event) => {
+                      console.error('[Reels WebView] Error:', event.nativeEvent);
+                      handleWebViewMessage({
+                        nativeEvent: { data: JSON.stringify({ type: 'ytPlayerError', errorCode: event.nativeEvent.message || 'WEBVIEW_ERROR' }) }
+                      }, index);
                     }}
                     onLoadStart={() => {
                       console.log('[Reels WebView] Load start for index:', index);
