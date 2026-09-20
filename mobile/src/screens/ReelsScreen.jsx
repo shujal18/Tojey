@@ -163,12 +163,10 @@ export default function ReelsScreen({ token, user }) {
       if (isRefresh) setRefreshing(true);
       setError(null);
 
-      const url = new URL(`${SERVER_URL}/api/reels/feed`);
-      url.searchParams.set('category', cat);
-      url.searchParams.set('refresh', isRefresh ? 'true' : 'false');
-      if (pageToken) url.searchParams.set('pageToken', pageToken);
+      const queryParts = [`category=${encodeURIComponent(cat)}`, `refresh=${isRefresh ? 'true' : 'false'}`];
+      if (pageToken) queryParts.push(`pageToken=${encodeURIComponent(pageToken)}`);
 
-      const res = await fetch(url.toString(), { headers: authHeaders });
+      const res = await fetch(`${SERVER_URL}/api/reels/feed?${queryParts.join('&')}`, { headers: authHeaders });
       const data = await res.json();
 
       if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
