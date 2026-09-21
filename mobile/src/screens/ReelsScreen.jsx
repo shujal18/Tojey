@@ -165,6 +165,20 @@ export default function ReelsScreen({ token, user }) {
   const failedVideoIdsRef = useRef(new Set());
   const pendingSkipRef = useRef(false);
   const preloadTriggeredRef = useRef(new Set());
+  
+  // Session-level seen videos for feed rotation
+  const seenVideoIdsRef = useRef(new Set());
+  
+  // Track if we've loaded initial feed
+  const hasLoadedInitialFeedRef = useRef(false);
+  
+  // Pagination state
+  const nextPageTokenRef = useRef(null);
+  const hasMoreRef = useRef(true);
+  const isLoadingMoreRef = useRef(false);
+  
+  // Track if we've attempted initial autoplay
+  const hasAttemptedInitialAutoplayRef = useRef(false);
 
   const viewabilityConfig = useMemo(() => ({
     itemVisiblePercentThreshold: 75,
@@ -260,10 +274,32 @@ export default function ReelsScreen({ token, user }) {
         throw new Error(data.error || 'Failed to load feed');
       }
 
-      const validVideos = (data.videos || []).filter(v => 
+      // Handle feed rotation on fresh load (not append, not pagination)
+      let validVideos = (data.videos || []).filter(v => 
         v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
         !failedVideoIdsRef.current.has(v.videoId)
       );
+
+      // Rotate feed on fresh load (not append, not pagination) to avoid same first video
+      if (!append && !pageToken && !isRefresh) {
+        // Filter out recently seen videos
+        const unseenVideos = validVideos.filter(v => !seenVideoIdsRef.current.has(v.videoId));
+        // If we have enough unseen videos, use them; otherwise fall back to all valid videos
+        const videosToUse = unseenVideos.length >= 3 ? unseenVideos : validVideos;
+        
+        // Shuffle the feed for rotation (but keep it deterministic per session)
+        // Use a simple rotation based on session entry count
+        const entryCount = seenVideoIdsRef.current.size;
+        if (videosToUse.length > 1) {
+          const rotateBy = Math.min(entryCount, videosToUse.length - 1);
+          validVideos = [...videosToUse.slice(rotateBy), ...videosToUse.slice(0, rotateBy)];
+        } else {
+          validVideos = videosToUse;
+        }
+      }
+
+      // Track seen videos
+      validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
 
       if (append) {
         setVideos(prev => {
@@ -275,7 +311,12 @@ export default function ReelsScreen({ token, user }) {
         setVideos(validVideos);
         failedVideoIdsRef.current.clear();
         preloadTriggeredRef.current.clear();
+        hasLoadedInitialFeedRef.current = true;
       }
+
+      // Update pagination state
+      nextPageTokenRef.current = data.nextPageToken || null;
+      hasMoreRef.current = data.hasMore === true;
 
       if (data.warning) {
         setToast(data.warning);
@@ -296,40 +337,54 @@ export default function ReelsScreen({ token, user }) {
     }
   }, [authHeaders]);
 
-  const loadMoreFromCache = useCallback(async () => {
-    if (videos.length && !loading && !loadingPageRef.current) {
-      loadingPageRef.current = true;
-      try {
-        const authHeaders = {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token || ''}`,
-        };
-        const res = await fetch(`${SERVER_URL}/api/reels/feed?category=${encodeURIComponent(category)}&refresh=false`, { headers: authHeaders });
-        const data = await res.json();
+  const loadMore = useCallback(async () => {
+    if (isLoadingMoreRef.current || !hasMoreRef.current || loadingPageRef.current) return;
+    
+    const tokenToUse = nextPageTokenRef.current;
+    if (!tokenToUse) return;
+    
+    isLoadingMoreRef.current = true;
+    loadingPageRef.current = true;
+    
+    try {
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token || ''}`,
+      };
+      const res = await fetch(`${SERVER_URL}/api/reels/feed?category=${encodeURIComponent(category)}&refresh=false&pageToken=${encodeURIComponent(tokenToUse)}`, { headers: authHeaders });
+      const data = await res.json();
+      
+      if (!isMountedRef.current) return;
+      
+      if (res.ok && data.videos && data.videos.length > 0) {
+        const validVideos = data.videos.filter(v => 
+          v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
+          !failedVideoIdsRef.current.has(v.videoId) &&
+          !seenVideoIdsRef.current.has(v.videoId)
+        );
         
-        if (!isMountedRef.current) return;
+        // Track seen videos
+        validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
         
-        if (res.ok && data.videos && data.videos.length > videos.length) {
-          const validVideos = data.videos.filter(v => 
-            v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
-            !failedVideoIdsRef.current.has(v.videoId)
-          );
-          
-          setVideos(prev => {
-            const existingIds = new Set(prev.map(v => v.videoId));
-            const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
-            return [...prev, ...newVideos];
-          });
-        }
-      } catch (e) {
-        console.warn('[Reels] loadMore failed:', e.message);
-      } finally {
-        if (isMountedRef.current) {
-          loadingPageRef.current = false;
-        }
+        setVideos(prev => {
+          const existingIds = new Set(prev.map(v => v.videoId));
+          const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
+          return [...prev, ...newVideos];
+        });
+        
+        // Update pagination state
+        nextPageTokenRef.current = data.nextPageToken || null;
+        hasMoreRef.current = data.hasMore === true;
+      }
+    } catch (e) {
+      console.warn('[Reels] loadMore failed:', e.message);
+    } finally {
+      if (isMountedRef.current) {
+        loadingPageRef.current = false;
+        isLoadingMoreRef.current = false;
       }
     }
-  }, [category, token, videos.length, loading]);
+  }, [category, token]);
 
   const handleCategoryChange = useCallback((cat) => {
     if (cat === category) return;
@@ -349,13 +404,18 @@ export default function ReelsScreen({ token, user }) {
     failedVideoIdsRef.current.clear();
     preloadTriggeredRef.current.clear();
     pendingSkipRef.current = false;
+    // Reset pagination state
+    nextPageTokenRef.current = null;
+    hasMoreRef.current = true;
+    isLoadingMoreRef.current = false;
+    seenVideoIdsRef.current.clear();
 
     setCategory(cat);
     setVideos([]);
     fetchFeed(cat, false, false);
   }, [category, fetchFeed]);
 
-  const loadMore = loadMoreFromCache;
+  // loadMore is now defined above with pagination support
 
   const onVideoRef = useCallback((index, ref) => {
     if (ref) {
@@ -468,6 +528,7 @@ export default function ReelsScreen({ token, user }) {
   useEffect(() => {
     isMountedRef.current = true;
     requestIdRef.current = 0;
+    hasAttemptedInitialAutoplayRef.current = false;
     fetchFeed(category, false, false);
 
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -496,7 +557,29 @@ export default function ReelsScreen({ token, user }) {
       }
     });
 
+    // Trigger initial autoplay when first video becomes ready
+    const initialAutoplayCheck = setInterval(() => {
+      if (hasLoadedInitialFeedRef.current && 
+          !hasAttemptedInitialAutoplayRef.current &&
+          videos.length > 0 &&
+          playerReadyRef.current[0] &&
+          !userInteractedRef.current &&
+          appVisibleRef.current) {
+        const player = videoPlayersRef.current[0];
+        if (player) {
+          player.injectJavaScript(`
+            if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
+              window.ytPlayer.playVideo();
+            }
+          `);
+        }
+        hasAttemptedInitialAutoplayRef.current = true;
+        clearInterval(initialAutoplayCheck);
+      }
+    }, 500);
+
     return () => {
+      clearInterval(initialAutoplayCheck);
       isMountedRef.current = false;
       subscription.remove();
       

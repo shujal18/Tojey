@@ -467,7 +467,7 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
 
     const forceRefresh = refresh === 'true';
     const { getFeed, getQuotaStatus } = require('./youtube');
-    const result = await getFeed(category, forceRefresh);
+    const result = await getFeed(category, forceRefresh, pageToken);
     
     const quotaStatus = getQuotaStatus();
     

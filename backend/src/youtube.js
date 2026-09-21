@@ -20,8 +20,9 @@ const CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 const STALE_WHILE_REVALIDATE_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_DURATION_MIN = 5;
 const DEFAULT_DURATION_MAX = 90;
-const BATCH_SIZE = 25;
-const MAX_ITEMS_PER_CATEGORY = 100;
+const BATCH_SIZE = 50;
+const MAX_ITEMS_PER_CATEGORY = 200;
+const MAX_POOL_SIZE = 200;
 
 const QUOTA_DAILY_LIMIT = 10000;
 const QUOTA_PER_SEARCH = 100;
@@ -248,7 +249,7 @@ function markVideoFailed(category, videoId, reason) {
   console.log(`[Reels] Marked video ${videoId} as failed in category ${category}: ${reason}`);
 }
 
-async function fetchCategoryVideos(category) {
+async function fetchCategoryVideos(category, pageToken = null) {
   const query = CATEGORY_QUERIES[category] || CATEGORY_QUERIES.trending;
   const allVideos = [];
   const seenIds = new Set();
@@ -261,6 +262,7 @@ async function fetchCategoryVideos(category) {
       maxResults: 50,
       regionCode,
       relevanceLanguage,
+      pageToken,
     });
 
     if (!data.items?.length) {
@@ -318,18 +320,18 @@ async function fetchCategoryVideos(category) {
   }
 }
 
-async function getFeed(category, forceRefresh = false) {
+async function getFeed(category, forceRefresh = false, pageToken = null) {
   const validCategories = Object.keys(CATEGORY_QUERIES);
   if (!validCategories.includes(category)) {
     throw new Error(`Invalid category: ${category}`);
   }
 
-  const lockKey = `refresh:${category}`;
+  const lockKey = `refresh:${category}:${pageToken || 'initial'}`;
   
   if (!forceRefresh) {
     const existingPromise = refreshLocks.get(lockKey);
     if (existingPromise) {
-      console.log(`[Reels] Refresh already in progress for ${category}, waiting for existing...`);
+      console.log(`[Reels] Refresh already in progress for ${category} (pageToken: ${pageToken}), waiting for existing...`);
       return existingPromise;
     }
   }
@@ -391,9 +393,12 @@ async function getFeed(category, forceRefresh = false) {
 
   const refreshPromise = (async () => {
     try {
-      console.log(`[Reels] Fetching fresh YouTube data for ${category} (forceRefresh=${forceRefresh})`);
-      const result = await fetchCategoryVideos(category);
-      setCacheEntry(category, result.videos);
+      console.log(`[Reels] Fetching fresh YouTube data for ${category} (forceRefresh=${forceRefresh}, pageToken=${pageToken})`);
+      const result = await fetchCategoryVideos(category, pageToken);
+      // Only cache the initial page (no pageToken)
+      if (!pageToken) {
+        setCacheEntry(category, result.videos);
+      }
       return { 
         videos: result.videos, 
         cached: false,
