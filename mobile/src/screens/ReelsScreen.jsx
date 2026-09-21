@@ -23,6 +23,10 @@ const STORAGE_KEY_SEEN_VIDEOS = '@tojey_seen_reels_videos';
 const STORAGE_KEY_SEEN_VIDEOS_TIMESTAMP = '@tojey_seen_reels_timestamp';
 const SEEN_VIDEOS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache';
+const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp';
+const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes cache
+
 const YOUTUBE_IFRAME_API_JS = `
   (function() {
     // Prevent multiple initializations
@@ -187,6 +191,42 @@ async function saveSeenVideos(seenSet) {
   }
 }
 
+async function loadFeedCache(category) {
+  try {
+    const [storedData, storedTimestamp] = await Promise.all([
+      AsyncStorage.getItem(`${STORAGE_KEY_FEED_CACHE}_${category}`),
+      AsyncStorage.getItem(`${STORAGE_KEY_FEED_CACHE_TIMESTAMP}_${category}`),
+    ]);
+    
+    if (storedData && storedTimestamp) {
+      const timestamp = parseInt(storedTimestamp, 10);
+      const now = Date.now();
+      if (now - timestamp < FEED_CACHE_MAX_AGE_MS) {
+        const parsed = JSON.parse(storedData);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          console.log('[Reels] Loaded feed from cache for category:', category);
+          return parsed;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Reels] Failed to load feed cache:', e);
+  }
+  return null;
+}
+
+async function saveFeedCache(category, videos) {
+  try {
+    await Promise.all([
+      AsyncStorage.setItem(`${STORAGE_KEY_FEED_CACHE}_${category}`, JSON.stringify(videos)),
+      AsyncStorage.setItem(`${STORAGE_KEY_FEED_CACHE_TIMESTAMP}_${category}`, String(Date.now())),
+    ]);
+    console.log('[Reels] Saved feed cache for category:', category);
+  } catch (e) {
+    console.warn('[Reels] Failed to save feed cache:', e);
+  }
+}
+
 export default function ReelsScreen({ token, user }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState(() => getRandomCategory());
@@ -217,8 +257,8 @@ export default function ReelsScreen({ token, user }) {
   const seenVideoIdsRef = useRef(new Set());
   
   // Track if we've loaded initial feed
-  const hasLoadedInitialFeedRef = useRef(false);
-  
+const hasLoadedInitialFeedRef = useRef(false);
+   
   // Pagination state
   const nextPageTokenRef = useRef(null);
   const hasMoreRef = useRef(true);
@@ -226,6 +266,12 @@ export default function ReelsScreen({ token, user }) {
   
   // Track if we've attempted initial autoplay
   const hasAttemptedInitialAutoplayRef = useRef(false);
+  
+  // Buffering optimization: track which videos are preloaded
+  const preloadedVideosRef = useRef(new Set());
+  
+  // Track buffering state to prevent rapid re-renders
+  const bufferingTimeoutRef = useRef(null);
 
   const viewabilityConfig = useMemo(() => ({
     itemVisiblePercentThreshold: 75,
@@ -268,13 +314,33 @@ export default function ReelsScreen({ token, user }) {
         playerStateRef.current[newIndex] = 'playing';
       }
 
-      // Trigger preload for next video (nextIdx + 1)
+      // Preload next video (current + 1) for smoother transitions
       const nextIdx = newIndex + 1;
       if (nextIdx < videos.length && !preloadTriggeredRef.current.has(nextIdx)) {
         preloadTriggeredRef.current.add(nextIdx);
         const nextPlayer = videoPlayersRef.current[nextIdx];
         if (nextPlayer && playerReadyRef.current[nextIdx]) {
           nextPlayer.injectJavaScript(`
+            if (window.ytPlayer && typeof window.ytPlayer.cueVideoById === 'function') {
+              var nextVideo = document.getElementById('tojey-youtube-player');
+              if (nextVideo && nextVideo.getVideoData) {
+                var data = nextVideo.getVideoData();
+                if (data && data.video_id) {
+                  window.ytPlayer.cueVideoById(data.video_id);
+                }
+              }
+            }
+          `);
+        }
+      }
+
+      // Preload the video after next for even smoother scrolling
+      const nextNextIdx = newIndex + 2;
+      if (nextNextIdx < videos.length && !preloadTriggeredRef.current.has(nextNextIdx)) {
+        preloadTriggeredRef.current.add(nextNextIdx);
+        const nextNextPlayer = videoPlayersRef.current[nextNextIdx];
+        if (nextNextPlayer && playerReadyRef.current[nextNextIdx]) {
+          nextNextPlayer.injectJavaScript(`
             if (window.ytPlayer && typeof window.ytPlayer.cueVideoById === 'function') {
               var nextVideo = document.getElementById('tojey-youtube-player');
               if (nextVideo && nextVideo.getVideoData) {
@@ -308,6 +374,45 @@ export default function ReelsScreen({ token, user }) {
       if (!append) setLoading(true);
       if (isRefresh) setRefreshing(true);
       setError(null);
+
+      // Load from cache first for instant render (unless refreshing)
+      if (!isRefresh && !append && !pageToken) {
+        const cachedVideos = await loadFeedCache(cat);
+        if (cachedVideos && cachedVideos.length > 0) {
+          // Filter out failed videos
+          const validCachedVideos = cachedVideos.filter(v => 
+            v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
+            !failedVideoIdsRef.current.has(v.videoId)
+          );
+          
+          if (validCachedVideos.length > 0) {
+            // Rotate cached feed
+            const unseenVideos = validCachedVideos.filter(v => !seenVideoIdsRef.current.has(v.videoId));
+            const videosToUse = unseenVideos.length >= 3 ? unseenVideos : validCachedVideos;
+            const entryCount = seenVideoIdsRef.current.size;
+            let validVideos = videosToUse;
+            if (videosToUse.length > 1) {
+              const rotateBy = Math.min(entryCount, videosToUse.length - 1);
+              validVideos = [...videosToUse.slice(rotateBy), ...videosToUse.slice(0, rotateBy)];
+            }
+            
+            validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
+            
+            if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
+            
+            setVideos(validVideos);
+            failedVideoIdsRef.current.clear();
+            preloadTriggeredRef.current.clear();
+            hasLoadedInitialFeedRef.current = true;
+            nextPageTokenRef.current = null;
+            hasMoreRef.current = true;
+            setLoading(false);
+            setRefreshing(false);
+            loadingPageRef.current = false;
+            console.log('[Reels] Rendered feed from local cache');
+          }
+        }
+      }
 
       const queryParts = [`category=${encodeURIComponent(cat)}`, `refresh=${isRefresh ? 'true' : 'false'}`];
       if (pageToken) queryParts.push(`pageToken=${encodeURIComponent(pageToken)}`);
@@ -364,6 +469,11 @@ export default function ReelsScreen({ token, user }) {
       // Update pagination state
       nextPageTokenRef.current = data.nextPageToken || null;
       hasMoreRef.current = data.hasMore === true;
+
+      // Save to cache for next time
+      if (!append && !pageToken && validVideos.length > 0) {
+        saveFeedCache(cat, validVideos);
+      }
 
       if (data.warning) {
         setToast(data.warning);
@@ -493,9 +603,22 @@ export default function ReelsScreen({ token, user }) {
           }
         }
       } else if (data.type === 'ytPlayerPlaying') {
+        // Clear buffering timeout when video starts playing
+        if (bufferingTimeoutRef.current) {
+          clearTimeout(bufferingTimeoutRef.current);
+          bufferingTimeoutRef.current = null;
+        }
         playerStateRef.current[index] = 'playing';
       } else if (data.type === 'ytPlayerBuffering') {
-        playerStateRef.current[index] = 'buffering';
+        // Debounce buffering state to prevent flickering
+        if (bufferingTimeoutRef.current) {
+          clearTimeout(bufferingTimeoutRef.current);
+        }
+        bufferingTimeoutRef.current = setTimeout(() => {
+          if (isMountedRef.current) {
+            playerStateRef.current[index] = 'buffering';
+          }
+        }, 500); // Only show buffering after 500ms
       } else if (data.type === 'ytPlayerPaused') {
         playerStateRef.current[index] = 'paused';
       } else if (data.type === 'ytPlayerCued') {
@@ -550,18 +673,21 @@ export default function ReelsScreen({ token, user }) {
     fetchFeed(category, false, false);
 
     const subscription = AppState.addEventListener('change', (nextState) => {
-      appVisibleRef.current = nextState === 'active';
-      if (nextState === 'active') {
-        const player = videoPlayersRef.current[activeIndexRef.current];
-        const ready = playerReadyRef.current[activeIndexRef.current];
-        if (player && ready && !userInteractedRef.current) {
-          player.injectJavaScript(`
-            if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
-              window.ytPlayer.playVideo();
-            }
-          `);
-        }
-      } else {
+      const wasActive = appVisibleRef.current;
+      const isActive = nextState === 'active';
+      appVisibleRef.current = isActive;
+      
+      if (isActive && !wasActive) {
+        // App came back from background - refresh feed to get new content
+        console.log('[Reels] App became active, refreshing feed...');
+        // Reset seen videos for fresh feed rotation
+        seenVideoIdsRef.current.clear();
+        // Reset pagination and fetch fresh feed
+        nextPageTokenRef.current = null;
+        hasMoreRef.current = true;
+        fetchFeed(category, true, false);
+      } else if (!isActive) {
+        // App went to background - pause all players
         Object.keys(videoPlayersRef.current).forEach(key => {
           const player = videoPlayersRef.current[key];
           if (player) {
@@ -572,6 +698,17 @@ export default function ReelsScreen({ token, user }) {
             `);
           }
         });
+      } else if (isActive && wasActive) {
+        // App was already active (e.g., screen focus) - resume playback
+        const player = videoPlayersRef.current[activeIndexRef.current];
+        const ready = playerReadyRef.current[activeIndexRef.current];
+        if (player && ready && !userInteractedRef.current) {
+          player.injectJavaScript(`
+            if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
+              window.ytPlayer.playVideo();
+            }
+          `);
+        }
       }
     });
 
@@ -677,7 +814,7 @@ export default function ReelsScreen({ token, user }) {
             
             const videoUri = isLocal 
               ? `${SERVER_URL}${item.localUrl}` 
-              : `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=0&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1`;
+              : `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&playsinline=1&controls=0&modestbranding=1&rel=0&iv_load_policy=3&enablejsapi=1&widgetid=1&mute=1`;
             
             const isActive = index === activeIndexRef.current;
             const playerState = playerStateRef.current[index] || 'loading';
@@ -777,6 +914,8 @@ export default function ReelsScreen({ token, user }) {
                     allowsBackForwardNavigationGestures={false}
                     hardwareAccelerationEnabled={true}
                     rendersToHardwareTextureAndroid={true}
+                    mediaPlaybackRequiresUserAction={false}
+                    allowsInlineMediaPlayback={true}
                   />
                 )}
                 <View style={[
