@@ -137,6 +137,8 @@ export default function ReelsScreen({ token, user }) {
   const currentVideoIdRef = useRef(null);
   const playerStateRef = useRef('idle'); // idle, loading, ready, playing, paused, buffering, error
   const webViewReadyRef = useRef(false);
+  const lastPlayingVideoIdRef = useRef(null);
+  const playWatchRef = useRef(null);
   const isMountedRef = useRef(true);
   const requestIdRef = useRef(0);
   const loadingPageRef = useRef(false);
@@ -170,7 +172,12 @@ export default function ReelsScreen({ token, user }) {
   }), [token]);
 
   // Stable WebView source so the single player is never reloaded by re-renders.
-  const webViewSource = useMemo(() => ({ html: REELS_PLAYER_HTML }), []);
+  // baseUrl gives the page a real https origin (not about:blank) so YouTube
+  // allows video playback; without it the embed stays stuck on the thumbnail.
+  const webViewSource = useMemo(() => ({
+    html: REELS_PLAYER_HTML,
+    baseUrl: 'https://tojey.app/',
+  }), []);
 
   const skipToIndex = useCallback((index) => {
     if (pendingSkipRef.current || !isMountedRef.current) return;
@@ -193,6 +200,35 @@ export default function ReelsScreen({ token, user }) {
     } else if (loadMoreRef.current) {
       loadMoreRef.current();
     }
+  }, []);
+
+  // If the embed never reports PLAYING (blocked autoplay), nudge it a few times.
+  const schedulePlayWatch = useCallback(() => {
+    const targetId = currentVideoIdRef.current;
+    if (playWatchRef.current) clearTimeout(playWatchRef.current);
+    playWatchRef.current = setTimeout(() => {
+      playWatchRef.current = null;
+      if (!isMountedRef.current) return;
+      if (
+        webViewRef.current &&
+        targetId &&
+        lastPlayingVideoIdRef.current !== targetId
+      ) {
+        console.log('[Reels] No PLAYING event yet, retrying playback:', targetId);
+        webViewRef.current.injectJavaScript('window.__retryPlay && window.__retryPlay(); true;');
+        // One more nudge after the retry window if it still has not started.
+        playWatchRef.current = setTimeout(() => {
+          playWatchRef.current = null;
+          if (
+            isMountedRef.current &&
+            webViewRef.current &&
+            lastPlayingVideoIdRef.current !== targetId
+          ) {
+            webViewRef.current.injectJavaScript('window.__retryPlay && window.__retryPlay(); true;');
+          }
+        }, 5000);
+      }
+    }, 7000);
   }, []);
 
   const loadVideo = useCallback((item, index) => {
@@ -225,8 +261,9 @@ export default function ReelsScreen({ token, user }) {
       webViewRef.current.injectJavaScript(
         `window.__loadVideo('${videoId}', '${safeThumb}'); true;`
       );
+      schedulePlayWatch();
     }
-  }, []);
+  }, [schedulePlayWatch]);
 
   const fetchFeed = useCallback(async (cat, isRefresh = false, append = false, pageToken = null) => {
     const currentRequestId = ++requestIdRef.current;
@@ -437,6 +474,11 @@ export default function ReelsScreen({ token, user }) {
           playerStateRef.current = 'ready';
         } else if (evt === 'playing') {
           playerStateRef.current = 'playing';
+          lastPlayingVideoIdRef.current = currentVideoIdRef.current;
+          if (playWatchRef.current) {
+            clearTimeout(playWatchRef.current);
+            playWatchRef.current = null;
+          }
         } else if (evt === 'paused') {
           playerStateRef.current = 'paused';
         } else if (evt === 'buffering') {
@@ -584,6 +626,10 @@ export default function ReelsScreen({ token, user }) {
     return () => {
       isMountedRef.current = false;
       subscription.remove();
+      if (playWatchRef.current) {
+        clearTimeout(playWatchRef.current);
+        playWatchRef.current = null;
+      }
       if (webViewRef.current && webViewReadyRef.current) {
         try {
           webViewRef.current.injectJavaScript('window.__destroy(); true;');

@@ -114,14 +114,29 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       }
 
       // ---- player wiring ----------------------------------------------------
+      // Muted autoplay + retries: Android WebView blocks unmuted programmatic
+      // autoplay, so begin muted and keep nudging until the player reports PLAYING.
+      function forcePlay() {
+        if (!player) return;
+        try { player.mute(); } catch (e) {}
+        try { player.playVideo(); } catch (e) {}
+        var attempts = 0;
+        var timer = setInterval(function () {
+          attempts++;
+          if (attempts >= 8) { clearInterval(timer); return; }
+          try {
+            var st = player.getPlayerState ? player.getPlayerState() : -1;
+            if (st === 1) { clearInterval(timer); return; } // PLAYING
+            player.mute();
+            player.playVideo();
+          } catch (e) { clearInterval(timer); }
+        }, 700);
+      }
+
       function onPlayerReady() {
         playerReady = true;
         emit('ready');
-        // Autoplay the current video muted (required for programmatic autoplay).
-        if (player && currentVideoId) {
-          try { player.mute(); } catch (e) {}
-          try { player.playVideo(); } catch (e) {}
-        }
+        forcePlay();
       }
 
       function onStateChange(event) {
@@ -166,6 +181,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
           height: window.innerHeight,
           playerVars: {
             autoplay: 1,
+            mute: 1,
             playsinline: 1,
             controls: 0,
             modestbranding: 1,
@@ -231,6 +247,10 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
           }
           buildPlayer(videoId);
         });
+      };
+
+      window.__retryPlay = function () {
+        forcePlay();
       };
 
       window.__play = function () {
