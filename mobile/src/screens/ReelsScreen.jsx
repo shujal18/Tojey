@@ -143,6 +143,13 @@ function validateVideoId(videoId) {
   return /^[a-zA-Z0-9_-]{11}$/.test(videoId.trim());
 }
 
+function sanitizeVideoId(videoId) {
+  if (!videoId || typeof videoId !== 'string') return null;
+  const trimmed = videoId.trim();
+  if (validateVideoId(trimmed)) return trimmed;
+  return null;
+}
+
 async function loadSeenVideos() {
   try {
     const [storedIds, storedTimestamp] = await Promise.all([
