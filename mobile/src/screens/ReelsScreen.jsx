@@ -10,6 +10,7 @@ import {
   AppState,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
@@ -17,6 +18,10 @@ import { SERVER_URL } from '../config';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
+const STORAGE_KEY_SEEN_VIDEOS = '@tojey_seen_reels_videos';
+const STORAGE_KEY_SEEN_VIDEOS_TIMESTAMP = '@tojey_seen_reels_timestamp';
+const SEEN_VIDEOS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 const YOUTUBE_IFRAME_API_JS = `
   (function() {
@@ -101,6 +106,11 @@ const CATEGORIES = [
   { id: 'memes', label: 'Memes' },
 ];
 
+// Auto-rotate categories every session
+const getRandomCategory = () => {
+  return CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)].id;
+};
+
 const ITEM_HEIGHT = SCREEN_H;
 const PERMANENT_YT_ERRORS = new Set([2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155]);
 
@@ -133,16 +143,46 @@ function validateVideoId(videoId) {
   return /^[a-zA-Z0-9_-]{11}$/.test(videoId.trim());
 }
 
-function sanitizeVideoId(videoId) {
-  if (!videoId || typeof videoId !== 'string') return null;
-  const trimmed = videoId.trim();
-  if (validateVideoId(trimmed)) return trimmed;
-  return null;
+async function loadSeenVideos() {
+  try {
+    const [storedIds, storedTimestamp] = await Promise.all([
+      AsyncStorage.getItem(STORAGE_KEY_SEEN_VIDEOS),
+      AsyncStorage.getItem(STORAGE_KEY_SEEN_VIDEOS_TIMESTAMP),
+    ]);
+    
+    if (storedIds && storedTimestamp) {
+      const timestamp = parseInt(storedTimestamp, 10);
+      const now = Date.now();
+      if (now - timestamp < SEEN_VIDEOS_MAX_AGE_MS) {
+        const parsed = JSON.parse(storedIds);
+        if (Array.isArray(parsed)) {
+          return new Set(parsed);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Reels] Failed to load seen videos:', e);
+  }
+  return new Set();
+}
+
+async function saveSeenVideos(seenSet) {
+  try {
+    const ids = Array.from(seenSet);
+    // Keep only last 500 videos to prevent storage bloat
+    const recentIds = ids.slice(-500);
+    await Promise.all([
+      AsyncStorage.setItem(STORAGE_KEY_SEEN_VIDEOS, JSON.stringify(recentIds)),
+      AsyncStorage.setItem(STORAGE_KEY_SEEN_VIDEOS_TIMESTAMP, String(Date.now())),
+    ]);
+  } catch (e) {
+    console.warn('[Reels] Failed to save seen videos:', e);
+  }
 }
 
 export default function ReelsScreen({ token, user }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState('trending');
+  const [category, setCategory] = useState(() => getRandomCategory());
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -386,35 +426,6 @@ export default function ReelsScreen({ token, user }) {
     }
   }, [category, token]);
 
-  const handleCategoryChange = useCallback((cat) => {
-    if (cat === category) return;
-
-    // Pause all current players before switching
-    Object.values(videoPlayersRef.current).forEach(p => {
-      if (p) {
-        p.injectJavaScript("if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') { window.ytPlayer.pauseVideo(); }");
-      }
-    });
-
-    // Clear all player references and state
-    playerReadyRef.current = {};
-    videoPlayersRef.current = {};
-    playerStateRef.current = {};
-    activeIndexRef.current = 0;
-    failedVideoIdsRef.current.clear();
-    preloadTriggeredRef.current.clear();
-    pendingSkipRef.current = false;
-    // Reset pagination state
-    nextPageTokenRef.current = null;
-    hasMoreRef.current = true;
-    isLoadingMoreRef.current = false;
-    seenVideoIdsRef.current.clear();
-
-    setCategory(cat);
-    setVideos([]);
-    fetchFeed(cat, false, false);
-  }, [category, fetchFeed]);
-
   // loadMore is now defined above with pagination support
 
   const onVideoRef = useCallback((index, ref) => {
@@ -634,33 +645,6 @@ export default function ReelsScreen({ token, user }) {
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
-      <View style={styles.categoryBar}>
-        <FlatList
-          data={CATEGORIES}
-          keyExtractor={item => item.id}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.categoryList}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              onPress={() => handleCategoryChange(item.id)}
-              style={[
-                styles.categoryChip,
-                category === item.id && styles.categoryChipActive,
-                { backgroundColor: category === item.id ? theme.primary : theme.primaryLight }
-              ]}
-            >
-              <Text style={[
-                styles.categoryLabel,
-                category === item.id ? { color: '#fff' } : { color: theme.text }
-              ]}>
-                {item.label}
-              </Text>
-            </TouchableOpacity>
-          )}
-        />
-      </View>
-
       <FlatList
         ref={flatListRef}
         data={videos}
@@ -805,19 +789,6 @@ export default function ReelsScreen({ token, user }) {
                       <Text style={styles.errorText}>Video unavailable</Text>
                     </View>
                   )}
-                  <View style={styles.infoRow}>
-                    <TouchableOpacity style={styles.avatar}>
-                      <Text style={styles.avatarText}>
-                        @{(item.channelTitle ? item.channelTitle.slice(0, 10) : '') || '?'}
-                      </Text>
-                    </TouchableOpacity>
-                    <View style={styles.titleContainer}>
-                      <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
-                      <Text style={styles.meta}>
-                        {item.channelTitle} • {formatDuration(item.durationSeconds)}
-                      </Text>
-                    </View>
-                  </View>
                 </View>
               </View>
             );
