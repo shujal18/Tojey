@@ -801,7 +801,7 @@ const hasLoadedInitialFeedRef = useRef(false);
         onViewableItemsChanged={onViewableItemsChanged}
         onScrollEndDrag={loadMore}
         onMomentumScrollEnd={loadMore}
-        renderItem={({ item, index }) => {
+        renderItem={useCallback(({ item, index }) => {
             const isLocal = item.source === 'local';
             const rawVideoId = item.videoId;
             const videoId = sanitizeVideoId(rawVideoId);
@@ -934,10 +934,8 @@ const hasLoadedInitialFeedRef = useRef(false);
                       <Icon name="alert-circle" size={24} color="#fff" />
                       <Text style={styles.errorText}>Video unavailable</Text>
                     </View>
-                  )}
-                </View>
-              </View>
-            );
+                  )}, []),
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
           }}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
         ListEmptyComponent={
@@ -1060,3 +1058,6 @@ const styles = StyleSheet.create({
   errorContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 16 },
   retryBtn: { paddingHorizontal: fs(24), paddingVertical: fs(10), borderRadius: fs(10) },
 });
+}
+};
+}
