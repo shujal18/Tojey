@@ -16,6 +16,7 @@ import {
   canDrawOverlay, openOverlaySettings,
   getNudgeVibrationEnabled, setNudgeVibrationEnabled,
 } from '../services/chatHead';
+import { startPush } from '../services/notifications';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
   const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
@@ -29,6 +30,78 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [chatHead, setChatHead] = useState(false);
   const [chatHeadPending, setChatHeadPending] = useState(false);
   const [nudgeVib, setNudgeVib] = useState(true);
+  const [fcmStatus, setFcmStatus] = useState(null);
+  const [fcmBusy, setFcmBusy] = useState(false);
+
+  const loadFcmStatus = async () => {
+    setFcmStatus({ loading: true, data: null, error: null });
+    try {
+      const res = await fetch(`${SERVER_URL}/api/fcm/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      let data;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        data = null;
+      }
+      if (!res.ok) throw new Error((data && data.error) || `Server responded ${res.status}`);
+      setFcmStatus({ loading: false, data, error: null });
+    } catch (e) {
+      console.warn('FCM status fetch failed:', e.message);
+      setFcmStatus({ loading: false, data: null, error: e.message });
+    }
+  };
+
+  const reRegisterFCM = async () => {
+    if (fcmBusy) return;
+    setFcmBusy(true);
+    try {
+      const ok = await startPush(token);
+      alert(ok ? 'Push token re-registered successfully.' : 'Could not register a fresh push token. Check console logs for [FCM].');
+    } catch (e) {
+      console.warn('FCM re-register failed:', e);
+      alert('Failed to re-register: ' + e.message);
+    } finally {
+      setFcmBusy(false);
+      loadFcmStatus();
+    }
+  };
+
+  const sendFCMPush = async () => {
+    if (fcmBusy) return;
+    setFcmBusy(true);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/devices/tokens/sendtest`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      let data;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        data = {};
+      }
+      if (!res.ok) throw new Error(data.error || `Server responded ${res.status}`);
+      if (data.note === 'fcm-unconfigured') {
+        alert('Server FCM is DISABLED — nothing was sent. In Render add the FIREBASE_SERVICE_ACCOUNT_B64 env var for Firebase project tojey-dba45, redeploy the backend, then test again.');
+      } else if (!data.sent) {
+        alert(`Test push not delivered (tokens=${data.tokens || 0}, note=${data.note || 'unknown'}).`);
+      } else {
+        alert(`Test push SENT (messageId ${data.messageId || 'ok'}). Check your device notification tray now.`);
+      }
+      loadFcmStatus();
+    } catch (e) {
+      console.warn('FCM test push failed:', e.message);
+      alert('Test push request failed: ' + e.message);
+    } finally {
+      setFcmBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (token) loadFcmStatus();
+  }, [token]);
 
   useEffect(() => {
     let mounted = true;
@@ -334,6 +407,69 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </SettingRow>
       </Section>
 
+      <Section title="Push Notifications (FCM)" theme={theme}>
+        {fcmStatus && fcmStatus.data && (
+          <View style={{ paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: theme.border }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={[styles.helperText, { flex: 1, padding: 0, fontSize: 13, color: theme.textSecondary }]}>Server Firebase</Text>
+              <Text style={{
+                fontSize: 13, fontWeight: '700', color: fcmStatus.data.firebaseAdmin === 'ENABLED' ? theme.online : theme.danger,
+              }}>
+                {fcmStatus.data.firebaseAdmin === 'ENABLED' ? 'ENABLED' : 'DISABLED'}
+              </Text>
+            </View>
+            {fcmStatus.data.firebaseProjectId ? (
+              <Text style={{ fontSize: 12, color: theme.textSecondary, marginTop: 4 }}>
+                Firebase project: {fcmStatus.data.firebaseProjectId}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+              <Text style={{ flex: 1, fontSize: 13, color: theme.textSecondary }}>Registered push tokens</Text>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: theme.text }}>{fcmStatus.data.totalActiveTokens || 0}</Text>
+            </View>
+          </View>
+        )}
+
+        {fcmStatus && fcmStatus.data && fcmStatus.data.firebaseAdmin !== 'ENABLED' && (
+          <Text style={[styles.helperText, { color: theme.danger }]}>
+            Push is NOT being delivered to backgrounded/killed devices. In the Render dashboard add a backend env
+            var FIREBASE_SERVICE_ACCOUNT_B64 (base64 of the tojey-dba45 Firebase service-account JSON: Firebase console →
+            Project settings → Service accounts → Generate new private key), then Redeploy and press "Re-register token".
+          </Text>
+        )}
+
+        {fcmStatus && fcmStatus.error && (
+          <Text style={[styles.helperText, { color: theme.danger }]}>Diagnostics unavailable: {fcmStatus.error}</Text>
+        )}
+        {(!fcmStatus || fcmStatus.loading) && (
+          <Text style={[styles.helperText, { color: theme.textSecondary }]}>Checking FCM status…</Text>
+        )}
+
+        <View style={{ flexDirection: 'row', padding: 14, gap: 8 }}>
+          <TouchableOpacity
+            onPress={() => loadFcmStatus()}
+            disabled={fcmBusy}
+            style={[styles.fcmBtn, { backgroundColor: theme.primaryLight }]}
+          >
+            <Text style={{ color: theme.primary, fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Refresh'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={reRegisterFCM}
+            disabled={fcmBusy}
+            style={[styles.fcmBtn, { backgroundColor: theme.primaryLight }]}
+          >
+            <Text style={{ color: theme.primary, fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Re-register token'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={sendFCMPush}
+            disabled={fcmBusy}
+            style={[styles.fcmBtn, { flex: 1, backgroundColor: theme.primary }]}
+          >
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Send test push'}</Text>
+          </TouchableOpacity>
+        </View>
+      </Section>
+
       <Section title="Chat Head & Nudge" theme={theme}>
         <SettingRow label="Chat Head" icon="chatbubbles-outline" theme={theme}>
           <Switch value={chatHead} onValueChange={toggleChatHead} trackColor={{ true: theme.primary }} />
@@ -402,7 +538,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <Text style={[styles.logoutText, { color: theme.danger }]}>Log Out</Text>
       </TouchableOpacity>
 
-      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.1.0</Text>
+      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.10.0</Text>
     </ScrollView>
   );
 }
@@ -473,6 +609,9 @@ const styles = StyleSheet.create({
   themeBtn: {
     flex: 1, paddingVertical: 10, borderRadius: 12,
     alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 6,
+  },
+  fcmBtn: {
+    paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, alignItems: 'center',
   },
   logoutBtn: {
     backgroundColor: 'rgba(229,57,53,0.1)', marginHorizontal: 16, borderRadius: 12,
