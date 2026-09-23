@@ -69,10 +69,12 @@ function warnOnce() {
 }
 
 // Token codes from firebase-admin that mean the stored token is dead and must be dropped.
+// NOTE: messaging/invalid-argument is NOT a token code - it means the whole message was
+// rejected for a payload error, so it must never be treated as a dead-token (doing so
+// would deactivate perfectly valid tokens on every failed send).
 function isInvalidTokenCode(code) {
   if (!code) return false;
-  return /registration-token-not-registered|invalid-registration|invalid-argument|unknown-error-code\s*\(?unregistered/i.test(code)
-    || /UNREGISTERED/.test(code);
+  return /registration-token-not-registered|invalid-registration|unregistered/i.test(code);
 }
 
 /**
@@ -119,9 +121,11 @@ async function sendPush({ tokens, notification, data }) {
                 // many devices silently drops the notification. ic_stat_tojey exists in
                 // the APK and is what the app's own notifier uses, so it is resolvable.
                 icon: 'ic_stat_tojey',
-                // Classify as a message so DND rules that allow messages / messaging-app
-                // priority let this one actually break through instead of being silenced.
-                category: 'message',
+                // NOTE: there is no "category" field in FCM's android.notification
+                // (that is an iOS APNS concept). Sending it makes FCM reject the whole
+                // message with messaging/invalid-argument and drops the notification.
+                // Message-category behavior for DND comes from the HIGH-importance
+                // 'tojey-messages' channel, which the app creates natively.
               },
             }
           : {}),
@@ -133,23 +137,38 @@ async function sendPush({ tokens, notification, data }) {
     let accepted = 0;
     let firstSuccessMessageId = '';
     const perToken = [];
+    let failureCount = 0;
+    let payloadRejected = false;
+    let payloadRejectMsg = '';
     (result.responses || []).forEach((r, i) => {
       if (r.success) {
         accepted++;
         if (!firstSuccessMessageId) firstSuccessMessageId = r.messageId || '';
         perToken.push({ ok: true, messageId: r.messageId || '' });
       } else {
+        failureCount++;
         const code = r.error && r.error.code ? r.error.code : 'unknown';
         const msg  = r.error && r.error.message ? r.error.message : '';
         console.log(`[FCM] token ${i+1}/${tokens.length} code=${code} msg=${msg}`);
         perToken.push({ ok: false, code, msg });
         if (isInvalidTokenCode(code)) invalidTokens.push(tokens[i]);
+        // A message-level invalid-argument means the whole payload was rejected BEFORE it
+        // reached any device (e.g. an unknown field in android.notification), so every
+        // token "fails" with the same code. That is NOT a token problem.
+        if (/invalid-argument/.test(code)) payloadRejected = true;
+        if (!payloadRejectMsg) payloadRejectMsg = msg;
       }
     });
 
     if (accepted > 0) {
       console.log(`[FCM] multicast: tokens=${tokens.length} accepted=${accepted} invalid=${invalidTokens.length} msgId=${firstSuccessMessageId}`);
       return { success: true, messageId: firstSuccessMessageId, invalidTokens, perToken };
+    }
+    if (payloadRejected && failureCount === tokens.length) {
+      // Every token reported the same payload error - no device was reached and none of
+      // the tokens are dead. Never deactivate tokens for this; log the real cause.
+      console.error(`[FCM] multicast: payload rejected by FCM (invalid-argument): ${payloadRejectMsg || 'invalid message fields'} - check the android.notification payload. No tokens invalidated.`);
+      return { success: false, note: 'fcm-invalid-payload', invalidTokens: [], perToken };
     }
     if (invalidTokens.length) {
       // UNREGISTERED on a freshly-registered token almost always means the token was
@@ -160,7 +179,7 @@ async function sendPush({ tokens, notification, data }) {
       const projectId = (messaging.app && messaging.app.options && messaging.app.options.projectId) || 'unknown';
       console.log(`[FCM] multicast: all ${tokens.length} token(s) reported UNREGISTERED (sample: ${sample || 'n/a'}). Admin project=${projectId} - verify the app's google-services.json project matches, or reinstall to get a fresh token.`);
     }
-    return { success: false, note: 'fcm-rejected', invalidTokens };
+    return { success: false, note: 'fcm-rejected', invalidTokens, perToken };
   } catch (e) {
     // FCM outage / network failure must never crash the server.
     console.error('FCM send failed:', e.errorInfo && e.errorInfo.code ? e.errorInfo.code : e.message);
