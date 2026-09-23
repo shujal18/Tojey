@@ -31,7 +31,9 @@ export async function ensureMicPermission() {
   return req === RESULTS.GRANTED;
 }
 
-// Video calls are CAMERA-ONLY (no mic/audio), so this never touches RECORD_AUDIO.
+// Video calls carry audio now, so camera AND microphone are required.
 export async function ensureVideoCallPermission() {
-  return ensureCameraPermission();
+  const cameraOk = await ensureCameraPermission();
+  const micOk = await ensureMicPermission();
+  return cameraOk && micOk;
 }

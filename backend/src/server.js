@@ -458,8 +458,7 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
   try {
     const { category = 'trending', refresh = 'false', pageToken } = req.query;
     const validCategories = [
-      'trending', 'love', 'comedy', 'funny', 'education',
-      'motivation', 'nepali', 'hindi', 'foreign', 'music', 'memes'
+      'trending', 'memes', 'hindi', 'hindi_songs', 'love'
     ];
     if (!validCategories.includes(category)) {
       return res.status(400).json({ error: 'Invalid category' });
@@ -519,17 +518,11 @@ app.get('/api/reels/feed', authMiddleware, async (req, res) => {
 app.get('/api/reels/categories', authMiddleware, async (req, res) => {
   try {
     const categories = [
-      { id: 'trending', label: 'Trending' },
-      { id: 'love', label: 'Love' },
-      { id: 'comedy', label: 'Comedy' },
-      { id: 'funny', label: 'Funny' },
-      { id: 'education', label: 'Education' },
-      { id: 'motivation', label: 'Motivation' },
-      { id: 'nepali', label: 'Nepali' },
-      { id: 'hindi', label: 'Hindi' },
-      { id: 'foreign', label: 'Foreign' },
-      { id: 'music', label: 'Music' },
+      { id: 'trending', label: 'For You' },
       { id: 'memes', label: 'Memes' },
+      { id: 'hindi', label: 'Hindi' },
+      { id: 'hindi_songs', label: 'Hindi Songs' },
+      { id: 'love', label: 'Love & Romantic' },
     ];
     res.json({ categories });
   } catch (e) {
@@ -1276,6 +1269,14 @@ io.on('connection', async (socket) => {
     };
     const validTarget = (n) => Number.isInteger(n) && n > 0 && n !== dbUser.userId;
 
+    // In-call presence: tells BOTH users' devices which of their chats is
+    // currently in a call, so HomeScreen can show a WhatsApp-style "In a call"
+    // subtitle under that conversation. Pure presence (no media/signaling).
+    const broadcastCallPresence = (userA, userB, onCall) => {
+      socket.to(`user:${userA}`).emit('video-call:presence', { targetUserId: userB, onCall: !!onCall });
+      socket.to(`user:${userB}`).emit('video-call:presence', { targetUserId: userA, onCall: !!onCall });
+    };
+
     socket.on('video-call:invite', ({ calleeId, callId }, callback = () => {}) => {
       const target = Number(calleeId);
       const id = String(callId || '');
@@ -1293,6 +1294,7 @@ io.on('connection', async (socket) => {
           profilePic: dbUser.profile_pic_url || '',
         },
       });
+      broadcastCallPresence(dbUser.userId, target, true);
       callback({ ok: true, callId: id });
     });
 
@@ -1302,6 +1304,7 @@ io.on('connection', async (socket) => {
       const id = String(callId || '');
       if (!id) return;
       relayVideo('video-call:accept', target, { callId: id, calleeId: dbUser.userId });
+      broadcastCallPresence(dbUser.userId, target, true);
     });
 
     socket.on('video-call:reject', ({ targetUserId, callId }) => {
@@ -1310,6 +1313,7 @@ io.on('connection', async (socket) => {
       const id = String(callId || '');
       if (!id) return;
       relayVideo('video-call:reject', target, { callId: id, calleeId: dbUser.userId });
+      broadcastCallPresence(dbUser.userId, target, false);
     });
 
     socket.on('video-call:offer', ({ targetUserId, callId, offer }) => {
@@ -1342,6 +1346,7 @@ io.on('connection', async (socket) => {
       const id = String(callId || '');
       if (!id) return;
       relayVideo('video-call:end', target, { callId: id, endedBy: dbUser.userId });
+      broadcastCallPresence(dbUser.userId, target, false);
     });
 
     socket.on('disconnect', async () => {

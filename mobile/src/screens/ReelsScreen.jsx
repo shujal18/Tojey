@@ -26,24 +26,17 @@ const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache';
 const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp';
 const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes cache
 
+// Instagram-feed style categories. Each chip switches the whole feed to that
+// genre's reels (backend maps the id to a YouTube search query).
 const CATEGORIES = [
-  { id: 'trending', label: 'Trending' },
-  { id: 'love', label: 'Love' },
-  { id: 'comedy', label: 'Comedy' },
-  { id: 'funny', label: 'Funny' },
-  { id: 'education', label: 'Education' },
-  { id: 'motivation', label: 'Motivation' },
-  { id: 'nepali', label: 'Nepali' },
-  { id: 'hindi', label: 'Hindi' },
-  { id: 'foreign', label: 'Foreign' },
-  { id: 'music', label: 'Music' },
+  { id: 'trending', label: 'For You' },
   { id: 'memes', label: 'Memes' },
+  { id: 'hindi', label: 'Hindi' },
+  { id: 'hindi_songs', label: 'Hindi Songs' },
+  { id: 'love', label: 'Love & Romantic' },
 ];
 
-// Auto-rotate categories every session
-const getRandomCategory = () => {
-  return CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)].id;
-};
+// Auto-rotate categories every session (default: trending/For You)
 
 const ITEM_HEIGHT = SCREEN_H;
 
@@ -120,9 +113,10 @@ async function saveFeedCache(category, videos) {
   }
 }
 
-export default function ReelsScreen({ token, user }) {
+export default function ReelsScreen({ token, user, refreshTick = 0 }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState(() => getRandomCategory());
+  const [category, setCategory] = useState('trending');
+  const [activeIdx, setActiveIdx] = useState(0);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [, setRefreshing] = useState(false);
@@ -261,6 +255,15 @@ export default function ReelsScreen({ token, user }) {
       webViewRef.current.injectJavaScript(
         `window.__loadVideo('${videoId}', '${safeThumb}'); true;`
       );
+      // Preload the NEXT reel in the background so the swipe plays instantly.
+      const list = videosRef.current;
+      const nextItem = list && list[index + 1];
+      const nextId = nextItem ? sanitizeVideoId(nextItem.videoId) : null;
+      if (nextId) {
+        webViewRef.current.injectJavaScript(
+          `window.__cueVideo('${nextId}'); true;`
+        );
+      }
       schedulePlayWatch();
     }
   }, [schedulePlayWatch]);
@@ -309,8 +312,10 @@ export default function ReelsScreen({ token, user }) {
 
             // Reset to the first item for the freshly-rendered feed.
             activeIndexRef.current = 0;
+            setActiveIdx(0);
             scrollOffsetYRef.current = 0;
             overlayTranslateY.setValue(0);
+            if (flatListRef.current) flatListRef.current.scrollToOffset({ offset: 0, animated: false });
             currentVideoIdRef.current = null;
             playerStateRef.current = 'idle';
             if (webViewReadyRef.current && loadVideoRef.current) {
@@ -366,8 +371,10 @@ export default function ReelsScreen({ token, user }) {
 
         // Fresh feed -> restart at the first video.
         activeIndexRef.current = 0;
+        setActiveIdx(0);
         scrollOffsetYRef.current = 0;
         overlayTranslateY.setValue(0);
+        if (flatListRef.current) flatListRef.current.scrollToOffset({ offset: 0, animated: false });
         currentVideoIdRef.current = null;
         playerStateRef.current = 'idle';
         if (webViewReadyRef.current && loadVideoRef.current && validVideos[0]) {
@@ -530,6 +537,7 @@ export default function ReelsScreen({ token, user }) {
     pendingSkipRef.current = false;
     scrollOffsetYRef.current = index * ITEM_HEIGHT;
     overlayTranslateY.setValue(0);
+    setActiveIdx(index);
 
     if (loadVideoRef.current) loadVideoRef.current(list[index], index);
   }, [overlayTranslateY]);
@@ -638,6 +646,19 @@ export default function ReelsScreen({ token, user }) {
     };
   }, [category, fetchFeed]);
 
+  // Bottom-nav Reels icon tapped while ALREADY inside Reels -> refresh the feed.
+  // (HomeScreen bumps refreshTick on each re-tap of the active Reels tab.)
+  const prevRefreshTickRef = useRef(0);
+  useEffect(() => {
+    if (!refreshTick || refreshTick === prevRefreshTickRef.current) return;
+    prevRefreshTickRef.current = refreshTick;
+    seenVideoIdsRef.current.clear();
+    failedVideoIdsRef.current.clear();
+    nextPageTokenRef.current = null;
+    hasMoreRef.current = true;
+    fetchFeed(category, true, false);
+  }, [refreshTick, category, fetchFeed]);
+
   const onWebViewLoadEnd = useCallback(() => {
     webViewReadyRef.current = true;
     const item = videosRef.current[activeIndexRef.current];
@@ -671,6 +692,8 @@ export default function ReelsScreen({ token, user }) {
       </View>
     );
   }
+
+  const activeItem = videos[activeIdx];
 
   return (
     <View style={[styles.container, { backgroundColor: '#000' }]}>
@@ -754,6 +777,34 @@ export default function ReelsScreen({ token, user }) {
       </Animated.View>
 
       {toast && <Toast message={toast} onDismiss={() => setToast('')} />}
+
+      {/* Instagram-style category chips: tap switches the whole feed genre */}
+      <View style={styles.chipsRow} pointerEvents="box-none">
+        {CATEGORIES.map((c) => {
+          const active = c.id === category;
+          return (
+            <TouchableOpacity
+              key={c.id}
+              onPress={() => setCategory(c.id)}
+              style={[styles.chip, active && { backgroundColor: theme.primary, borderColor: theme.primary }]}
+              accessibilityLabel={`Show ${c.label} reels`}
+            >
+              <Text style={styles.chipLabel}>{c.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {/* Caption overlay: title + channel over the player (non-interactive) */}
+      {activeItem ? (
+        <View style={styles.caption} pointerEvents="none">
+          <Text numberOfLines={2} style={styles.captionTitle}>{activeItem.title || ''}</Text>
+          <Text numberOfLines={1} style={styles.captionMeta}>
+            {activeItem.channelTitle || ''}
+            {activeItem.durationSeconds ? `  •  ${Math.round(activeItem.durationSeconds)}s` : ''}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -811,5 +862,50 @@ const styles = StyleSheet.create({
     paddingHorizontal: fs(24),
     paddingVertical: fs(10),
     borderRadius: fs(10),
+  },
+  chipsRow: {
+    position: 'absolute',
+    top: 30,
+    left: 0,
+    right: 0,
+    zIndex: 45,
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+    gap: 8,
+    alignItems: 'center',
+  },
+  chip: {
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
+  chipLabel: {
+    color: '#fff',
+    fontSize: fs(12),
+    fontWeight: '600',
+  },
+  caption: {
+    position: 'absolute',
+    left: 14,
+    right: 74,
+    bottom: 16,
+    zIndex: 45,
+  },
+  captionTitle: {
+    color: '#fff',
+    fontSize: fs(15),
+    fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowRadius: 6,
+  },
+  captionMeta: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: fs(13),
+    marginTop: 3,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowRadius: 6,
   },
 });

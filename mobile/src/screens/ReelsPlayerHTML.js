@@ -36,6 +36,13 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       height: 100vh;
       background: #000;
     }
+    #preload-frame {
+      position: absolute;
+      top: 0; left: 0;
+      width: 1px; height: 1px;
+      overflow: hidden;
+      visibility: hidden;
+    }
     #player, #player-frame {
       position: absolute;
       top: 0; left: 0;
@@ -74,6 +81,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
     <div id="thumb"></div>
     <div id="spinner"></div>
   </div>
+  <div id="preload-frame"><div id="preload-host"></div></div>
 
   <script>
     (function () {
@@ -81,10 +89,12 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
 
       var gen = 0;                 // generation token: drops stale loads
       var currentVideoId = null;   // videoId currently loaded in the player
-      var player = null;           // YT.Player instance
+      var player = null;           // YT.Player instance (the visible reel)
       var playerReady = false;     // onReady fired
       var apiLoading = false;      // iframe_api script in flight
       var apiCallbacks = [];       // callbacks waiting for the IFrame API
+      var preloadPlayer = null;    // hidden warm-up player for the NEXT reel
+      var preloadVideoId = null;   // videoId currently cued in preloadPlayer
 
       var thumbEl = document.getElementById('thumb');
       var spinnerEl = document.getElementById('spinner');
@@ -114,8 +124,16 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       }
 
       // ---- player wiring ----------------------------------------------------
-      // Muted autoplay + retries: Android WebView blocks unmuted programmatic
-      // autoplay, so begin muted and keep nudging until the player reports PLAYING.
+      // Autoplay must START muted (Android WebView blocks unmuted programmatic
+      // autoplay), but Chrome/YouTube allow unmuting a muted-autoplay video once
+      // playback has begun — so audio comes out normally on autoplay.
+      function unmutePlayback() {
+        if (!player) return;
+        try { player.unMute(); } catch (e) {}
+        try { player.setVolume(100); } catch (e) {}
+      }
+
+      // Muted start + retries: keep nudging until the player reports PLAYING.
       function forcePlay() {
         if (!player) return;
         try { player.mute(); } catch (e) {}
@@ -144,6 +162,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         if (st === 1) {           // PLAYING
           hideThumb();
           spinnerEl.classList.remove('show');
+          unmutePlayback();       // audio on while autoplaying (user requested)
           emit('playing');
         } else if (st === 2) {    // PAUSED
           emit('paused');
@@ -253,6 +272,48 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         forcePlay();
       };
 
+      // Preload the NEXT reel in the background so the swipe plays instantly.
+      // A SEPARATE hidden player warms the next video via cueVideoById() — never
+      // the visible one, because cueing stops whatever is currently playing.
+      // The hidden player has no state-change listeners, so it can't disturb the
+      // visible player's events or the RN-side current-video tracking.
+      function ensurePreloadPlayer() {
+        if (preloadPlayer) return;
+        if (!window.YT || !window.YT.Player) return;
+        var host = document.getElementById('preload-host');
+        preloadPlayer = new YT.Player(host, {
+          host: 'https://www.youtube-nocookie.com',
+          width: 1,
+          height: 1,
+          playerVars: {
+            autoplay: 0,
+            controls: 0,
+            modestbranding: 1,
+            rel: 0,
+            iv_load_policy: 3,
+            disablekb: 1,
+            fs: 0,
+            enablejsapi: 1,
+            widget_referrer: 'https://tojey.app/'
+          },
+          events: {
+            onError: function () { preloadPlayer = null; preloadVideoId = null; }
+          }
+        });
+      }
+
+      window.__cueVideo = function (videoId) {
+        var id = videoId ? String(videoId) : '';
+        if (!id) return;
+        if (preloadPlayer && preloadVideoId === id) return; // already warmed
+        ensurePreloadPlayer();
+        if (!preloadPlayer) return;
+        try {
+          preloadPlayer.cueVideoById({ videoId: id, startSeconds: 0 });
+          preloadVideoId = id;
+        } catch (e) {}
+      };
+
       window.__play = function () {
         if (player && player.playVideo) { try { player.unMute(); player.playVideo(); } catch (e) {} }
       };
@@ -268,6 +329,9 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         player = null;
         playerReady = false;
         currentVideoId = null;
+        try { if (preloadPlayer && preloadPlayer.destroy) preloadPlayer.destroy(); } catch (e) {}
+        preloadPlayer = null;
+        preloadVideoId = null;
       };
     })();
   </script>

@@ -17,8 +17,10 @@ import ReelsScreen from './ReelsScreen';
 export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
+  const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
   const [users, setUsers] = useState([]);
   const [presence, setPresence] = useState({});
+  const [onCall, setOnCall] = useState({});
   const [conversations, setConversations] = useState([]);
   const [unread, setUnread] = useState({});
   const [query, setQuery] = useState('');
@@ -85,6 +87,16 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         // (avoids a server fetch on every presence change across all users).
         setPresence((prev) => ({ ...prev, [userId]: { isOnline, lastSeen } }));
       });
+      // In-call presence: the server broadcasts which of my chats is currently in
+      // a video call, so the row shows a WhatsApp-style "In a call" subtitle.
+      socket.on('video-call:presence', ({ targetUserId, onCall: isOnCall }) => {
+        setOnCall((prev) => {
+          const next = { ...prev };
+          if (isOnCall) next[targetUserId] = true;
+          else delete next[targetUserId];
+          return next;
+        });
+      });
       socket.on('message:receive', ({ message, sender, conversationId }) => {
         const senderPic = sender.profilePic || '';
         setConversations((prev) => {
@@ -126,6 +138,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       return () => {
         socket.off('conversation:list', hList);
         socket.off('presence:update');
+        socket.off('video-call:presence');
         socket.off('message:receive');
         socket.off('conversation:cleared');
         socket.off('nudge', hNudge);
@@ -301,6 +314,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
                     contact={contact}
                     isOnline={contact.online}
                     lastSeen={contact.last_seen}
+                    inCall={!!onCall[item.id]}
                     unread={unread[item.id]}
                     theme={theme}
                     onPress={() => openChat(contact)}
@@ -338,6 +352,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
                     preview={item.lastMsg}
                     isOnline={normalizedContact.online}
                     lastSeen={normalizedContact.last_seen}
+                    inCall={!!onCall[normalizedContact.id]}
                     unread={unread[normalizedContact.id]}
                     theme={theme}
                     onPress={() => openChat(normalizedContact)}
@@ -354,7 +369,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       )}
 
       {tab === 'reels' && (
-        <ReelsScreen token={token} user={user} />
+        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} />
       )}
 
       {/* Long-press actions: send notification / clear messages */}
@@ -457,7 +472,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
 
       <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
         <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
-        <TabBtn label="Reels" active={tab === 'reels'} onPress={() => setTab('reels')} icon="videocam-outline" theme={theme} activeIcon="videocam" />
+        <TabBtn label="Reels" active={tab === 'reels'} onPress={() => { setTab('reels'); if (tab === 'reels') setReelsRefreshTick((t) => t + 1); }} icon="videocam-outline" theme={theme} activeIcon="videocam" />
         <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
       </View>
 
@@ -466,7 +481,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
   );
 }
 
-function ConversationRowFn({ contact, isOnline, lastSeen, onPress, onLongPress, theme, preview, unread }) {
+function ConversationRowFn({ contact, isOnline, lastSeen, inCall, onPress, onLongPress, theme, preview, unread }) {
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
   const lastMsg = preview && preview.content ? preview.content : (preview && preview.type ? '📎 Media' : '');
   return (
@@ -488,9 +503,15 @@ function ConversationRowFn({ contact, isOnline, lastSeen, onPress, onLongPress, 
         </View>
         <View style={styles.rowPreviewRow}>
           <View style={{ flex: 1 }}>
-            <Text numberOfLines={1} style={[styles.rowPreview, { color: theme.textSecondary }]}>
-              {lastMsg ? <ColorEmoji>{lastMsg}</ColorEmoji> : (isOnline ? 'Online' : 'Tap to say hello')}
-            </Text>
+            {inCall ? (
+              <Text numberOfLines={1} style={[styles.rowPreview, { color: theme.textSecondary }]}>
+                <Icon name="call" size={13} color={theme.online} /> <Text style={{ color: theme.online, fontWeight: '700' }}>In a call</Text>
+              </Text>
+            ) : (
+              <Text numberOfLines={1} style={[styles.rowPreview, { color: theme.textSecondary }]}>
+                {lastMsg ? <ColorEmoji>{lastMsg}</ColorEmoji> : (isOnline ? 'Online' : 'Tap to say hello')}
+              </Text>
+            )}
           </View>
           {!!unread && (
             <View style={[styles.unreadBadge, { backgroundColor: theme.primary }]}>

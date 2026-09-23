@@ -4,16 +4,10 @@ const youtube = google.youtube('v3');
 
 const CATEGORY_QUERIES = {
   trending: 'trending shorts',
-  love: 'romantic shorts',
-  comedy: 'comedy shorts',
-  funny: 'funny shorts',
-  education: 'educational shorts',
-  motivation: 'motivation shorts',
-  nepali: 'nepali shorts',
-  hindi: 'hindi shorts',
-  foreign: 'international shorts',
-  music: 'music shorts',
   memes: 'meme shorts',
+  hindi: 'hindi video',
+  hindi_songs: 'hindi songs',
+  love: 'love and romantic text',
 };
 
 const CACHE_TTL_MS = 4 * 60 * 60 * 1000;
@@ -254,8 +248,8 @@ async function fetchCategoryVideos(category, pageToken = null) {
   const allVideos = [];
   const seenIds = new Set();
 
-  const regionCode = category === 'nepali' ? 'NP' : category === 'hindi' ? 'IN' : 'US';
-  const relevanceLanguage = category === 'nepali' ? 'ne' : category === 'hindi' ? 'hi' : 'en';
+  const regionCode = ['hindi', 'hindi_songs', 'love'].includes(category) ? 'IN' : 'US';
+  const relevanceLanguage = ['hindi', 'hindi_songs', 'love'].includes(category) ? 'hi' : 'en';
 
   try {
     const data = await searchYouTube(query, {

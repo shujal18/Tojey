@@ -5,6 +5,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import { loadSession, logout, fetchUsers } from './src/services/auth';
 import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
+import { storeInvite } from './src/services/videoCall';
 import { Icon } from './src/components/AppIcon';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
@@ -39,23 +40,21 @@ function Shell() {
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
+  const openConversationWithRef = useRef(null);
 
-  const openFromNotif = useCallback(async (nd) => {
-    if (!nd || !nd.senderId) return;
+  const openConversationWith = useCallback(async (userId) => {
+    if (!userId) return;
     const ownId = session && session.user ? session.user.id : null;
-    // Never open a conversation for a different account on this device.
-    if (ownId && nd.receiverId && nd.receiverId !== ownId) return;
-    if (activeChat && activeChat.id === nd.senderId) {
-      return;
-    }
+    if (ownId && String(userId) === String(ownId)) return;
+    if (activeChat && activeChat.id === userId) return;
     let contact = null;
     if (ownId) {
       const cached = await loadUsers(ownId);
-      contact = cached.find((u) => u.id === nd.senderId) || null;
+      contact = cached.find((u) => u.id === userId) || null;
     }
     if (!contact) {
       const all = await fetchUsers();
-      contact = all.find((u) => u.id === nd.senderId) || null;
+      contact = all.find((u) => u.id === userId) || null;
     }
     if (!contact) return;
     setActiveChat({
@@ -68,6 +67,15 @@ function Shell() {
       bio: contact.bio || '',
     });
   }, [session, activeChat]);
+  openConversationWithRef.current = openConversationWith;
+
+  const openFromNotif = useCallback(async (nd) => {
+    if (!nd || !nd.senderId) return;
+    const ownId = session && session.user ? session.user.id : null;
+    // Never open a conversation for a different account on this device.
+    if (ownId && nd.receiverId && nd.receiverId !== ownId) return;
+    await openConversationWith(nd.senderId);
+  }, [openConversationWith]);
   openFromNotifRef.current = openFromNotif;
 
   const handleLockKey = (k) => {
@@ -171,6 +179,23 @@ function Shell() {
       if (so) so.off('connect', onConnect);
     };
   }, [session, socket]);
+
+  // Incoming video call (WhatsApp-style auto-open): buffer the invite so the
+  // freshly opened ChatRoom screen can pick it up, then navigate to the caller's
+  // conversation. Works even when the user is on another chat or the listener in
+  // ChatRoom attached after the event was delivered.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onInvite = (payload) => {
+      if (!payload || !payload.callId || !payload.callerId) return;
+      storeInvite({ callId: payload.callId, callerId: payload.callerId, caller: payload.caller || null });
+      if (openConversationWithRef.current && !(activeChat && activeChat.id === payload.callerId)) {
+        openConversationWithRef.current(payload.callerId);
+      }
+    };
+    socket.on('video-call:invite', onInvite);
+    return () => socket.off('video-call:invite', onInvite);
+  }, [socket, activeChat]);
 
   // Online delivery over the socket (no FCM when connected) + foreground FCM -> a real
   // device system notification. No in-app popup is shown.

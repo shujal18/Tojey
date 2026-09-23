@@ -30,6 +30,8 @@ import {
   startLocalStream, createPeerConnection, applyCallbacks, createOffer, acceptOffer,
   handleRemoteAnswer, handleRemoteCandidate, cleanupCall, switchCamera,
   setVideoEnabled, startScreenShare, stopScreenShare, getScreenStream,
+  setMicMuted, isMicMuted, setRemoteAudioEnabled, isRemoteAudioEnabled,
+  storeInvite, takeInvite,
 } from '../services/videoCall';
 import VideoCallView from '../components/VideoCallView';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing, flushAllOutgoingQueues } from '../services/cache';
@@ -207,6 +209,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const [remoteStream, setRemoteStream] = useState(null);
   const [incomingCaller, setIncomingCaller] = useState(null);
   const [cameraOn, setCameraOn] = useState(true);
+  const [micOn, setMicOn] = useState(true);
+  const [remoteAudioOn, setRemoteAudioOn] = useState(true);
   const [screenSharing, setScreenSharing] = useState(false);
   const [screenStream, setScreenStream] = useState(null);
   const screenSharingRef = useRef(false);
@@ -214,6 +218,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const callIdRef = useRef(null);
   const callPeerIdRef = useRef(null);
   const callRingingRef = useRef(null);
+  const callWasConnectedRef = useRef(false);
   const setCall = (s) => {
     callStatusRef.current = s;
     setCallStatus(s);
@@ -802,11 +807,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const resetCallUi = () => {
     callIdRef.current = null;
     callPeerIdRef.current = null;
+    callWasConnectedRef.current = false;
     if (callRingingRef.current) clearTimeout(callRingingRef.current);
     callRingingRef.current = null;
     screenSharingRef.current = false;
     setCallLayout('full');
     setCameraOn(true);
+    setMicOn(true);
+    setRemoteAudioOn(true);
     setScreenSharing(false);
     setScreenStream(null);
     setLocalStream(null);
@@ -815,15 +823,36 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setCall('none');
   };
 
+  // Call-event message in the chat box (WhatsApp-style "Video call" / "Call
+  // ended" / "Missed video call"). Both peers fire the SAME idempotent clientId,
+  // so even if both sides race, exactly one row is stored (server dedups by
+  // (conversation_id, client_id)) and both chat boxes show it.
+  const sendCallMessage = (content, suffix) => {
+    if (!socketReady() || !callIdRef.current) return;
+    const clientId = `call-${callIdRef.current}-${suffix}`;
+    socket.emit('message:send', { otherUserId, type: 'CALL', content, clientId }, (ack) => {
+      if (ack && ack.ok && ack.message) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === ack.message.id)) return prev;
+          return insertSorted(prev, ack.message);
+        });
+        addKnownId(ack.message.id);
+        bumpCursor(ack.message.id);
+      }
+    });
+  };
+
   const teardownCall = () => {
     cleanupCall();
     resetCallUi();
   };
 
   const endCall = () => {
+    const wasConnected = callWasConnectedRef.current;
     if (callPeerIdRef.current && callIdRef.current) {
       emitVideo('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
     }
+    sendCallMessage(wasConnected ? 'Call ended' : 'Missed video call', 'end');
     teardownCall();
   };
 
@@ -837,6 +866,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
         if (state === 'connected' || state === 'completed') {
+          callWasConnectedRef.current = true;
           if (callRingingRef.current) clearTimeout(callRingingRef.current);
         } else if (state === 'failed' || state === 'closed') {
           if (callStatusRef.current !== 'none') teardownCall();
@@ -896,6 +926,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setIncomingCaller(null);
       setCall('active');
       emitVideo('video-call:accept', { targetUserId: inc.callerId, callId: inc.callId });
+      sendCallMessage('Video call', 'start');
     } catch (e) {
       resetCallUi();
       setNudgeToast('Could not start the video call.');
@@ -905,6 +936,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const declineIncoming = () => {
     const inc = incomingCaller;
     if (inc) emitVideo('video-call:reject', { targetUserId: inc.callerId, callId: inc.callId });
+    sendCallMessage('Missed video call', 'end');
     teardownCall();
   };
 
@@ -919,6 +951,23 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const next = !cameraOn;
     setVideoEnabled(next);
     setCameraOn(next);
+  };
+
+  // Mute MY microphone only (stops sending my voice). Independent of remote-audio.
+  const toggleMic = () => {
+    if (callStatusRef.current === 'none') return;
+    const next = !micOn;
+    setMicMuted(!next);
+    setMicOn(next);
+  };
+
+  // Stop HEARING the remote participant locally. Purely local: the peer keeps
+  // talking/transmitting and is never notified or muted. Independent of my mic.
+  const toggleRemoteAudio = () => {
+    if (callStatusRef.current === 'none') return;
+    const next = !remoteAudioOn;
+    setRemoteAudioEnabled(next);
+    setRemoteAudioOn(next);
   };
 
   const toggleScreenShare = async () => {
@@ -947,6 +996,18 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // Signaling listeners (server relays SDP/ICE only; media is P2P over WebRTC).
   useEffect(() => {
     if (!socket || !otherUserId) return;
+
+    // WhatsApp-style auto-open handoff: App.jsx caught the invite globally and
+    // opened this chat; consume the buffered invite if this screen mounted after
+    // the socket event was already delivered.
+    const pending = takeInvite();
+    if (pending && String(pending.callerId) === String(otherUserId) && callStatusRef.current === 'none') {
+      callIdRef.current = pending.callId;
+      callPeerIdRef.current = pending.callerId;
+      setIncomingCaller({ callId: pending.callId, callerId: pending.callerId, caller: pending.caller || null });
+      setCall('incoming');
+    }
+
     const hInvite = ({ callId, callerId, caller }) => {
       if (!callId || !callerId) return;
       if (callStatusRef.current !== 'none') {
@@ -961,6 +1022,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const hAccept = ({ callId }) => {
       if (callIdRef.current !== callId || callStatusRef.current !== 'outgoing') return;
       setCall('active');
+      sendCallMessage('Video call', 'start');
       try {
         createPeerConnection();
         (async () => {
@@ -975,7 +1037,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     const hReject = ({ callId }) => {
       if (callIdRef.current !== callId) return;
-      if (callStatusRef.current === 'outgoing') teardownCall();
+      if (callStatusRef.current === 'outgoing') {
+        sendCallMessage('Missed video call', 'end');
+        teardownCall();
+      }
     };
     const hOffer = ({ callId, offer }) => {
       if (callIdRef.current !== callId || !offer) return;
@@ -996,6 +1061,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     const hEnd = ({ callId }) => {
       if (callIdRef.current !== callId) return;
+      sendCallMessage(callWasConnectedRef.current ? 'Call ended' : 'Missed video call', 'end');
       teardownCall();
     };
     const hDisconnect = () => {
@@ -2080,12 +2146,16 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
               localStream={screenSharing && screenStream ? screenStream : localStream}
               remoteStream={remoteStream}
               cameraOn={cameraOn}
+              micOn={micOn}
+              remoteAudioOn={remoteAudioOn}
               screenSharing={screenSharing}
               onAccept={acceptIncoming}
               onDecline={declineIncoming}
               onEnd={endCall}
               onSwitchCamera={() => switchCamera()}
               onToggleCamera={toggleCamera}
+              onToggleMic={toggleMic}
+              onToggleRemoteAudio={toggleRemoteAudio}
               onToggleScreenShare={toggleScreenShare}
               onExpand={() => setCallLayout('full')}
               theme={theme}
@@ -2122,12 +2192,16 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
               localStream={screenSharing && screenStream ? screenStream : localStream}
               remoteStream={remoteStream}
               cameraOn={cameraOn}
+              micOn={micOn}
+              remoteAudioOn={remoteAudioOn}
               screenSharing={screenSharing}
               onAccept={acceptIncoming}
               onDecline={declineIncoming}
               onEnd={endCall}
               onSwitchCamera={() => switchCamera()}
               onToggleCamera={toggleCamera}
+              onToggleMic={toggleMic}
+              onToggleRemoteAudio={toggleRemoteAudio}
               onToggleScreenShare={toggleScreenShare}
               onMinimize={() => setCallLayout('compact')}
               theme={theme}
@@ -2557,6 +2631,18 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   const refName = refMsg
     ? (refMsg.sender_id === ownId ? 'You' : (refMsg.sender_name || refMsg.sender_username || otherName || 'Message'))
     : 'Message';
+
+  if (message.type === 'CALL') {
+    const missed = (message.content || '').includes('Missed');
+    return (
+      <View style={styles.callEventRow}>
+        <View style={styles.callEventPill}>
+          <Icon name="call" size={14} color={missed ? '#E53935' : theme.primary} style={{ transform: [{ rotate: missed ? '135deg' : '0deg' }] }} />
+          <Text style={[styles.callEventText, { color: theme.textSecondary }]}>{message.content || 'Video call'}</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
@@ -3014,6 +3100,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#101418',
   },
   msgRow: { flexDirection: 'row', marginVertical: 3 },
+  callEventRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginVertical: 4, paddingHorizontal: 8 },
+  callEventPill: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'center',
+    backgroundColor: 'rgba(128,128,128,0.12)', paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 14, maxWidth: '88%',
+  },
+  callEventText: { fontSize: fs(12.5), fontWeight: '600', marginLeft: 6, textAlign: 'center' },
   bubble: { paddingHorizontal: fs(12), paddingVertical: fs(8), borderRadius: fs(14) },
   // Emoji-only bubbles are transparent + zero padding: the large emoji text carries
   // its own line box so nothing clips. Never recolor/tint/opacity the glyphs.

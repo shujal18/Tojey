@@ -5,15 +5,15 @@ import {
   RTCSessionDescription,
 } from 'react-native-webrtc';
 
-// Camera-only video call service (spec: NO microphone, NO audio). All media
-// flows peer-to-peer over WebRTC; the server only relays signaling JSON.
+// Video + audio call service. All media flows peer-to-peer over WebRTC; the
+// server only relays signaling JSON.
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
-// Video-only getUserMedia: audio is never requested, so no mic permission is
-// ever needed for video calls (camera permission only).
+// Camera + microphone getUserMedia. Mic mute and "remote-audio mute" are purely
+// local track toggles (see setMicMuted / setRemoteAudioEnabled below).
 const LOCAL_CONSTRAINTS = {
-  audio: false,
+  audio: true,
   video: {
     facingMode: 'user',
     width: 640,
@@ -31,10 +31,33 @@ const SCREEN_ENCODING = { maxBitrate: 2500000, maxFramerate: 30 };
 let pc = null;
 let localStream = null;
 let screenStream = null;
+let remoteStream = null;
 let callbacks = {};
+let micMuted = false;
+let remoteAudioEnabled = true;
+
+// Incoming-call handoff for WhatsApp-style auto-open: App.jsx catches the
+// invite globally and calls storeInvite() before opening the chat; the mounted
+// ChatRoomScreen consumes it with takeInvite() so the call UI appears even if
+// the socket listener attached after the invite was delivered.
+let pendingInvite = null;
+
+export function storeInvite(invite) {
+  pendingInvite = (invite && invite.callId && invite.callerId) ? invite : null;
+}
+
+export function takeInvite() {
+  const p = pendingInvite;
+  pendingInvite = null;
+  return p;
+}
 
 export function getLocalStream() {
   return localStream;
+}
+
+export function getRemoteStream() {
+  return remoteStream;
 }
 
 export function getPeer() {
@@ -43,6 +66,48 @@ export function getPeer() {
 
 export function applyCallbacks(cb) {
   callbacks = cb || {};
+  const origRemote = callbacks.onRemoteStream;
+  callbacks.onRemoteStream = (stream) => {
+    remoteStream = stream || remoteStream;
+    // A brand-new remote stream (new call / renegotiation) defaults to audible.
+    setRemoteAudioEnabled(true);
+    if (typeof origRemote === 'function') origRemote(stream);
+  };
+}
+
+/**
+ * Mutes/unmutes THIS device's microphone (what the other user hears).
+ * Only toggles the LOCAL tracks that are being transmitted; the peer's state
+ * is never touched and no signaling is sent.
+ */
+export function setMicMuted(muted) {
+  micMuted = !!muted;
+  if (localStream) {
+    const tracks = localStream.getAudioTracks() || [];
+    tracks.forEach((t) => { t.enabled = !micMuted; });
+  }
+}
+
+export function isMicMuted() {
+  return micMuted;
+}
+
+/**
+ * Mutes/unmutes LOCAL playback of the remote participant's incoming audio.
+ * This only flips `enabled` on the RECEIVED audio track, which is purely local:
+ * the other user keeps transmitting and their microphone state is untouched,
+ * this device simply stops playing their audio. No signaling / renegotiation.
+ */
+export function setRemoteAudioEnabled(enabled) {
+  remoteAudioEnabled = !!enabled;
+  if (remoteStream) {
+    const tracks = remoteStream.getAudioTracks() || [];
+    tracks.forEach((t) => { t.enabled = remoteAudioEnabled; });
+  }
+}
+
+export function isRemoteAudioEnabled() {
+  return remoteAudioEnabled;
 }
 
 export function hasActiveCall() {
@@ -115,7 +180,7 @@ export function createPeerConnection() {
 
 export async function createOffer() {
   if (!pc) throw new Error('No peer connection');
-  const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: false });
+  const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
   await pc.setLocalDescription(offer);
   return pc.localDescription;
 }
@@ -245,5 +310,8 @@ export function cleanupCall() {
     } catch (e) {}
     pc = null;
   }
+  remoteStream = null;
+  micMuted = false;
+  remoteAudioEnabled = true;
   callbacks = {};
 }

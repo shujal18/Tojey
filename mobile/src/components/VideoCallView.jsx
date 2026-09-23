@@ -7,11 +7,13 @@ import { absUrl } from '../config';
 
 // In-call video surface for Tojey. Rendered between the chat header and the
 // existing Tojey text composer (which stays fully functional during a call).
-// Camera-only: mic/speaker controls are intentionally absent (spec forbids audio).
-// Works on Android 6+ (minSdk 24). The local preview is kept behind a small
+// Audio is enabled. The local preview is NOT mirrored (identity orientation both
+// ways: the other side sees exactly what you see), kept behind a small
 // non-rounded surface (SurfaceView cannot be rounded/clipped reliably on some
 // Android versions) with an explicit zIndex/elevation so it always stacks above
-// the remote stream, and mirrored for the front camera.
+// the remote stream. Controls: flip camera, camera on/off, my-mic mute, local
+// mute of the REMOTE audio (this device stops playing the other user - the peer
+// is never muted), screen share, end.
 function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing }) {
   const localUrl = localStream ? localStream.toURL() : null;
   const remoteUrl = remoteStream ? remoteStream.toURL() : null;
@@ -45,7 +47,7 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
             streamURL={localUrl}
             objectFit="cover"
             style={StyleSheet.absoluteFill}
-            mirror={!screenSharing}
+            mirror={false}
             zOrder={1}
           />
         </View>
@@ -61,12 +63,14 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
   );
 }
 
-function ControlButton({ onPress, icon, label, color, active, small, accessibilityLabel }) {
+function ControlButton({ onPress, icon, label, color, active, accent, small, accessibilityLabel }) {
   const base = small ? styles.ctrlCircleS : styles.ctrlCircle;
   return (
     <TouchableOpacity onPress={onPress} style={styles.ctrlBtn} accessibilityLabel={accessibilityLabel}>
-      <View style={[base, { backgroundColor: color || 'rgba(255,255,255,0.16)' }, active && styles.ctrlActive]}>
-        <Icon name={icon} size={small ? 19 : 24} color={active && !color ? '#0B0F14' : '#fff'} />
+      <View style={[base, {
+        backgroundColor: accent ? '#E53935' : (color || 'rgba(255,255,255,0.16)'),
+      }, active && styles.ctrlActive]}>
+        <Icon name={icon} size={small ? 19 : 24} color={(active && !color && !accent) ? '#0B0F14' : '#fff'} />
       </View>
       {!small && <Text style={styles.ctrlLabel}>{label}</Text>}
     </TouchableOpacity>
@@ -81,12 +85,16 @@ export default function VideoCallView({
   remoteStream,
   cameraOn,
   screenSharing,
+  micOn,
+  remoteAudioOn,
   compact,
   onAccept,
   onDecline,
   onEnd,
   onSwitchCamera,
   onToggleCamera,
+  onToggleMic,
+  onToggleRemoteAudio,
   onToggleScreenShare,
   onMinimize,
   onExpand,
@@ -184,6 +192,28 @@ export default function VideoCallView({
           accessibilityLabel="End call"
         />
       </View>
+
+      {/* Audio controls row: my-mic mute and LOCAL remote-audio mute (independent).
+          Mutting "Remote audio" only silences THIS device's playback of the peer;
+          the peer's microphone is never touched and keeps transmitting normally. */}
+      <View style={[styles.voiceControls, small && styles.voiceControlsSmall]}>
+        <ControlButton
+          onPress={onToggleMic}
+          icon={micOn ? 'mic' : 'mic-off-outline'}
+          label="Mic"
+          active={!micOn}
+          small={small}
+          accessibilityLabel="Toggle my microphone"
+        />
+        <ControlButton
+          onPress={onToggleRemoteAudio}
+          icon={remoteAudioOn ? 'volume-high' : 'volume-mute-outline'}
+          label={remoteAudioOn ? 'Remote audio' : 'Remote muted'}
+          accent={!remoteAudioOn}
+          small={small}
+          accessibilityLabel="Toggle remote audio locally"
+        />
+      </View>
     </View>
   );
 }
@@ -268,6 +298,21 @@ const styles = StyleSheet.create({
   controlsSmall: {
     bottom: 10,
     gap: 22,
+  },
+  voiceControls: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 84,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 30,
+    zIndex: 4,
+    alignItems: 'flex-end',
+  },
+  voiceControlsSmall: {
+    bottom: 62,
+    gap: 24,
   },
   ctrlBtn: { alignItems: 'center' },
   ctrlCircle: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
