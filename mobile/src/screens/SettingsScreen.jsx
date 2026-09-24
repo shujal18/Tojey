@@ -416,11 +416,13 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <SettingRow label="Vibration" icon="finger-print-outline" theme={theme}>
           <Switch value={vibration} onValueChange={setVibration} trackColor={{ true: theme.primary }} />
         </SettingRow>
-        {Platform.Version >= 33 && (
+        {Platform.OS === 'android' && (
           <SettingRow label="Notification permission" icon="shield-checkmark-outline" theme={theme}>
             <TouchableOpacity onPress={() => Linking.openSettings()} style={{ paddingVertical: 2 }}>
               <Text style={{ color: notifPermission ? theme.online : theme.danger, fontSize: 13, fontWeight: '700' }}>
-                {notifPermission ? 'Allowed' : 'Blocked · Tap to fix'}
+                {Platform.Version >= 33
+                  ? (notifPermission ? 'Allowed' : 'Blocked · Tap to fix')
+                  : 'Open settings · Check popups'}
               </Text>
             </TouchableOpacity>
           </SettingRow>
@@ -558,7 +560,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <Text style={[styles.logoutText, { color: theme.danger }]}>Log Out</Text>
       </TouchableOpacity>
 
-      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.11.0</Text>
+      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.12.0</Text>
     </ScrollView>
   );
 }

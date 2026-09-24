@@ -7,6 +7,7 @@ import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
 import { Icon } from './src/components/AppIcon';
+import ChatBanner from './src/components/ChatBanner';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
@@ -37,6 +38,7 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
+  const [chatBanner, setChatBanner] = useState(null);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -257,6 +259,9 @@ function Shell() {
           title: name,
           notificationId: message.id,
         });
+        // In-app WhatsApp-style banner: rendered by JS, so OEM notification
+        // rules (DND, per-app banner allowance, quiet) can never hide it.
+        setChatBanner({ userId: sender.userId, name, preview, profilePic: sender.profilePic || '' });
       } catch (e) {
         console.warn('foreground chat popup failed:', e.message);
       }
@@ -433,9 +438,17 @@ function Shell() {
   }
 
   return (
-    <>
+    <View style={{ flex: 1 }}>
       {content}
-    </>
+      <ChatBanner
+        banner={chatBanner}
+        onOpen={(b) => {
+          setChatBanner(null);
+          openFromNotifRef.current({ senderId: b.userId });
+        }}
+        onDismiss={() => setChatBanner(null)}
+      />
+    </View>
   );
 }
 
