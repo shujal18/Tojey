@@ -342,68 +342,15 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       });
     }
 
-    // FCM is sent to every device that is NOT currently foreground-with-socket, so a
-    // backgrounded second device of a connected user still gets its popup (multi-device).
-    const tokensRes = await pool.query(
-      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-      [receiver.id]
-    );
-    const { tokens } = tokensNeedingFcm(tokensRes.rows, receiver.id, online);
-
-    if (!tokens.length) {
-      if (online) {
-        return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
-      }
-      const updated = (await pool.query(
-        `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
-        [notif.id]
-      )).rows[0];
-      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token', fcmNote: 'no-token' });
-    }
-
-    const push = await sendPush({
-      tokens,
-      // Notification + data: the `notification` payload lets Android's FCM client
-      // render the tray notification itself when the app is backgrounded/terminated,
-      // so we never depend on React Native JS waking up to show it. The `data`
-      // payload carries conversationId/senderId for open-chat navigation on tap.
-      notification: {
-        title: `${sender.display_name || sender.username} • Tojey`,
-        body,
-      },
-      data: {
-        type: 'tojey_notification',
-        notificationId: String(notif.id),
-        id: String(notif.id),
-        senderId: String(sender.id),
-        senderUsername: sender.username,
-        senderName: sender.display_name || sender.username,
-        senderPic: sender.profile_pic_url || '',
-        receiverId: String(receiver.id),
-        conversationId: String(convo.id),
-        title: sender.display_name || sender.username,
-        body,
-      },
-    });
-    console.log(`[FCM] offline push to user ${receiver.id}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-
-    if (push.invalidTokens.length) {
-      await deactivateTokens(push.invalidTokens);
-    }
-
-    const status = push.success ? 'sent' : 'failed';
-    const updated = (await pool.query(
-      `UPDATE notifications SET status = $1, delivered_at = $2, fcm_message_id = $3 WHERE id = $4 RETURNING *`,
-      [status, push.success ? new Date() : null, push.messageId || null, notif.id]
-    )).rows[0];
-
+    // Push popups are intentionally removed: no FCM is sent. If the receiver is not
+    // online right now, the notification stays in the DB (status 'sent') and is seen
+    // the next time they open Tojey.
     return res.json({
       ok: true,
-      notification: updated,
-      deliveryMethod: online ? 'socket' : 'fcm',
-      status: updated.status,
-      note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
-      fcmNote: push.note, // 'fcm-unconfigured', 'fcm-rejected', 'fcm-error' - helps client distinguish failure type
+      notification: notif,
+      deliveryMethod: online ? 'socket' : 'none',
+      status: notif.status,
+      note: online ? undefined : 'receiver offline - stored for later viewing',
     });
   } catch (e) {
     console.error('notifications:send error', e.message);
@@ -950,63 +897,10 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Chat routing is driven by the receiver's EXPLICIT app state (reported via
-        // app:foreground / app:background socket events), never by socket presence alone.
-        // With multi-device support the decision is PER DEVICE:
-        //   foreground + socket        -> live chat UI is on screen: Socket.IO only (no popup)
-        //   minimized (socket alive)   -> app backgrounded: real FCM popup (notification+data)
-        //   terminated / offline       -> no socket at all: real FCM popup rendered natively
-        // A minimized-but-connected device was previously treated as "online" and silently
-        // missed every chat message. The socket delivery below still runs for backgrounded
-        // devices so the message persists when the UI returns (deduped by id on receipt).
+        // Push popups are intentionally removed. The message is delivered over the
+        // socket only; when the receiver is offline it stays in the DB and shows up
+        // the next time they open a conversation (the client reconciles by id).
         const receiverHasSocket = userSockets(otherUserId).size > 0;
-        const socketOnly = receiverHasSocket && isUserForeground(otherUserId);
-        try {
-          const tokensRes = await pool.query(
-            `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-            [otherUserId]
-          );
-          const { tokens, phoneForeground, legacySkip } = tokensNeedingFcm(tokensRes.rows, otherUserId, receiverHasSocket);
-          if (tokens.length) {
-            const msgPreview = String(content || '')
-              || (type === 'VOICE' ? 'Voice message'
-                : type === 'IMAGE' ? 'Photo'
-                : type === 'VIDEO' ? 'Video'
-                : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
-                : '');
-            // notification+data: when the process is backgrounded or dead, Android's FCM
-            // client renders the tray popup itself (no dependence on JS waking up), and the
-            // `data` payload carries the ids the app needs to open the exact conversation
-            // on tap. `body` stays as the raw content so a foreground data handler (race
-            // only) can render without the auto-tray duplicate.
-            const push = await sendPush({
-              tokens,
-              notification: {
-                title: `${dbUser.displayName || dbUser.username} • Tojey`,
-                body: msgPreview,
-              },
-              data: {
-                type: 'tojey_chat',
-                conversationId: String(convo.id),
-                messageId: String(message.id),
-                senderId: String(dbUser.userId),
-                senderUsername: dbUser.username,
-                senderName: dbUser.displayName || dbUser.username,
-                senderPic: dbProfilePic || '',
-                receiverId: String(otherUserId),
-                msgType: String(type),
-                msgPreview,
-                body: String(content || ''),
-              },
-            });
-            console.log(`[FCM] chat push to user ${otherUserId}: devices=${tokens.length} fg-skipped=${phoneForeground} legacy-skipped=${legacySkip} invalid=${push.invalidTokens.length} success=${push.success}`);
-            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-          } else {
-            console.log(`[DELIVERY] chat to user ${otherUserId}: no FCM needed (fg-phones=${phoneForeground} legacy-skipped=${legacySkip}) socketOnly=${socketOnly}`);
-          }
-        } catch (pushErr) {
-          console.error('[FCM] chat push failed:', pushErr.message);
-        }
 
         if (receiverHasSocket) {
           setTimeout(() => {
@@ -1067,55 +961,9 @@ io.on('connection', async (socket) => {
         displayName: dbUser.displayName,
         profilePic: dbUser.profile_pic_url || '',
       };
+      // Push popups are intentionally removed: nudges deliver over the socket only
+      // (online/live). Offline recipients see it next time they open Tojey.
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
-
-      // Only recipients who are online AND on-screen get the socket nudge alone.
-      // Backgrounded/offline devices get a real FCM notification (with vibration).
-      const hasSocket = userSockets(otherUserId).size > 0;
-      if (hasSocket && isUserForeground(otherUserId)) return;
-
-      try {
-        const tokensRes = await pool.query(
-          `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-          [otherUserId]
-        );
-        const { tokens } = tokensNeedingFcm(tokensRes.rows, otherUserId, hasSocket);
-        if (!tokens.length) return;
-        // Carry the conversation id (if one exists) so tapping the nudge notification
-        // can open the exact chat instead of falling back to the sender.
-        const convo = (await pool.query(
-          `SELECT id FROM conversations
-           WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
-          [dbUser.userId, otherUserId]
-        )).rows[0];
-        const banner = '👋 nudged you!';
-        const push = await sendPush({
-          tokens,
-          // Deliberately DATA-ONLY (no `notification` payload). Android renders any
-          // `notification` payload in the tray by itself and never invokes the app's
-          // headless JS handler - which is exactly where the strong nudge vibrate
-          // pattern + chat head bubble run. Data-only FCM reaches the background
-          // handler even when the app is minimized / screen off, so the nudge always
-          // buzzes with the real pattern instead of a generic tray vibration.
-          data: {
-            type: 'tojey_nudge',
-            id: `nudge-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-            senderId: String(dbUser.userId),
-            senderUsername: dbUser.username,
-            senderName: dbUser.displayName || dbUser.username,
-            senderPic: dbUser.profile_pic_url || '',
-            receiverId: String(otherUserId),
-            conversationId: convo ? String(convo.id) : undefined,
-            title: dbUser.displayName || dbUser.username,
-            body: banner,
-            nudge: '1',
-          },
-        });
-        console.log(`[FCM] nudge push for user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-        if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-      } catch (pushErr) {
-        console.error('[FCM] nudge push failed:', pushErr.message);
-      }
     });
 
     socket.on('message:edit', async ({ messageId, content }) => {
