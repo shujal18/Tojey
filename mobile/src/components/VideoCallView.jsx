@@ -72,7 +72,6 @@ function ControlButton({ onPress, icon, label, color, active, accent, small, acc
       }, active && styles.ctrlActive]}>
         <Icon name={icon} size={small ? 19 : 24} color={(active && !color && !accent) ? '#0B0F14' : '#fff'} />
       </View>
-      {!small && <Text style={styles.ctrlLabel}>{label}</Text>}
     </TouchableOpacity>
   );
 }
@@ -318,7 +317,6 @@ const styles = StyleSheet.create({
   ctrlCircle: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   ctrlCircleS: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   ctrlActive: { backgroundColor: '#fff' },
-  ctrlLabel: { color: '#fff', fontSize: 11, marginTop: 6, fontWeight: '600', textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 4 },
   bigAvatar: { width: 120, height: 120, borderRadius: 60, alignSelf: 'center', marginTop: 60, alignItems: 'center', justifyContent: 'center', resizeMode: 'cover' },
   bigAvatarText: { color: '#fff', fontSize: 46, fontWeight: '700' },
   bigName: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: 18 },

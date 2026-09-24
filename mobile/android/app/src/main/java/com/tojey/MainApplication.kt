@@ -23,7 +23,6 @@ class MainApplication : Application(), ReactApplication {
         override fun getPackages(): List<ReactPackage> {
           val list = PackageList(this).packages.toMutableList()
           list.add(TojeyChatHeadPackage())
-          list.add(TojeyKeepAlivePackage())
           return list
         }
 

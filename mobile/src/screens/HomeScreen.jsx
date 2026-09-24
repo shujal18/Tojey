@@ -1,6 +1,6 @@
 import React, { useEffect, useState, memo } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform, ActivityIndicator,
+  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
 import { loadUsers, saveUsers, loadConversations, saveConversations, clearConversationCache } from '../services/cache';
@@ -10,7 +10,7 @@ import ColorEmoji from '../components/ColorEmoji';
 import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
 import { getNudgeVibrationEnabled } from '../services/chatHead';
-import { absUrl, SERVER_URL } from '../config';
+import { absUrl } from '../config';
 import { fs } from '../utils/size';
 import ReelsScreen from './ReelsScreen';
 
@@ -26,10 +26,6 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
   const [query, setQuery] = useState('');
   const [clearTarget, setClearTarget] = useState(null);
   const [actionTarget, setActionTarget] = useState(null);
-  const [notifTarget, setNotifTarget] = useState(null);
-  const [notifMsg, setNotifMsg] = useState('');
-  const [notifSending, setNotifSending] = useState(false);
-  const [notifResult, setNotifResult] = useState(null);
   const [nudgeToast, setNudgeToast] = useState('');
 
   useEffect(() => {
@@ -170,79 +166,6 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
     onOpenChat(normalizedContact);
   };
 
-  const sendNotification = async () => {
-    const msg = notifMsg.trim();
-    if (!notifTarget) return;
-    if (!msg) {
-      setNotifResult({ error: 'Write a message first' });
-      return;
-    }
-    setNotifSending(true);
-    setNotifResult(null);
-    try {
-      const conv = conversations.find((c) => c.other && c.other.id === notifTarget.id);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(`${SERVER_URL}/api/notifications/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token || ''}`,
-        },
-        body: JSON.stringify({
-          receiverId: notifTarget.id,
-          message: msg,
-          conversationId: (conv && conv.conversationId) || null,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      let data = null;
-      try {
-        data = await res.json();
-      } catch (parseErr) {
-        data = null;
-      }
-      if (!res.ok) {
-        setNotifResult({ error: (data && (data.error || data.message)) || `Server error (${res.status})` });
-        return;
-      }
-      if (data && data.status === 'failed') {
-        const offline = !notifTarget.online && notifTarget.online !== undefined;
-        let errorMsg = data.note || 'Delivery failed';
-        if (data.fcmNote === 'fcm-unconfigured') {
-          errorMsg = 'Notification saved but push is disabled on the server. Configure FIREBASE_SERVICE_ACCOUNT_B64 (or FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY) in the Render backend environment to enable FCM.';
-        } else if (data.fcmNote === 'fcm-rejected') {
-          errorMsg = 'FCM rejected the token(s). The receiver may need to reinstall the app to get a fresh push token.';
-        } else if (offline && !data.fcmNote) {
-          errorMsg = `${notifTarget.display_name || notifTarget.username} is offline and has no active push token registered.`;
-        }
-        setNotifResult({ error: errorMsg });
-        return;
-      }
-      if (!data || !data.ok) {
-        setNotifResult({ error: (data && data.error) || 'No response from server' });
-        return;
-      }
-      const via = data.deliveryMethod === 'socket' ? 'live connection' : 'push notification';
-      setNotifResult({ ok: true, text: `Sent via ${via}` });
-      setTimeout(() => {
-        setNotifTarget(null);
-        setNotifMsg('');
-        setNotifResult(null);
-      }, 1600);
-    } catch (e) {
-      console.error('sendNotification failed:', e);
-      if (e.name === 'AbortError') {
-        setNotifResult({ error: 'Request timed out — check your internet connection' });
-      } else {
-        setNotifResult({ error: 'Cannot reach server — check your internet connection' });
-      }
-    } finally {
-      setNotifSending(false);
-    }
-  };
-
   const sendNudge = (contact) => {
     if (socket && contact) {
       socket.emit('nudge', { otherUserId: contact.id });
@@ -378,19 +301,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
             <Text style={[styles.modalTitle, { color: theme.text }]}>{actionTarget?.display_name}</Text>
             <TouchableOpacity
-              style={[styles.actionOption, { backgroundColor: theme.primaryLight, marginTop: 16 }]}
-              onPress={() => {
-                setNotifTarget(actionTarget);
-                setNotifMsg('Nice days');
-                setNotifResult(null);
-                setActionTarget(null);
-              }}
-            >
-              <Icon name="notifications-outline" size={18} color={theme.primary} />
-              <Text style={{ color: theme.primary, fontWeight: '700', marginLeft: 12, fontSize: fs(15) }}>Send Notification</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.actionOption, { backgroundColor: theme.inputBg, marginTop: 10 }]}
+              style={[styles.actionOption, { backgroundColor: theme.inputBg, marginTop: 16 }]}
               onPress={() => {
                 setClearTarget(actionTarget);
                 setActionTarget(null);
@@ -414,38 +325,6 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
             >
               <Text style={{ color: theme.textSecondary, fontWeight: '600', fontSize: fs(14) }}>Cancel</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Send notification composer */}
-      <Modal transparent visible={!!notifTarget} animationType="slide" onRequestClose={() => setNotifTarget(null)}>
-        <View style={styles.modalBackdrop}>
-          <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
-            <Text style={[styles.modalTitle, { color: theme.text }]}>Send Notification</Text>
-            <Text style={[styles.modalSub, { color: theme.textSecondary }]}>To {notifTarget?.display_name}</Text>
-            <TextInput
-              value={notifMsg}
-              onChangeText={(t) => { setNotifMsg(t); setNotifResult(null); }}
-              placeholder="Notification message…"
-              placeholderTextColor={theme.textSecondary}
-              maxLength={200}
-              multiline
-              style={[styles.notifInput, { backgroundColor: theme.inputBg, color: theme.text }]}
-            />
-            {notifResult && (
-              <Text style={{ color: notifResult.error ? theme.danger : theme.online, fontSize: fs(13), marginTop: 10 }}>
-                {notifResult.error || notifResult.text}
-              </Text>
-            )}
-            <View style={styles.modalActions}>
-              <TouchableOpacity onPress={() => setNotifTarget(null)} style={[styles.modalBtn, { backgroundColor: theme.inputBg }]}>
-                <Text style={{ color: theme.text, fontWeight: '600' }}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={sendNotification} disabled={notifSending} style={[styles.modalBtn, { backgroundColor: theme.primary }]}>
-                {notifSending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ color: '#fff', fontWeight: '600' }}>Send</Text>}
-              </TouchableOpacity>
-            </View>
           </View>
         </View>
       </Modal>
@@ -625,7 +504,6 @@ const styles = StyleSheet.create({
   modalCard: { borderRadius: fs(16), padding: fs(22), width: '100%', maxWidth: 340 },
   modalTitle: { fontSize: fs(17), fontWeight: '700' },
   actionOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: fs(12), paddingVertical: fs(13) },
-  notifInput: { borderRadius: fs(12), paddingHorizontal: fs(12), paddingVertical: fs(10), fontSize: fs(15), marginTop: 14, minHeight: 48, maxHeight: 120, textAlignVertical: 'top' },
   modalSub: { fontSize: fs(13), marginTop: 8, lineHeight: fs(19) },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
   modalBtn: { paddingHorizontal: fs(18), paddingVertical: fs(10), borderRadius: fs(10) },
