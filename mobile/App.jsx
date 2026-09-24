@@ -226,7 +226,44 @@ function Shell() {
     };
   }, [socket, session]);
 
-  // Tapping a system notification (foreground while running / cold start) opens that conversation.
+  // Foreground chat popups (WhatsApp-style): the server sends socket-only for
+  // foreground devices (no FCM), so THIS is the only popup source while the app is
+  // open. Show a real heads-up notification when a message arrives but the user is
+  // not currently viewing that exact conversation. Background/terminated delivery is
+  // handled by the FCM tray render instead, so gate on AppState 'active' to avoid
+  // popping a duplicate alongside the system tray entry.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onChatMessage = ({ message, sender, conversationId }) => {
+      try {
+        if (!message || !sender) return;
+        const ownId = session && session.user ? session.user.id : null;
+        if (ownId != null && sender.userId != null && String(sender.userId) === String(ownId)) return;
+        if (AppState.currentState !== 'active') return;
+        if (activeChat && activeChat.id === sender.userId) return;
+        let preview = String(message.content || '') || 'Media';
+        if (message.type === 'VOICE') preview = 'Voice message';
+        else if (message.type === 'IMAGE') preview = 'Photo';
+        else if (message.type === 'VIDEO') preview = 'Video';
+        else if (message.type === 'FILE' || message.type === 'DOCUMENT') preview = 'File';
+        const name = sender.displayName || sender.username || 'Tojey';
+        showSystemNotification({
+          type: 'chat',
+          senderId: sender.userId,
+          senderUsername: sender.username || '',
+          senderName: name,
+          conversationId,
+          message: preview,
+          title: name,
+          notificationId: message.id,
+        });
+      } catch (e) {
+        console.warn('foreground chat popup failed:', e.message);
+      }
+    };
+    socket.on('message:receive', onChatMessage);
+    return () => socket.off('message:receive', onChatMessage);
+  }, [socket, session, activeChat]);
   useEffect(() => {
     const unsubPressed = onSystemNotificationPressed((p) => {
       if (openFromNotifRef.current) openFromNotifRef.current(p);

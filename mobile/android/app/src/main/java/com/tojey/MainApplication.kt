@@ -48,6 +48,16 @@ class MainApplication : Application(), ReactApplication {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       try {
         val nm = getSystemService(NotificationManager::class.java)
+        val existing = nm.getNotificationChannel("tojey-messages")
+        // If an OLDER build created this channel at default/low importance, Android 8+
+        // will never promote it on its own and heads-up popups + sound stay silent.
+        // Delete it once so it is re-created at IMPORTANCE_HIGH below.
+        if (existing != null && existing.importance < NotificationManager.IMPORTANCE_HIGH) {
+          try {
+            nm.deleteNotificationChannel("tojey-messages")
+          } catch (ignored: Exception) {
+          }
+        }
         if (nm.getNotificationChannel("tojey-messages") == null) {
           val ch = NotificationChannel(
             "tojey-messages",

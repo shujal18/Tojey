@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
-  Platform, AppState,
+  Platform, AppState, Linking, PermissionsAndroid,
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -32,6 +32,17 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [nudgeVib, setNudgeVib] = useState(true);
   const [fcmStatus, setFcmStatus] = useState(null);
   const [fcmBusy, setFcmBusy] = useState(false);
+  const [notifPermission, setNotifPermission] = useState(true);
+
+  useEffect(() => {
+    if (Platform.Version >= 33) {
+      (async () => {
+        try {
+          setNotifPermission(await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS));
+        } catch (e) {}
+      })();
+    }
+  }, []);
 
   const loadFcmStatus = async () => {
     setFcmStatus({ loading: true, data: null, error: null });
@@ -405,6 +416,15 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <SettingRow label="Vibration" icon="finger-print-outline" theme={theme}>
           <Switch value={vibration} onValueChange={setVibration} trackColor={{ true: theme.primary }} />
         </SettingRow>
+        {Platform.Version >= 33 && (
+          <SettingRow label="Notification permission" icon="shield-checkmark-outline" theme={theme}>
+            <TouchableOpacity onPress={() => Linking.openSettings()} style={{ paddingVertical: 2 }}>
+              <Text style={{ color: notifPermission ? theme.online : theme.danger, fontSize: 13, fontWeight: '700' }}>
+                {notifPermission ? 'Allowed' : 'Blocked · Tap to fix'}
+              </Text>
+            </TouchableOpacity>
+          </SettingRow>
+        )}
       </Section>
 
       <Section title="Push Notifications (FCM)" theme={theme}>
@@ -538,7 +558,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <Text style={[styles.logoutText, { color: theme.danger }]}>Log Out</Text>
       </TouchableOpacity>
 
-      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.10.0</Text>
+      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.11.0</Text>
     </ScrollView>
   );
 }
