@@ -19,6 +19,7 @@ import {
   showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification,
   getDeviceId, nextDeviceSeq,
 } from './src/services/notifications';
+import { startKeepAlive, stopKeepAlive } from './src/services/keepAlive';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
 const APP_LOCK_PIN_KEY = '@tojey_app_lock_pin';
@@ -105,12 +106,14 @@ function Shell() {
     setSession({ user, token });
     setSocket(connect(token));
     startPush(token).catch(() => {});
+    startKeepAlive();
   };
 
   const handleLogout = async () => {
     await logout();
     disconnect();
     stopPush();
+    stopKeepAlive();
     try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
     setSession(null);
     setSocket(null);
@@ -130,6 +133,7 @@ function Shell() {
         if (s) {
           setSocket(connect(s.token));
           startPush(s.token).catch(() => {});
+          startKeepAlive();
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);

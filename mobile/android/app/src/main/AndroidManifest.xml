@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:name=".MainApplication"
@@ -58,5 +60,13 @@
             android:name=".ChatHeadService"
             android:exported="false"
             android:permission="android.permission.SYSTEM_ALERT_WINDOW" />
+
+        <!-- Keep-alive foreground service (WhatsApp-style) so the process survives
+             swipe-away/background and FCM popups keep rendering. -->
+        <service
+            android:name=".TojeyKeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
