@@ -362,54 +362,62 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       });
     }
 
-    // Push delivery (data-only) to every device of the receiver that is NOT currently
-    // foreground-with-socket, so a backgrounded second device still gets its popup.
-    const tokensRes = await pool.query(
-      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-      [receiver.id]
-    );
-    const { tokens } = tokensNeedingFcm(tokensRes.rows, receiver.id, online);
-
-    if (!tokens.length) {
-      if (online) {
-        return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
-      }
-      const updated = (await pool.query(
-        `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
-        [notif.id]
-      )).rows[0];
-      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token', fcmNote: 'no-token' });
-    }
-
-    const push = await sendPush({
-      tokens,
-      // Data-only: the client renders the popup itself (Android Kotlin MessagingService
-      // / web service worker), so every device gets a controllable heads-up regardless
-      // of OEM quirks (OPPO/ColorOS suppress system-rendered FCM banners).
-      data: {
-        type: 'tojey_notification',
-        notificationId: String(notif.id),
-        id: String(notif.id),
-        senderId: String(sender.id),
-        senderUsername: sender.username,
-        senderName: sender.display_name || sender.username,
-        senderPic: sender.profile_pic_url || '',
-        receiverId: String(receiver.id),
-        conversationId: String(convo.id),
-        title: sender.display_name || sender.username,
-        body,
-      },
+    // Real push to every device of the receiver that is NOT foreground-with-socket, so
+    // a backgrounded second device still gets its popup. Android gets a true system
+    // notification (rendered by Google Play Services - reliable when the app is closed);
+    // web tokens get data-only because the service worker renders its own popup.
+    const push = await pushFcmToUser(receiver.id, online, {
+      title: sender.display_name || sender.username,
+      body,
+    }, {
+      type: 'tojey_notification',
+      notificationId: String(notif.id),
+      id: String(notif.id),
+      senderId: String(sender.id),
+      senderUsername: sender.username,
+      senderName: sender.display_name || sender.username,
+      senderPic: sender.profile_pic_url || '',
+      receiverId: String(receiver.id),
+      conversationId: String(convo.id),
+      title: sender.display_name || sender.username,
+      body,
     });
-    console.log(`[FCM] notification push to user ${receiver.id}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
 
     if (push.invalidTokens.length) {
       await deactivateTokens(push.invalidTokens);
     }
 
-    const status = push.success ? 'sent' : 'failed';
+    if (!push.success) {
+      if (online) {
+        // The receiver is online on at least one socket; they already got it over the
+        // socket and every offline second-device push failed. Reflect that honestly.
+        const updated = (await pool.query(
+          `UPDATE notifications SET status = 'sent', delivered_at = NOW(), fcm_message_id = $1 WHERE id = $2 RETURNING *`,
+          [push.messageId || null, notif.id]
+        )).rows[0];
+        return res.json({
+          ok: true,
+          notification: updated,
+          deliveryMethod: 'socket',
+          status: updated.status,
+          note: push.note || 'push to background devices failed',
+          fcmNote: push.note,
+        });
+      }
+      const updated = (await pool.query(
+        `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
+        [notif.id]
+      )).rows[0];
+      const note = push.note === 'fcm-unconfigured'
+        ? 'push is disabled on the server'
+        : 'receiver has no registered device token';
+      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note, fcmNote: push.note });
+    }
+
+    const status = 'sent';
     const updated = (await pool.query(
       `UPDATE notifications SET status = $1, delivered_at = $2, fcm_message_id = $3 WHERE id = $4 RETURNING *`,
-      [status, push.success ? new Date() : null, push.messageId || null, notif.id]
+      [status, new Date(), push.messageId || null, notif.id]
     )).rows[0];
 
     return res.json({
@@ -417,7 +425,7 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       notification: updated,
       deliveryMethod: online ? 'socket' : 'fcm',
       status: updated.status,
-      note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
+      note: push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined,
       fcmNote: push.note,
     });
   } catch (e) {
@@ -749,12 +757,12 @@ function tokensNeedingFcm(rows, userId, legacyHasSocket) {
     if (!r || !r.fcm_token) continue;
     if (r.device_id) {
       if (deviceIsForeground(r.device_id)) { phoneForeground += 1; continue; }
-      tokens.push(r.fcm_token);
+      tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     } else {
       // Legacy rows: keep the old behavior - skip FCM only when the whole user is
       // foreground (a live socket + an on-screen report on some device).
       if (legacyHasSocket && isUserForeground(userId)) { legacySkip += 1; continue; }
-      tokens.push(r.fcm_token);
+      tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     }
   }
   return { tokens, phoneForeground, legacySkip };
@@ -776,20 +784,53 @@ function messagePreview(message) {
   return raw || 'New message';
 }
 
-// WhatsApp-style FCM push for a received chat message. Only devices that are NOT
-// foreground-with-socket get a push (closed app / closed tab / backgrounded device);
-// on-screen clients already got the message over the live socket. Fire-and-forget:
-// never blocks the socket handler, never crashes the server.
-async function deliverFcmPush(receiverUserId, data) {
+// Deliver a push to every device of `userId` that is NOT foreground-with-socket
+// (closed app / closed tab / backgrounded device); on-screen clients already got the
+// message over the live socket. Platform-split so Android gets a REAL system-rendered
+// notification (notification + data: Google Play Services draws the tray entry even
+// when the app process is killed - the only reliable closed-app path on OPPO/ColorOS
+// etc.) while web tokens stay data-only (the service worker renders its own popup).
+// Fire-and-forget: never blocks the caller, never crashes the server.
+async function pushFcmToUser(receiverUserId, online, notification, data) {
+  const combined = { success: false, messageId: '', invalidTokens: [], note: '', perToken: [] };
   try {
-    const online = userSockets(receiverUserId).size > 0;
     const tokensRes = await pool.query(
-      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      `SELECT fcm_token, device_id, platform FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
       [receiverUserId]
     );
     const { tokens } = tokensNeedingFcm(tokensRes.rows, receiverUserId, online);
-    if (!tokens.length) return;
-    const push = await sendPush({ tokens, data });
+    if (!tokens.length) return combined;
+
+    const android = tokens.filter(t => t.platform !== 'web');
+    const web = tokens.filter(t => t.platform === 'web');
+    if (android.length) {
+      const p = await sendPush({ tokens: android.map(t => t.token), notification, data });
+      combined.success = combined.success || p.success;
+      combined.messageId = combined.messageId || p.messageId || '';
+      combined.invalidTokens = combined.invalidTokens.concat(p.invalidTokens || []);
+      combined.note = combined.note || p.note || '';
+      combined.perToken = combined.perToken.concat(p.perToken || []);
+    }
+    if (web.length) {
+      const p = await sendPush({ tokens: web.map(t => t.token), data });
+      combined.success = combined.success || p.success;
+      combined.messageId = combined.messageId || p.messageId || '';
+      combined.invalidTokens = combined.invalidTokens.concat(p.invalidTokens || []);
+      combined.note = combined.note || p.note || '';
+      combined.perToken = combined.perToken.concat(p.perToken || []);
+    }
+    return combined;
+  } catch (e) {
+    console.error('pushFcmToUser error:', e && e.message);
+    return combined;
+  }
+}
+
+// WhatsApp-style FCM push for a received chat message / nudge. Fire-and-forget.
+async function deliverFcmPush(receiverUserId, { notification, data }) {
+  try {
+    const online = userSockets(receiverUserId).size > 0;
+    const push = await pushFcmToUser(receiverUserId, online, notification, data);
     if (push.invalidTokens && push.invalidTokens.length) {
       await deactivateTokens(push.invalidTokens);
     }
@@ -1019,22 +1060,30 @@ io.on('connection', async (socket) => {
           }, 300);
         }
 
-        // Push a real notification to every receiver device/tab that is NOT currently
-        // foreground-with-socket (closed app, closed web tab, backgrounded device), so
-        // messages pop like WhatsApp/Messenger even when the app is not on screen.
+        // Push to every receiver device/tab that is NOT currently foreground-with-socket
+        // (closed app, closed tab, backgrounded device), so messages pop like
+        // WhatsApp/Messenger even when the app is not on screen. Android receives a true
+        // system notification (rendered by Google Play Services, no app process needed);
+        // web tokens get data-only because the service worker renders its own popup.
         deliverFcmPush(otherUserId, {
-          type: 'tojey_chat',
-          messageId: String(message.id),
-          senderId: String(dbUser.userId),
-          senderUsername: dbUser.username,
-          senderName: dbUser.displayName || dbUser.username,
-          senderPic: dbProfilePic,
-          receiverId: String(otherUserId),
-          conversationId: String(convo.id),
-          msgType: message.type,
-          msgPreview: messagePreview(message).slice(0, 140),
-          body: messagePreview(message).slice(0, 140),
-          title: dbUser.displayName || dbUser.username,
+          notification: {
+            title: dbUser.displayName || dbUser.username,
+            body: messagePreview(message).slice(0, 140),
+          },
+          data: {
+            type: 'tojey_chat',
+            messageId: String(message.id),
+            senderId: String(dbUser.userId),
+            senderUsername: dbUser.username,
+            senderName: dbUser.displayName || dbUser.username,
+            senderPic: dbProfilePic,
+            receiverId: String(otherUserId),
+            conversationId: String(convo.id),
+            msgType: message.type,
+            msgPreview: messagePreview(message).slice(0, 140),
+            body: messagePreview(message).slice(0, 140),
+            title: dbUser.displayName || dbUser.username,
+          },
         });
 
         callback({ ok: true, message });
@@ -1090,14 +1139,20 @@ io.on('connection', async (socket) => {
       // vibrates + renders a tray entry even if closed). Same per-device routing as a
       // chat message; on-screen clients got the socket nudge already.
       deliverFcmPush(otherUserId, {
-        type: 'tojey_nudge',
-        senderId: String(dbUser.userId),
-        senderUsername: dbUser.username,
-        senderName: dbUser.displayName || dbUser.username,
-        senderPic: dbUser.profile_pic_url || '',
-        receiverId: String(otherUserId),
-        title: dbUser.displayName || dbUser.username,
-        body: '👋 nudged you!',
+        notification: {
+          title: dbUser.displayName || dbUser.username,
+          body: '👋 nudged you!',
+        },
+        data: {
+          type: 'tojey_nudge',
+          senderId: String(dbUser.userId),
+          senderUsername: dbUser.username,
+          senderName: dbUser.displayName || dbUser.username,
+          senderPic: dbUser.profile_pic_url || '',
+          receiverId: String(otherUserId),
+          title: dbUser.displayName || dbUser.username,
+          body: '👋 nudged you!',
+        },
       });
     });
 
