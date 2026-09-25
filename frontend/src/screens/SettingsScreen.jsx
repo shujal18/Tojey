@@ -1,19 +1,29 @@
 import React, { useState, useRef } from 'react';
 import { useTheme } from '../theme/ThemeContext';
 import { useAuth } from '../services/AuthContext';
-import { ChevronRight, Moon, Sun, Monitor, Type, Lock, LogOut, Camera, User, IdCard } from 'lucide-react';
+import { useChat } from '../services/ChatContext';
+import { ChevronRight, Moon, Sun, Monitor, Type, Lock, LogOut, Camera, User, IdCard, Image as ImageIcon, Palette } from 'lucide-react';
+import { wallpapers, chatColors, getChatColor, setChatColor, shadeColor, quickReactions } from '../theme';
 
 const API = import.meta.env.VITE_API_URL || '';
 
 export default function SettingsScreen({ onLogout }) {
   const { theme, mode, setMode } = useTheme();
   const { user, token, setUser } = useAuth();
+  const { wallpaper, setWallpaper } = useChat();
   const [fontSize, setFontSize] = useState(() => parseInt(localStorage.getItem('tojey-font') || '16'));
+  const [showWallpapers, setShowWallpapers] = useState(false);
+  const [chatColor, setChatColorState] = useState(getChatColor());
   const fileRef = useRef(null);
 
   const setFont = (v) => {
     setFontSize(v);
     localStorage.setItem('tojey-font', v);
+  };
+
+  const pickColor = (c) => {
+    setChatColor(c);
+    setChatColorState(c);
   };
 
   const themeOptions = [
@@ -106,6 +116,66 @@ export default function SettingsScreen({ onLogout }) {
             onChange={(e) => setFont(parseInt(e.target.value))}
             style={{ width: '100%', accentColor: theme.primary }} />
         </Row>
+      </Section>
+
+      <Section title="Chat">
+        <button onClick={() => setShowWallpapers(s => !s)} style={{
+          width: '100%', display: 'flex', alignItems: 'center',
+          padding: '14px 16px', color: theme.text, fontSize: 14,
+          borderBottom: `1px solid ${theme.border}`,
+          background: 'transparent',
+        }}>
+          <span style={{ color: theme.primary, marginRight: 12, display: 'flex' }}><ImageIcon size={18} /></span>
+          <span style={{ flex: 1, textAlign: 'left' }}>
+            Wallpaper
+            {wallpaper && <div style={{ fontSize: 12, color: theme.textSecondary, marginTop: 2 }}>{wallpaper.name}</div>}
+          </span>
+          <span style={{
+            width: 44, height: 44, borderRadius: 12, marginLeft: 8,
+            background: wallpaper && wallpaper.url.startsWith('linear') ? wallpaper.url
+              : wallpaper && wallpaper.url.startsWith('radial') ? wallpaper.url
+                : wallpaper && wallpaper.url.includes('background-size') ? wallpaper.url.split(';')[0]
+                  : 'linear-gradient(135deg,#6C3CE9,#4E22B8)',
+          }} />
+        </button>
+        {showWallpapers && (
+          <div style={{ padding: 12, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, borderBottom: `1px solid ${theme.border}` }}>
+            {wallpapers.map(w => (
+              <button key={w.id} onClick={() => { setWallpaper(w); setShowWallpapers(false); }} style={{
+                height: 64, borderRadius: 12, overflow: 'hidden',
+                background: w.url.startsWith('linear') || w.url.startsWith('radial') ? w.url
+                  : w.url.includes('background-size') ? undefined : w.url,
+                ...(w.url.includes('background-size') ? { background: w.url.slice(0, w.url.indexOf(';')) } : {}),
+                border: wallpaper?.id === w.id ? `2px solid ${theme.primary}` : '2px solid transparent',
+                position: 'relative', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 6,
+              }}>
+                <span style={{ fontSize: 10, color: '#fff', textShadow: '0 1px 3px rgba(0,0,0,0.8)', fontWeight: 600 }}>
+                  {w.name}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={{ padding: '12px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <Palette size={18} color={theme.primary} />
+            <span style={{ color: theme.text, fontSize: 14 }}>Chat color</span>
+            <span style={{ color: theme.textSecondary, fontSize: 12, marginLeft: 'auto' }}>sent bubbles</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {chatColors.map(c => (
+              <button key={c} onClick={() => pickColor(c)} style={{
+                width: 38, height: 38, borderRadius: 12,
+                background: `linear-gradient(135deg, ${c} 0%, ${shadeColor(c, -40)} 100%)`,
+                border: chatColor === c ? '3px solid #fff' : '2px solid transparent',
+                boxShadow: chatColor === c ? `0 0 0 2px ${c}` : 'none',
+              }}>
+                {chatColor === c && <span style={{ color: '#fff', fontSize: 16 }}>✓</span>}
+              </button>
+            ))}
+          </div>
+        </div>
       </Section>
 
       <Section title="Privacy">

@@ -84,6 +84,16 @@ input, textarea {
   80% { transform: rotate(6deg); }
 }
 
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes msgSlideUp {
+  from { transform: translateY(14px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 .message-enter {
   animation: slideInUp 0.25s ease forwards;
 }

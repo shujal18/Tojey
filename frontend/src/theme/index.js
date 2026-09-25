@@ -40,6 +40,8 @@ export const lightTheme = {
   shadow: '0 2px 12px rgba(76, 35, 184, 0.08)',
   unreadBg: colors.primary,
   unreadText: colors.white,
+  danger: colors.danger,
+  online: colors.online,
 };
 
 export const darkTheme = {
@@ -62,6 +64,8 @@ export const darkTheme = {
   shadow: '0 2px 12px rgba(0, 0, 0, 0.5)',
   unreadBg: colors.primary,
   unreadText: colors.white,
+  danger: colors.danger,
+  online: colors.online,
 };
 
 export function getTheme(mode) {
@@ -80,3 +84,31 @@ export const wallpapers = [
 ];
 
 export const quickReactions = ['❤️', '😂', '😮', '😢', '👍', '👎'];
+
+export const chatColors = ['#6C3CE9', '#4E22B8', '#D81B60', '#E53935', '#F4511E', '#EF6C00', '#00897B', '#00ACC1', '#1E88E5', '#3949AB'];
+
+export function getChatColor() {
+  try {
+    return localStorage.getItem('tojey-chat-color') || '#6C3CE9';
+  } catch (e) {
+    return '#6C3CE9';
+  }
+}
+
+export function setChatColor(c) {
+  try { localStorage.setItem('tojey-chat-color', c); } catch (e) {}
+}
+
+export function hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '');
+  if (!m) return { r: 108, g: 60, b: 233 };
+  return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+}
+
+export function shadeColor(hex, amt) {
+  const { r, g, b } = hexToRgb(hex);
+  const nr = Math.max(0, Math.min(255, r + amt));
+  const ng = Math.max(0, Math.min(255, g + amt));
+  const nb = Math.max(0, Math.min(255, b + amt));
+  return `#${[nr, ng, nb].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+}

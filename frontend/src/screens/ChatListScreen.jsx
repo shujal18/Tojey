@@ -32,6 +32,7 @@ export default function ChatListScreen({ onOpenChat }) {
         lastMessage: conv?.lastMessage || null,
         isOnline: pres.isOnline,
         lastSeen: pres.lastSeen,
+        isOnCall: !!pres.onCall,
       };
     });
     list.sort((a, b) => {
@@ -171,16 +172,21 @@ export default function ChatListScreen({ onOpenChat }) {
 
 function ConversationRow({ item, onPress, onClear }) {
   const { theme } = useTheme();
-  const { contact, lastMessage, isOnline, lastSeen } = item;
+  const { contact, lastMessage, isOnline, lastSeen, isOnCall } = item;
   const [avatarColor] = useState(() => {
     const colors = ['#6C3CE9', '#4E22B8', '#7C4DFF', '#9C6BFF', '#B39DDB'];
     return colors[Math.floor(Math.random() * colors.length)];
   });
 
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
-  const preview = lastMessage
-    ? (lastMessage.content ? lastMessage.content : (lastMessage.type === 'VOICE' ? '🎤 Voice message' : '📎 Media'))
-    : (isOnline ? 'Online' : statusText(lastSeen));
+  let preview = '';
+  if (lastMessage) {
+    if (lastMessage.content) preview = lastMessage.content;
+    else if (lastMessage.type === 'VOICE') preview = '🎤 Voice message';
+    else if (lastMessage.type === 'IMAGE') preview = '📷 Photo';
+    else if (lastMessage.type === 'VIDEO') preview = '🎬 Video';
+    else preview = '📎 Attachment';
+  }
   const time = lastMessage ? fmtTime(new Date(lastMessage.created_at)) : '';
 
   return (
@@ -235,15 +241,15 @@ function ConversationRow({ item, onPress, onClear }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 3 }}>
           <span style={{
-            color: theme.textSecondary,
+            color: isOnCall ? theme.danger : theme.textSecondary,
             fontSize: 13,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             maxWidth: '70%',
-            fontWeight: 400,
+            fontWeight: isOnCall ? 600 : 400,
           }}>
-            {preview}
+            {isOnCall ? 'In a call…' : (preview || (isOnline ? 'Online' : statusText(lastSeen)))}
           </span>
           <button onClick={onClear} title="Clear chat" style={{
             color: theme.textSecondary,

@@ -15,6 +15,35 @@ export function ChatProvider({ socket, currentUser, children }) {
   const socketRef = useRef(socket);
   socketRef.current = socket;
   const toastTimer = useRef(null);
+  const offlineQueueRef = useRef([]);
+  const OFFLINE_KEY = 'tojey_offline_queue';
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(OFFLINE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) offlineQueueRef.current = parsed;
+      }
+    } catch (e) {}
+  }, []);
+
+  const persistQueue = () => {
+    try {
+      localStorage.setItem(OFFLINE_KEY, JSON.stringify(offlineQueueRef.current));
+    } catch (e) {}
+  };
+
+  const acceptAck = (tempId, message) => {
+    const m = { ...message, _local: true };
+    setConversation(prev => ({
+      ...prev,
+      messages: prev.messages.some(x => x._tempId === tempId)
+        ? prev.messages.map(x => (x._tempId === tempId ? { ...m, _tempId: undefined } : x))
+        : (prev.messages.some(x => x.id === message.id) ? prev : [...prev.messages, m]),
+    }));
+    socketRef.current?.emit('conversation:list');
+  };
 
   function showToast(msg) {
     setToast(msg);
@@ -26,6 +55,25 @@ export function ChatProvider({ socket, currentUser, children }) {
     if (!socket) return;
     fetchUsers();
     socket.emit('conversation:list');
+
+    socket.on('connect', () => {
+      const q = offlineQueueRef.current;
+      if (q.length) {
+        q.forEach(p => {
+          socket.emit('message:send', p, (ack) => {
+            if (ack && ack.ok) acceptAck(p._tempId, ack.message);
+          });
+        });
+        offlineQueueRef.current = [];
+        persistQueue();
+        showToast(`Sent ${q.length} queued message${q.length > 1 ? 's' : ''}`);
+      }
+      socket.emit('conversation:list');
+    });
+
+    return () => {
+      socket.off('connect');
+    };
   }, [socket]);
 
   useEffect(() => {
@@ -45,8 +93,12 @@ export function ChatProvider({ socket, currentUser, children }) {
     if (!socket) return;
 
     socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
-      setPresence(prev => ({ ...prev, [userId]: { isOnline, lastSeen: lastSeen || Date.now() } }));
+      setPresence(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), isOnline, lastSeen: lastSeen || Date.now() } }));
       socket.emit('conversation:list');
+    });
+
+    socket.on('video-call:presence', ({ targetUserId, onCall }) => {
+      setPresence(prev => ({ ...prev, [targetUserId]: { ...(prev[targetUserId] || {}), onCall: !!onCall } }));
     });
 
     socket.on('conversation:list', (list) => {
@@ -138,6 +190,7 @@ export function ChatProvider({ socket, currentUser, children }) {
 
     return () => {
       socket.off('presence:update');
+      socket.off('video-call:presence');
       socket.off('conversation:list');
       socket.off('conversation:cleared');
       socket.off('typing:start');
@@ -161,18 +214,48 @@ export function ChatProvider({ socket, currentUser, children }) {
 
   function sendMessage(payload) {
     if (!socket) return;
-    socket.emit('message:send', payload, (ack) => {
-      if (ack && ack.ok && ack.message) {
-        const m = { ...ack.message, _local: true };
-        setConversation(prev => ({
-          ...prev,
-          messages: prev.messages.some(x => x._tempId === payload._tempId)
-            ? prev.messages.map(x => (x._tempId === payload._tempId ? { ...m, _tempId: undefined } : x))
-            : [...prev.messages, m],
-        }));
-        socket.emit('conversation:list');
-      }
-    });
+
+    const doSend = (p) => {
+      socket.emit('message:send', p, (ack) => {
+        if (ack && ack.ok && ack.message) {
+          acceptAck(p._tempId, ack.message);
+        }
+        if (ack && ack.error && !p._fromQueue) {
+          showToast(ack.error === 'otherUserId required' ? 'Could not send message' : ack.error);
+          setConversation(prev => ({ ...prev, messages: prev.messages.filter(x => x._tempId !== p._tempId) }));
+        }
+      });
+    };
+
+    if (!socket.connected) {
+      offlineQueueRef.current.push({ ...payload, _queued: true });
+      persistQueue();
+      showToast('Offline — message queued');
+      setConversation(prev =>
+        prev.other && prev.other.id === payload.otherUserId
+          ? {
+              ...prev,
+              messages: [...prev.messages, {
+                _tempId: payload._tempId,
+                _queued: true,
+                sender_id: currentUser?.id,
+                type: payload.type || 'TEXT',
+                content: payload.content || '',
+                media_url: payload.mediaUrl || null,
+                file_name: payload.fileName || '',
+                media_size: payload.fileSize || 0,
+                duration: payload.duration || 0,
+                status: 'SENT',
+                created_at: new Date().toISOString(),
+                reactions: [],
+              }],
+            }
+          : prev
+      );
+      return;
+    }
+
+    doSend(payload);
   }
 
   function sendNudge(otherUserId, otherName) {

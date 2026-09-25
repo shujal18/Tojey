@@ -1,14 +1,24 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChat } from '../services/ChatContext';
+import { useCall } from '../services/CallContext';
 import { useTheme } from '../theme/ThemeContext';
-import { ArrowLeft, Search, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon, Copy, Pencil, Trash, Check, CheckCheck, Lock } from 'lucide-react';
+import {
+  ArrowLeft, Search, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
+  Copy, Pencil, Trash, Check, CheckCheck, Lock, Image as ImageIcon, Video, FileText,
+  MoreVertical, ChevronRight,
+} from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
-import { quickReactions, wallpapers } from '../theme';
+import MediaViewer from '../components/MediaViewer';
+import DrawingCanvas from '../components/DrawingCanvas';
+import MediaPreview from '../components/MediaPreview';
+import { quickReactions, wallpapers, getChatColor, shadeColor } from '../theme';
+import { uploadFile, makeThumbnail, resolveUrl, formatBytes, isVideoMime, isImageMime } from '../services/upload';
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
-  const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation } = useChat();
+  const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation, showToast, clearConversation } = useChat();
+  const { startCall } = useCall();
   const { messages, typing, wallpaper } = conversation;
 
   useEffect(() => {
@@ -22,22 +32,39 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const [text, setText] = useState('');
   const [editing, setEditing] = useState(null);
   const [showEmoji, setShowEmoji] = useState(false);
+  const [showAttach, setShowAttach] = useState(false);
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   const [reactionBar, setReactionBar] = useState(null);
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [lockedRecord, setLockedRecord] = useState(false);
+  const [pendingMedia, setPendingMedia] = useState([]);
+  const [caption, setCaption] = useState('');
+  const [isSendingMedia, setIsSendingMedia] = useState(false);
+  const [drawingItem, setDrawingItem] = useState(null);
+  const [viewing, setViewing] = useState(null);
+
   const listRef = useRef(null);
   const recTimer = useRef(null);
   const holdTimer = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const analyserRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const waveSamplesRef = useRef([]);
+  const waveRAFRef = useRef(null);
+  const streamRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const typingStopTimerRef = useRef(null);
 
-  const myMessages = useMemo(() => messages.filter(m => m.sender_id === currentUser.id), [messages, currentUser.id]);
-  void myMessages;
+  const [waveBars, setWaveBars] = useState([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
 
   useEffect(() => {
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
-  }, [messages.length]);
+  }, [messages.length, viewing]);
 
   useEffect(() => {
     if (recording) {
@@ -48,8 +75,25 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     return () => clearInterval(recTimer.current);
   }, [recording]);
 
+  const emitTyping = () => {
+    const s = window.__socket;
+    if (!s) return;
+    s.emit('typing:start', { otherUserId: otherUser.id });
+    if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = setTimeout(() => {
+      s.emit('typing:stop', { otherUserId: otherUser.id });
+    }, 2500);
+  };
+
+  const stopTypingNow = () => {
+    const s = window.__socket;
+    if (s) s.emit('typing:stop', { otherUserId: otherUser.id });
+    if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+  };
+
   const sendText = () => {
     if (!text.trim()) return;
+    stopTypingNow();
     if (editing) {
       window.__socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
       setEditing(null);
@@ -69,45 +113,198 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setShowEmoji(false);
   };
 
-  const sendVoice = () => {
-    sendMessage({
-      otherUserId: otherUser.id,
-      type: 'VOICE',
-      duration: recordTime || 8,
-      waveform: 'waveform-data',
-      content: 'Voice message',
-    });
-    setRecording(false);
-    setLockedRecord(false);
-    setRecordTime(0);
-  };
-
-  const startRecording = () => {
+  // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----
+  const startRecording = async () => {
     setRecording(true);
     setRecordTime(0);
     holdTimer.current = setTimeout(() => setLockedRecord(true), 500);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mr;
+      mr.ondataavailable = (e) => { if (e.data && e.data.size) audioChunksRef.current.push(e.data); };
+      mr.onstop = () => { const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' }); audioChunksRef.current = []; uploadVoice(blob); };
+      mr.start();
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        audioCtxRef.current = ctx;
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+        analyserRef.current = analyser;
+        waveSamplesRef.current = [];
+        const buf = new Uint8Array(analyser.frequencyBinCount);
+        const liveBars = [5, 9, 13, 18, 11, 7, 15, 20, 9, 14];
+        const sample = () => {
+          analyser.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) { const d = (buf[i] - 128) / 128; sum += d * d; }
+          waveSamplesRef.current.push(Math.sqrt(sum / buf.length));
+          const rms = Math.sqrt(sum / buf.length);
+          const newBars = liveBars.map((b, i) => Math.max(4, Math.round(rms * 260 * (0.3 + (i % 3) * 0.3))));
+          setWaveBars(newBars);
+          waveRAFRef.current = requestAnimationFrame(sample);
+        };
+        waveRAFRef.current = requestAnimationFrame(sample);
+      } catch (e) {}
+    } catch (e) {
+      setRecording(false);
+      setLockedRecord(false);
+      setRecordTime(0);
+      showToast('Microphone access denied');
+    }
   };
 
   const stopRecording = (cancel) => {
     clearTimeout(holdTimer.current);
     if (cancel) {
-      setRecording(false);
-      setLockedRecord(false);
-      setRecordTime(0);
+      cancelVoice();
       return;
     }
     if (recordTime < 1) {
-      setRecording(false);
-      setRecordTime(0);
+      cancelVoice();
       return;
     }
-    setRecording(false);
-    setLockedRecord(false);
-    sendVoice();
+    finalizeVoice(true);
   };
 
   const handleHoldEnd = () => {
     if (!lockedRecord) stopRecording(false);
+  };
+
+  const cancelVoice = () => {
+    setRecording(false);
+    setLockedRecord(false);
+    setRecordTime(0);
+    setWaveBars([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
+    stopVoiceTracks();
+  };
+
+  const finalizeVoice = (send) => {
+    if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
+    const mr = mediaRecorderRef.current;
+    setRecording(false);
+    setLockedRecord(false);
+    const barsSnapshot = waveBars;
+    setWaveBars([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
+    if (mr) {
+      mr.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        audioChunksRef.current = [];
+        if (send) {
+          uploadVoice(blob, recordTime, barsSnapshot);
+        }
+      };
+      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+    }
+    setRecordTime(0);
+    stopVoiceTracks();
+  };
+
+  const stopVoiceTracks = () => {
+    if (streamRef.current) {
+      try { streamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+      streamRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch (e) {}
+      audioCtxRef.current = null;
+    }
+    analyserRef.current = null;
+  };
+
+  const uploadVoice = async (blob, duration, bars) => {
+    try {
+      const wave = buildWaveform(waveSamplesRef.current, bars);
+      const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
+      const up = await uploadFile(file);
+      const dur = duration || Math.max(1, Math.round(blob.size / 16000));
+      sendMessage({
+        otherUserId: otherUser.id,
+        type: 'VOICE',
+        content: 'Voice message',
+        mediaUrl: up.url,
+        duration: dur,
+        waveform: JSON.stringify(wave),
+        fileName: up.filename,
+        fileSize: up.size,
+        mimeType: up.mimetype,
+        replyTo: replyingTo?.id || null,
+        _tempId: Date.now() + Math.random(),
+      });
+    } catch (e) {
+      showToast('Voice upload failed');
+    }
+  };
+
+  // ---- Media attachments ----
+  const handleFiles = (files) => {
+    setShowAttach(false);
+    const fileList = Array.from(files || []);
+    if (!fileList.length) return;
+    const items = fileList.map((file) => {
+      const kind = isImageMime(file.type) ? 'image'
+        : isVideoMime(file.type) ? 'video'
+          : 'file';
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        kind,
+        fileName: file.name || '',
+        size: file.size,
+        preview: kind === 'image' || kind === 'video' ? URL.createObjectURL(file) : '',
+      };
+    });
+    setPendingMedia(prev => [...prev, ...items]);
+  };
+
+  const removePending = (id) => setPendingMedia(prev => prev.filter(i => i.id !== id));
+
+  const sendAttachments = async () => {
+    if (!pendingMedia.length || isSendingMedia) return;
+    setIsSendingMedia(true);
+    stopTypingNow();
+    try {
+      for (const item of pendingMedia) {
+        const up = await uploadFile(item.file);
+        let thumbUrl = '';
+        if (item.kind === 'image') thumbUrl = await makeThumbnail(item.file, 400);
+        const type = item.kind === 'image' ? 'IMAGE' : item.kind === 'video' ? 'VIDEO' : 'FILE';
+        sendMessage({
+          otherUserId: otherUser.id,
+          type,
+          content: caption.trim(),
+          mediaUrl: up.url,
+          thumbUrl,
+          fileName: item.fileName || up.filename,
+          fileSize: item.size || up.size,
+          mimeType: up.mimetype,
+          replyTo: replyingTo?.id || null,
+          _tempId: Date.now() + Math.random(),
+        });
+      }
+      setPendingMedia([]);
+      setCaption('');
+      setReplyingTo(null);
+    } catch (e) {
+      showToast('Upload failed: ' + (e.message || 'try again'));
+    } finally {
+      setIsSendingMedia(false);
+    }
+  };
+
+  const doneDrawing = (file) => {
+    const item = drawingItem;
+    setDrawingItem(null);
+    if (!item) return;
+    setPendingMedia(prev => prev.map(p =>
+      p.id === item.id
+        ? { ...p, file, kind: 'image', preview: URL.createObjectURL(file), fileName: 'drawing.png' }
+        : p
+    ));
   };
 
   const handleLongPress = (e, message) => {
@@ -122,6 +319,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     ? 'typing…'
     : (isOnline ? 'online' : lastSeenText(lastSeen));
 
+  const sentName = (mid) => messages.find(m => m.id === mid);
+
   return (
     <div style={{
       height: '100vh',
@@ -132,6 +331,11 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       background: wallpaper ? parseWallpaper(wallpaper, theme) : theme.background,
       position: 'relative',
     }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5, pointerEvents: 'none' }}>
+        <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />
+        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />
+      </div>
+
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center',
@@ -139,7 +343,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         background: wallpaper ? 'rgba(28,25,34,0.85)' : theme.navBg,
         backdropFilter: 'blur(8px)',
         borderBottom: `1px solid ${theme.border}`,
-        zIndex: 5,
+        zIndex: 6,
       }}>
         <button onClick={onBack} style={{ color: wallpaper ? '#fff' : theme.text, padding: 6, marginRight: 4 }}>
           <ArrowLeft size={22} />
@@ -164,6 +368,13 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         </div>
         <button style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}><Search size={20} /></button>
         <button
+          title="Video call"
+          onClick={() => startCall(otherUser)}
+          style={{ color: '#7C4DFF', padding: 6 }}
+        >
+          <Video size={21} />
+        </button>
+        <button
           title="Nudge"
           onClick={() => sendNudge(otherUser.id, otherUser.display_name)}
           style={{
@@ -176,6 +387,38 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         >
           👋
         </button>
+        <div style={{ position: 'relative' }}>
+          <button onClick={() => setShowHeaderMenu(s => !s)} style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}>
+            <MoreVertical size={20} />
+          </button>
+          {showHeaderMenu && (
+            <div style={{
+              position: 'absolute', right: 0, top: 34, zIndex: 30,
+              background: theme.card, borderRadius: 12, boxShadow: '0 8px 30px rgba(0,0,0,0.22)',
+              padding: 6, minWidth: 180,
+            }}>
+              <button
+                onClick={() => {
+                  clearConversation(otherUser.id);
+                  setShowHeaderMenu(false);
+                }}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 8, color: theme.danger, fontSize: 14 }}
+              >
+                <Trash size={16} /> Clear chat
+              </button>
+              <button
+                onClick={() => {
+                  setShowAttach(false);
+                  setShowEmoji(false);
+                  setShowHeaderMenu(false);
+                }}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 8, color: theme.text, fontSize: 14 }}
+              >
+                Close
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Messages */}
@@ -200,16 +443,20 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
             <MessageRow
               key={m.id || idx}
               message={m}
+              myId={currentUser.id}
               isSent={isSent}
               grouped={grouped}
               theme={theme}
               wallpaper={!!wallpaper}
+              senderName={isSent ? 'You' : otherUser.display_name}
+              repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
               onLongPress={handleLongPress}
               onReply={() => { setReplyingTo(m); setReactionBar(null); }}
               onCopy={() => { if (m.content) navigator.clipboard?.writeText(m.content); setReactionBar(null); }}
               onEdit={() => { setText(m.content || ''); setReactionBar(null); }}
               onDelete={(mode) => { deleteMessage(m.id, mode); setReactionBar(null); }}
               onReact={() => setReactionBar(m)}
+              onOpenMedia={() => setViewing(m)}
             />
           );
         })}
@@ -234,7 +481,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               Replying to {replyingTo.sender_id === currentUser.id ? 'yourself' : otherUser.display_name}
             </div>
             <div style={{ color: theme.textSecondary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {replyingTo.type === 'VOICE' ? '🎤 Voice message' : (replyingTo.content || 'Media message')}
+              {replyPreview(replyingTo)}
             </div>
           </div>
           <button onClick={() => setReplyingTo(null)} style={{ color: theme.textSecondary }}>
@@ -266,6 +513,18 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         </div>
       )}
 
+      {/* Pending media strip */}
+      <MediaPreview
+        items={pendingMedia}
+        isSending={isSendingMedia}
+        onRemove={removePending}
+        onCancel={() => setPendingMedia([])}
+        onDraw={setDrawingItem}
+        onCaption={setCaption}
+        caption={caption}
+        onSend={sendAttachments}
+      />
+
       {/* Recording UI */}
       {recording && (
         <div style={{
@@ -274,9 +533,9 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           borderTop: `1px solid ${theme.border}`,
         }}>
           <button onClick={() => stopRecording(true)} style={{ color: theme.danger, marginRight: 12 }}>
-            <CircleX2Icon size={22} />
+            <X size={22} />
           </button>
-          {[5,9,13,18,11,7,15,20,9,14].map((h,i) => (
+          {waveBars.map((h, i) => (
             <span key={i} className="wave-bar" style={{
               width: 3, height: `${h}px`,
               background: theme.primary, marginRight: 2,
@@ -289,7 +548,30 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         </div>
       )}
 
-      {/* Composer */}
+      {/* Composer + attachment menu */}
+      {showAttach && !recording && (
+        <div style={{
+          display: 'flex', gap: 6,
+          padding: '8px 14px', background: theme.card,
+          borderTop: `1px solid ${theme.border}`,
+        }}>
+          {[
+            { icon: <ImageIcon size={18} />, label: 'Gallery', action: () => fileInputRef.current?.click() },
+            { icon: <Camera size={18} />, label: 'Camera', action: () => cameraInputRef.current?.click() },
+            { icon: <FileText size={18} />, label: 'File', action: () => { const el = fileInputRef.current; if (el) { el.removeAttribute('accept'); el.click(); el.setAttribute('accept', ''); } } },
+          ].map(opt => (
+            <button key={opt.label} onClick={opt.action} style={{
+              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              padding: '10px 0', borderRadius: 12, background: theme.inputBg, color: theme.text,
+              fontSize: 13, fontWeight: 600,
+            }}>
+              <span style={{ color: theme.primary }}>{opt.icon}</span>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div style={{
         background: theme.composerBg,
         borderTop: `1px solid ${theme.border}`,
@@ -304,7 +586,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <IconBtn onClick={() => setShowEmoji(!showEmoji)} icon={<Smile size={22} />} theme={theme} active={showEmoji} />
-          <IconBtn icon={<Paperclip size={20} />} theme={theme} />
+          <IconBtn onClick={() => { setShowAttach(!showAttach); setShowEmoji(false); }} icon={<Paperclip size={20} />} theme={theme} active={showAttach} />
 
           <div style={{
             flex: 1, display: 'flex', alignItems: 'center',
@@ -314,12 +596,13 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendText()}
+              onInput={() => emitTyping()}
               placeholder="Message"
               style={{ flex: 1, background: 'transparent', color: theme.text, fontSize: 14 }}
             />
           </div>
 
-          <IconBtn icon={<Camera size={22} />} theme={theme} />
+          <IconBtn onClick={() => cameraInputRef.current?.click()} icon={<Camera size={22} />} theme={theme} />
 
           {text.trim() ? (
             <button onClick={sendText} style={{
@@ -359,6 +642,22 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           )}
         </div>
       </div>
+
+      {viewing && (
+        <MediaViewer
+          message={viewing}
+          senderName={viewing.sender_id === currentUser.id ? 'You' : otherUser.display_name}
+          onClose={() => setViewing(null)}
+        />
+      )}
+
+      {drawingItem && (
+        <DrawingCanvas
+          imageUrl={drawingItem.preview}
+          onCancel={() => setDrawingItem(null)}
+          onDone={doneDrawing}
+        />
+      )}
     </div>
   );
 
@@ -389,8 +688,30 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   }
 }
 
-function CircleX2Icon({ size }) {
-  return <X size={size} />;
+function buildWaveform(samples, fallbackBars) {
+  const n = 28;
+  const out = [];
+  if (!samples || !samples.length) {
+    if (fallbackBars && fallbackBars.length > 1) return [...fallbackBars];
+    return Array(n).fill(10);
+  }
+  for (let i = 0; i < n; i++) {
+    const start = Math.floor((i * samples.length) / n);
+    const end = Math.floor(((i + 1) * samples.length) / n);
+    let max = 0;
+    for (let j = start; j < end; j++) max = Math.max(max, samples[j] || 0);
+    out.push(Math.round(6 + Math.min(max, 1) * 18));
+  }
+  return out;
+}
+
+function replyPreview(m) {
+  if (!m) return '';
+  if (m.type === 'VOICE') return '🎤 Voice message';
+  if (m.type === 'IMAGE') return '📷 Photo';
+  if (m.type === 'VIDEO') return '🎬 Video';
+  if (m.type === 'FILE') return '📎 File';
+  return m.content || 'Media message';
 }
 
 function parseWallpaper(wp, theme) {
@@ -424,7 +745,7 @@ function TypingDots() {
   );
 }
 
-function MessageRow({ message, isSent, grouped, theme, wallpaper, onLongPress, onReply, onCopy, onEdit, onDelete, onReact }) {
+function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia }) {
   return (
     <div style={{
       display: 'flex',
@@ -442,10 +763,12 @@ function MessageRow({ message, isSent, grouped, theme, wallpaper, onLongPress, o
           onDoubleClick={(e) => onLongPress(e, message)}
           style={{
             background: isSent
-              ? 'linear-gradient(135deg, #6C3CE9 0%, #5A2FD0 100%)'
+              ? `linear-gradient(135deg, ${getChatColor()} 0%, ${shadeColor(getChatColor(), -40)} 100%)`
               : (wallpaper ? 'rgba(255,255,255,0.9)' : theme.receivedBubble),
             color: isSent ? '#fff' : theme.receivedText,
-            padding: '7px 11px',
+            padding: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '7px 11px',
+            paddingLeft: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
+            paddingRight: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
             borderRadius: 14,
             borderBottomRightRadius: isSent ? (grouped ? 6 : 4) : 14,
             borderBottomLeftRadius: isSent ? 14 : (grouped ? 6 : 4),
@@ -453,6 +776,7 @@ function MessageRow({ message, isSent, grouped, theme, wallpaper, onLongPress, o
             animation: 'message-enter 0.25s ease',
             position: 'relative',
             userSelect: 'text',
+            maxWidth: 260,
           }}
         >
           {message.reply_to && (
@@ -460,25 +784,22 @@ function MessageRow({ message, isSent, grouped, theme, wallpaper, onLongPress, o
               marginBottom: 4, padding: '4px 8px',
               background: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight,
               borderRadius: 6, borderLeft: `3px solid ${theme.primary}`,
-              fontSize: 12,
-            }}>
+              fontSize: 12, cursor: 'pointer',
+            }} onClick={(e) => e.stopPropagation()}>
               <div style={{ fontWeight: 600, color: isSent ? '#fff' : theme.primary, fontSize: 11 }}>
-                {isSent ? 'You' : 'Reply'}
+                {repliedMessage ? (repliedMessage.sender_id === myId ? 'You' : senderName) : 'Reply'}
               </div>
-              <div style={{ color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary, fontSize: 11 }}>
-                preview…
+              <div style={{ color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
+                {repliedMessage ? replyPreview(repliedMessage) : '…'}
               </div>
             </div>
           )}
 
-          {renderContent(message, isSent, theme)}
-
-          {message.media_url && message.type !== 'VOICE' && (
-            <img src={message.media_url} alt="" style={{ maxWidth: 220, borderRadius: 8, marginTop: 4, display: 'block' }} />
-          )}
+          {renderContent(message, isSent, theme, onOpenMedia)}
+          {message.media_url && message.type === 'FILE' && <FileCard message={message} isSent={isSent} theme={theme} onOpen={() => window.open(resolveUrl(message.media_url), '_blank')} />}
 
           {!message.is_deleted_for_everyone && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 1, padding: '0 4px 2px' }}>
               {message.is_edited && <span style={{ fontSize: 10, opacity: 0.7, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary }}>edited</span>}
               <span style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.75)' : theme.textSecondary }}>
                 {timeOf(message.created_at)}
@@ -520,18 +841,77 @@ function MessageRow({ message, isSent, grouped, theme, wallpaper, onLongPress, o
     </div>
   );
 
-  function renderContent(m, sent, th) {
+  function renderContent(m, sent, th, openMedia) {
     switch (m.type) {
       case 'VOICE':
-        return <VoiceBubble message={m} isSent={sent} />;
+        return <div style={{ padding: '3px' }}><VoiceBubble message={m} isSent={sent} /></div>;
       case 'IMAGE':
-        return <div><span style={{ opacity: 0.9 }}>📷 Photo</span>{m.content && <div style={{ marginTop: 3 }}>{m.content}</div>}</div>;
+        return (
+          <div>
+            {m.media_url ? (
+              <img
+                src={resolveUrl(m.media_url)}
+                alt=""
+                onClick={(e) => { e.stopPropagation(); openMedia(); }}
+                style={{
+                  display: 'block', maxWidth: 250, maxHeight: 300, borderRadius: 10, cursor: 'zoom-in',
+                  background: '#1C1922',
+                }}
+              />
+            ) : (
+              <div style={{ opacity: 0.9 }}>📷 Photo</div>
+            )}
+            {m.content && <div style={{ padding: '2px 8px 4px', fontSize: 14, marginTop: 2 }}>{m.content}</div>}
+          </div>
+        );
       case 'VIDEO':
-        return <div><span style={{ opacity: 0.9 }}>🎬 Video</span>{m.content && <div style={{ marginTop: 3 }}>{m.content}</div>}</div>;
+        return (
+          <div>
+            {m.media_url ? (
+              <video
+                src={resolveUrl(m.media_url)}
+                controls
+                preload="metadata"
+                onClick={(e) => e.stopPropagation()}
+                style={{ display: 'block', maxWidth: 250, maxHeight: 300, borderRadius: 10, background: '#000' }}
+              />
+            ) : (
+              <div style={{ opacity: 0.9 }}>🎬 Video</div>
+            )}
+            {m.content && <div style={{ padding: '2px 8px 4px', fontSize: 14 }}>{m.content}</div>}
+          </div>
+        );
       default:
         return <span style={{ fontSize: 15 }}>{m.content || ''}</span>;
     }
   }
+}
+
+function FileCard({ message, isSent, theme, onOpen }) {
+  return (
+    <button onClick={(e) => { e.stopPropagation(); onOpen(); }} style={{
+      display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+      background: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight,
+      borderRadius: 10, padding: '8px 10px', margin: 2,
+    }}>
+      <div style={{
+        width: 40, height: 40, borderRadius: 10,
+        background: isSent ? 'rgba(255,255,255,0.2)' : theme.primary,
+        color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <FileText size={18} />
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: isSent ? '#fff' : theme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>
+          {message.file_name || message.content || 'File'}
+        </div>
+        <div style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.75)' : theme.textSecondary }}>
+          {formatBytes(message.file_size || message.media_size)}
+        </div>
+      </div>
+      <ChevronRight size={16} style={{ marginLeft: 4, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }} />
+    </button>
+  );
 }
 
 function timeOf(t) {

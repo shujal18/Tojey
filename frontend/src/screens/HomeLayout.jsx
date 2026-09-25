@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../services/AuthContext';
 import { ChatProvider } from '../services/ChatContext';
+import { CallProvider } from '../services/CallContext';
+import CallScreen from '../components/CallScreen';
 import { createSocket } from '../services/socket';
 import ChatListScreen from './ChatListScreen';
 import ContactsScreen from './ContactsScreen';
 import SettingsScreen from './SettingsScreen';
 import ChatRoomScreen from './ChatRoomScreen';
+import ReelsScreen from './ReelsScreen';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Users, Settings, LogOut } from 'lucide-react';
+import { MessageCircle, Users, Settings, Clapperboard, LogOut } from 'lucide-react';
 
 export default function HomeLayout() {
   const { user, token, logout } = useAuth();
@@ -15,6 +18,16 @@ export default function HomeLayout() {
   const [activeTab, setActiveTab] = useState('chats');
   const [openChat, setOpenChat] = useState(null);
   const [socket, setSocket] = useState(null);
+  const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
+
+  const prevTabRef = React.useRef(activeTab);
+  const handleTabPress = (key) => {
+    if (key === 'reels' && prevTabRef.current === 'reels') {
+      setReelsRefreshTick(t => t + 1);
+    }
+    setActiveTab(key);
+    prevTabRef.current = key;
+  };
 
   useEffect(() => {
     const s = createSocket(token);
@@ -35,6 +48,7 @@ export default function HomeLayout() {
   const tabs = [
     { key: 'chats', label: 'Chats', icon: <MessageCircle size={22} /> },
     { key: 'contacts', label: 'Contacts', icon: <Users size={22} /> },
+    { key: 'reels', label: 'Reels', icon: <Clapperboard size={22} /> },
     { key: 'settings', label: 'Settings', icon: <Settings size={22} /> },
   ];
 
@@ -45,17 +59,21 @@ export default function HomeLayout() {
   if (openChat) {
     return (
       <ChatProvider socket={socket} currentUser={currentUser}>
-        <ChatRoomScreen
-          otherUser={openChat}
-          currentUser={currentUser}
-          onBack={() => { setOpenChat(null); setActiveTab('chats'); }}
-        />
+        <CallProvider socket={socket} currentUser={currentUser}>
+          <ChatRoomScreen
+            otherUser={openChat}
+            currentUser={currentUser}
+            onBack={() => { setOpenChat(null); setActiveTab('chats'); }}
+          />
+          <CallScreen />
+        </CallProvider>
       </ChatProvider>
     );
   }
 
   return (
     <ChatProvider socket={socket} currentUser={currentUser}>
+      <CallProvider socket={socket} currentUser={currentUser}>
       <div style={{
         height: '100vh',
         display: 'flex',
@@ -74,6 +92,7 @@ export default function HomeLayout() {
         }}>
           {activeTab === 'chats' && <ChatListScreen onOpenChat={handleOpenChat} />}
           {activeTab === 'contacts' && <ContactsScreen onOpenChat={handleOpenChat} />}
+          {activeTab === 'reels' && <ReelsScreen token={token} user={currentUser} refreshTick={reelsRefreshTick} />}
           {activeTab === 'settings' && <SettingsScreen onLogout={logout} />}
         </div>
 
@@ -85,7 +104,7 @@ export default function HomeLayout() {
           paddingBottom: '10px',
         }}>
           {tabs.map((t) => (
-            <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+            <button key={t.key} onClick={() => handleTabPress(t.key)} style={{
               flex: 1,
               display: 'flex',
               flexDirection: 'column',
@@ -117,6 +136,8 @@ export default function HomeLayout() {
           <LogOut size={16} />
         </button>
       </div>
+      <CallScreen />
+      </CallProvider>
     </ChatProvider>
   );
 }
