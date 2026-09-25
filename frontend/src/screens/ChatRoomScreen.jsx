@@ -33,6 +33,22 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     return () => setConversation({ id: null, other: null, messages: [], typing: false });
   }, []);
 
+  // Teardown a still-running recording if the chat unmounts mid-recording.
+  useEffect(() => {
+    return () => {
+      const mr = mediaRecorderRef.current;
+      mediaRecorderRef.current = null;
+      if (mr) {
+        mr.onstop = () => {};
+        try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+      }
+      audioChunksRef.current = [];
+      if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
+      stopVoiceTracks();
+      stopTypingNow();
+    };
+  }, []);
+
   const [text, setText] = useState('');
   const [editing, setEditing] = useState(null);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -66,6 +82,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const typingStopTimerRef = useRef(null);
+  const typingActiveRef = useRef(false);
+  const recordGenRef = useRef(0);
 
   const [waveBars, setWaveBars] = useState([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
 
@@ -86,10 +104,16 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const emitTyping = () => {
     const s = window.__socket;
     if (!s) return;
-    s.emit('typing:start', { otherUserId: otherUser.id });
+    // Only send typing:start once per burst (not on every keystroke); the timer
+    // debounces typing:stop so the indicator clears after a pause or on blur/send.
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      s.emit('typing:start', { otherUserId: otherUser.id });
+    }
     if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
     typingStopTimerRef.current = setTimeout(() => {
-      s.emit('typing:stop', { otherUserId: otherUser.id });
+      if (s && s.connected) s.emit('typing:stop', { otherUserId: otherUser.id });
+      typingActiveRef.current = false;
     }, 2500);
   };
 
@@ -97,7 +121,12 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     const s = window.__socket;
     if (s) s.emit('typing:stop', { otherUserId: otherUser.id });
     if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+    typingActiveRef.current = false;
   };
+
+  useEffect(() => {
+    return () => stopTypingNow();
+  }, [otherUser?.id]);
 
   // The explicit "Send Notification" option: pushes a real notification popup to
   // the other user's device (socket when they are online, FCM when closed).
@@ -177,11 +206,18 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----
   const startRecording = async () => {
+    const gen = ++recordGenRef.current;
     setRecording(true);
     setRecordTime(0);
     holdTimer.current = setTimeout(() => setLockedRecord(true), 500);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // The user may have cancelled while the permission prompt was open - bail out
+      // instead of silently re-activating the recorder.
+      if (gen !== recordGenRef.current) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+        return;
+      }
       streamRef.current = stream;
       const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       mediaRecorderRef.current = mr;
@@ -238,16 +274,32 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   };
 
   const cancelVoice = () => {
+    cancelRecordingGen();
     setRecording(false);
     setLockedRecord(false);
     setRecordTime(0);
     setWaveBars([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    if (mr) {
+      // Neutralize the upload handler BEFORE stopping so a cancelled recording
+      // never gets sent.
+      mr.onstop = () => {};
+      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+    }
+    audioChunksRef.current = [];
+    if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
+    waveRAFRef.current = null;
     stopVoiceTracks();
   };
 
+  const cancelRecordingGen = () => { recordGenRef.current += 1; };
+
   const finalizeVoice = (send) => {
+    cancelRecordingGen();
     if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
     const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
     setRecording(false);
     setLockedRecord(false);
     const barsSnapshot = waveBars;
@@ -329,30 +381,42 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     if (!pendingMedia.length || isSendingMedia) return;
     setIsSendingMedia(true);
     stopTypingNow();
+    // Each item is sent independently; successful ones are dropped from the pending
+    // list so a later failure can't cause a retry that re-sends already-sent files.
+    const remaining = [];
+    const sent = [];
     try {
       for (const item of pendingMedia) {
-        const up = await uploadFile(item.file);
-        let thumbUrl = '';
-        if (item.kind === 'image') thumbUrl = await makeThumbnail(item.file, 400);
-        const type = item.kind === 'image' ? 'IMAGE' : item.kind === 'video' ? 'VIDEO' : 'FILE';
-        sendMessage({
-          otherUserId: otherUser.id,
-          type,
-          content: caption.trim(),
-          mediaUrl: up.url,
-          thumbUrl,
-          fileName: item.fileName || up.filename,
-          fileSize: item.size || up.size,
-          mimeType: up.mimetype,
-          replyTo: replyingTo?.id || null,
-          _tempId: Date.now() + Math.random(),
-        });
+        try {
+          const up = await uploadFile(item.file);
+          let thumbUrl = '';
+          if (item.kind === 'image') thumbUrl = await makeThumbnail(item.file, 400);
+          const type = item.kind === 'image' ? 'IMAGE' : item.kind === 'video' ? 'VIDEO' : 'FILE';
+          sendMessage({
+            otherUserId: otherUser.id,
+            type,
+            content: caption.trim(),
+            mediaUrl: up.url,
+            thumbUrl,
+            fileName: item.fileName || up.filename,
+            fileSize: item.size || up.size,
+            mimeType: up.mimetype,
+            replyTo: replyingTo?.id || null,
+            _tempId: Date.now() + Math.random(),
+          });
+          sent.push(item.id);
+        } catch (e) {
+          remaining.push(item);
+        }
       }
-      setPendingMedia([]);
-      setCaption('');
-      setReplyingTo(null);
-    } catch (e) {
-      showToast('Upload failed: ' + (e.message || 'try again'));
+      if (sent.length) {
+        setPendingMedia(prev => prev.filter(i => !sent.includes(i.id)));
+        setCaption('');
+        setReplyingTo(null);
+      }
+      if (remaining.length) {
+        showToast(`${remaining.length} item${remaining.length > 1 ? 's' : ''} failed to upload - retry or remove`);
+      }
     } finally {
       setIsSendingMedia(false);
     }
@@ -375,8 +439,9 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setReactionBar(message);
   };
 
-  const isOnline = presence[otherUser.id] ? presence[otherUser.id].isOnline : !!otherUser.online;
-  const lastSeen = presence[otherUser.id]?.lastSeen || otherUser.last_seen;
+  const pres = presence[otherUser.id];
+  const isOnline = pres ? !!pres.isOnline : !!(otherUser.is_online ?? otherUser.online);
+  const lastSeen = pres?.lastSeen || otherUser.last_seen || otherUser.lastSeen || null;
   const headerText = typing
     ? 'typing…'
     : (isOnline ? 'online' : lastSeenText(lastSeen));
@@ -666,6 +731,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendText()}
               onInput={() => emitTyping()}
+              onBlur={() => stopTypingNow()}
               placeholder="Message"
               style={{ flex: 1, background: 'transparent', color: theme.text, fontSize: 14 }}
             />

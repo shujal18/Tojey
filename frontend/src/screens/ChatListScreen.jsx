@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useChat } from '../services/ChatContext';
 import { useAuth } from '../services/AuthContext';
 import { useTheme } from '../theme/ThemeContext';
@@ -11,6 +11,11 @@ export default function ChatListScreen({ onOpenChat }) {
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [clearTarget, setClearTarget] = useState(null);
+  const searchInputRef = useRef(null);
+
+  const focusSearch = () => {
+    searchInputRef.current?.focus();
+  };
 
   const contacts = useMemo(
     () => users.filter(u => u.id !== user.id),
@@ -76,6 +81,7 @@ export default function ChatListScreen({ onOpenChat }) {
         }}>
           <Search size={18} color={theme.textSecondary} />
           <input
+            ref={searchInputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search conversations..."
@@ -107,7 +113,7 @@ export default function ChatListScreen({ onOpenChat }) {
         )}
       </div>
 
-      <button style={{
+      <button onClick={focusSearch} title="New chat" style={{
         position: 'absolute',
         bottom: 76,
         right: 20,

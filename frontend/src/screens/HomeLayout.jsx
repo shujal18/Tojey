@@ -13,19 +13,22 @@ import { useTheme } from '../theme/ThemeContext';
 import { MessageCircle, Settings, Clapperboard } from 'lucide-react';
 
 // Opens the ?chat=<userId> conversation a web-push notification click requested. Waits
-// for the users list (loaded by ChatProvider) so the full contact object is available.
-function DeepLinkOpener({ targetId, onDone }) {
+// for the users list (loaded by ChatProvider) so the full contact object is available,
+// then both opens the chat AND records it at the layout level so ChatRoomScreen renders.
+function DeepLinkOpener({ targetId, onDone, onOpenChat }) {
   const { users, openConversation } = useChat();
   useEffect(() => {
     if (!targetId || !users.length) return;
     const other = users.find((u) => String(u.id) === String(targetId));
     if (other) {
-      openConversation({ ...other, online: !!other.online, last_seen: other.last_seen });
+      const contact = { ...other, is_online: other.is_online, online: !!other.online, last_seen: other.last_seen };
+      openConversation(contact);
+      if (onOpenChat) onOpenChat(contact);
       onDone();
     } else {
       onDone();
     }
-  }, [targetId, users, openConversation, onDone]);
+  }, [targetId, users, openConversation, onDone, onOpenChat]);
   return null;
 }
 
@@ -114,7 +117,7 @@ export default function HomeLayout() {
             onBack={() => { setOpenChat(null); setActiveTab('chats'); }}
           />
           <CallScreen />
-          <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} />
+          <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
         </CallProvider>
       </ChatProvider>
     );
@@ -173,7 +176,7 @@ export default function HomeLayout() {
         )}
       </div>
       <CallScreen />
-      <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} />
+      <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
       </CallProvider>
     </ChatProvider>
   );

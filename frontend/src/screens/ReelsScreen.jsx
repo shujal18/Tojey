@@ -76,7 +76,7 @@ function ensureYouTubeApi() {
     const s = document.createElement('script');
     s.src = 'https://www.youtube.com/iframe_api';
     s.async = true;
-    s.onerror = () => reject(new Error('Failed to load YouTube player API'));
+    s.onerror = () => { ytApiPromise = null; reject(new Error('Failed to load YouTube player API')); };
     document.head.appendChild(s);
   });
   return ytApiPromise;
@@ -253,6 +253,11 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [category, fetchFeed]);
 
   useEffect(() => {
+    // Switch request generation BEFORE fetching so any in-flight fetch from the
+    // previous category is ignored when it resolves (its requestId is now stale) and
+    // the new category fetch isn't blocked by the old one's inflight guard.
+    requestIdRef.current += 1;
+    inflightRef.current = false;
     seenVideoIdsRef.current.clear();
     nextPageTokenRef.current = null;
     hasMoreRef.current = true;

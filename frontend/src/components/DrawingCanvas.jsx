@@ -15,10 +15,14 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
   const strokesRef = useRef([]);
   const drawingRef = useRef(false);
   const lastPointRef = useRef(null);
+  const baseRef = useRef(null);
+  const sendGenRef = useRef(0);
   const [dim, setDim] = useState({ w: 0, h: 0 });
   const [ready, setReady] = useState(false);
 
-  // Load the image into the canvas and scale it to fit the preview box.
+  // Load the image into the canvas and scale it to fit the preview box. BaseRef holds
+  // ONE immutable snapshot of the original photo (taken once), so undo and clear can
+  // always restore the untouched image regardless of how many strokes were drawn.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -31,6 +35,11 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
       canvas.height = maxH;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, maxW, maxH);
+      const base = document.createElement('canvas');
+      base.width = maxW;
+      base.height = maxH;
+      base.getContext('2d').drawImage(canvas, 0, 0);
+      baseRef.current = base;
       setDim({ w: maxW, h: maxH });
       setReady(true);
     };
@@ -53,12 +62,13 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const strokes = strokesRef.current;
-    // Reset: recreate from a snapshot of the base image.
-    const base = canvas.__base;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Reset from the immutable original-photo snapshot (NOT the last stroke), so
+    // clear() and undo() can remove every stroke drawn so far.
+    const base = baseRef.current;
     ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (base) ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
-    else return;
     ctx.restore();
 
     for (const s of strokes) {
@@ -88,10 +98,6 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (!canvas.__base) canvas.__base = document.createElement('canvas');
-    if (!canvas.__base.width) { canvas.__base.width = canvas.width; canvas.__base.height = canvas.height; }
-    const bctx = canvas.__base.getContext('2d');
-    bctx.drawImage(canvas, 0, 0);
     drawingRef.current = true;
     lastPointRef.current = getPoint(e);
     strokesRef.current.push({ tool, color, size: brushSize, points: [lastPointRef.current] });
@@ -134,12 +140,23 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     setSending(true);
+    const gen = ++sendGenRef.current;
     canvas.toBlob((blob) => {
+      if (gen !== sendGenRef.current) return; // cancelled/unmounted while exporting
       if (!blob) { setSending(false); return; }
       const file = new File([blob], 'drawing.png', { type: 'image/png' });
       onDone(file);
     }, 'image/png');
   };
+
+  const handleCancel = () => {
+    sendGenRef.current += 1;
+    if (onCancel) onCancel();
+  };
+
+  useEffect(() => {
+    return () => { sendGenRef.current += 1; };
+  }, []);
 
   const hScale = dim.w ? Math.min(1, (typeof window !== 'undefined' ? window.innerWidth - 24 : 380) / dim.w) : 1;
   const scaleDisplay = Math.min(hScale, (typeof window !== 'undefined' ? window.innerHeight - 380 : 1) / dim.h);
@@ -153,7 +170,7 @@ export default function DrawingCanvas({ imageUrl, onCancel, onDone }) {
       display: 'flex', flexDirection: 'column',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', color: '#fff' }}>
-        <button onClick={onCancel} style={{ color: '#fff', padding: 6 }}><X size={24} /></button>
+        <button onClick={handleCancel} style={{ color: '#fff', padding: 6 }}><X size={24} /></button>
         <div style={{ flex: 1, textAlign: 'center', fontWeight: 700, fontSize: 16 }}>Draw</div>
         <button onClick={sendDrawing} disabled={!ready || sending} style={{
           color: '#fff', fontSize: 14, fontWeight: 700, padding: '8px 16px',

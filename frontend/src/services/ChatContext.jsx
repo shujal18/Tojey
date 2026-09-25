@@ -99,6 +99,20 @@ export function ChatProvider({ socket, currentUser, children }) {
       const res = await fetch(`${API}/api/users`);
       const data = await res.json();
       setUsers(data);
+      // Seed the presence map with the server's persisted online/last_seen snapshot so the
+      // online/offline indicator is correct from the very first render (before the first
+      // live presence:update arrives). Live updates always override this snapshot.
+      setPresence(prev => {
+        const next = { ...prev };
+        data.forEach(u => {
+          next[u.id] = {
+            ...(next[u.id] || {}),
+            isOnline: !!u.is_online,
+            lastSeen: u.is_online ? Date.now() : (u.last_seen || next[u.id]?.lastSeen || null),
+          };
+        });
+        return next;
+      });
     } catch (e) {}
   }, []);
 
@@ -116,6 +130,20 @@ export function ChatProvider({ socket, currentUser, children }) {
 
     socket.on('conversation:list', (list) => {
       setConversations(list);
+      // Merge each conversation's "other" online/last_seen into the presence map (covers
+      // contacts that never fired a live presence event).
+      setPresence(prev => {
+        const next = { ...prev };
+        (list || []).forEach(c => {
+          if (!c || !c.other || !c.other.id) return;
+          next[c.other.id] = {
+            ...(next[c.other.id] || {}),
+            isOnline: next[c.other.id]?.isOnline ?? !!c.other.isOnline,
+            lastSeen: next[c.other.id]?.lastSeen || c.other.last_seen || null,
+          };
+        });
+        return next;
+      });
     });
 
     socket.on('conversation:cleared', ({ conversationId }) => {
@@ -246,6 +274,16 @@ export function ChatProvider({ socket, currentUser, children }) {
 
   function openConversation(otherUser) {
     setConversation({ id: null, other: otherUser, messages: [], typing: false });
+    if (otherUser && otherUser.id != null) {
+      setPresence(prev => ({
+        ...prev,
+        [otherUser.id]: {
+          ...(prev[otherUser.id] || {}),
+          isOnline: prev[otherUser.id]?.isOnline ?? !!(otherUser.is_online ?? otherUser.online),
+          lastSeen: prev[otherUser.id]?.lastSeen || otherUser.last_seen || otherUser.lastSeen || null,
+        },
+      }));
+    }
     if (socket) socket.emit('conversation:open', { otherUserId: otherUser.id });
   }
 
