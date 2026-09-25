@@ -54,6 +54,26 @@ const io = new Server(server, {
 
 app.get('/', (req, res) => res.json({ app: 'Tojey', status: 'running' }));
 
+// Public, harmless config the clients need at runtime. Only the Web Push PUBLIC key
+// (VAPID) is exposed - it is designed to be shared; the private half never leaves the
+// Firebase project / env vars.
+app.get('/api/config', (req, res) => {
+  // Everything here is browser-safe (public credentials designed to ship to clients).
+  // The web app needs these to subscribe via the Firebase JS SDK and to register FCM
+  // web tokens that firebase-admin can later push to.
+  const config = {};
+  for (const [key, envName] of [
+    ['vapidPublicKey', 'FIREBASE_PUBLIC_VAPID_KEY'],
+    ['firebaseApiKey', 'FIREBASE_API_KEY'],
+    ['firebaseProjectId', 'FIREBASE_PROJECT_ID'],
+    ['firebaseMessagingSenderId', 'FIREBASE_MESSAGING_SENDER_ID'],
+    ['firebaseAppId', 'FIREBASE_APP_ID'],
+  ]) {
+    if (process.env[envName]) config[key] = process.env[envName];
+  }
+  res.json(config);
+});
+
 // Startup FCM diagnostics - runs after initDB() so we can see config state
 function logFcmStartupStatus() {
   const hasB64 = !!process.env.FIREBASE_SERVICE_ACCOUNT_B64;
@@ -342,15 +362,63 @@ app.post('/api/notifications/send', authMiddleware, async (req, res) => {
       });
     }
 
-    // Push popups are intentionally removed: no FCM is sent. If the receiver is not
-    // online right now, the notification stays in the DB (status 'sent') and is seen
-    // the next time they open Tojey.
+    // Push delivery (data-only) to every device of the receiver that is NOT currently
+    // foreground-with-socket, so a backgrounded second device still gets its popup.
+    const tokensRes = await pool.query(
+      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      [receiver.id]
+    );
+    const { tokens } = tokensNeedingFcm(tokensRes.rows, receiver.id, online);
+
+    if (!tokens.length) {
+      if (online) {
+        return res.json({ ok: true, notification: notif, deliveryMethod: 'socket', status: notif.status });
+      }
+      const updated = (await pool.query(
+        `UPDATE notifications SET status = 'failed', delivered_at = NULL WHERE id = $1 RETURNING *`,
+        [notif.id]
+      )).rows[0];
+      return res.json({ ok: true, notification: updated, deliveryMethod: 'fcm', status: 'failed', note: 'receiver has no registered device token', fcmNote: 'no-token' });
+    }
+
+    const push = await sendPush({
+      tokens,
+      // Data-only: the client renders the popup itself (Android Kotlin MessagingService
+      // / web service worker), so every device gets a controllable heads-up regardless
+      // of OEM quirks (OPPO/ColorOS suppress system-rendered FCM banners).
+      data: {
+        type: 'tojey_notification',
+        notificationId: String(notif.id),
+        id: String(notif.id),
+        senderId: String(sender.id),
+        senderUsername: sender.username,
+        senderName: sender.display_name || sender.username,
+        senderPic: sender.profile_pic_url || '',
+        receiverId: String(receiver.id),
+        conversationId: String(convo.id),
+        title: sender.display_name || sender.username,
+        body,
+      },
+    });
+    console.log(`[FCM] notification push to user ${receiver.id}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+
+    if (push.invalidTokens.length) {
+      await deactivateTokens(push.invalidTokens);
+    }
+
+    const status = push.success ? 'sent' : 'failed';
+    const updated = (await pool.query(
+      `UPDATE notifications SET status = $1, delivered_at = $2, fcm_message_id = $3 WHERE id = $4 RETURNING *`,
+      [status, push.success ? new Date() : null, push.messageId || null, notif.id]
+    )).rows[0];
+
     return res.json({
       ok: true,
-      notification: notif,
-      deliveryMethod: online ? 'socket' : 'none',
-      status: notif.status,
-      note: online ? undefined : 'receiver offline - stored for later viewing',
+      notification: updated,
+      deliveryMethod: online ? 'socket' : 'fcm',
+      status: updated.status,
+      note: push.success ? (push.invalidTokens.length ? `deactivated ${push.invalidTokens.length} invalid token(s)` : undefined) : (push.note || 'delivery failed'),
+      fcmNote: push.note,
     });
   } catch (e) {
     console.error('notifications:send error', e.message);
@@ -897,10 +965,50 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Push popups are intentionally removed. The message is delivered over the
-        // socket only; when the receiver is offline it stays in the DB and shows up
-        // the next time they open a conversation (the client reconciles by id).
+        // Push popups (data-only): every device of the receiver that is NOT currently
+        // foreground-with-socket gets a real FCM push - foreground devices already got
+        // the socket message above (deduped by id), backgrounded/offline devices wake
+        // the native MessagingService / web push to render the tray notification.
         const receiverHasSocket = userSockets(otherUserId).size > 0;
+        try {
+          const tokensRes = await pool.query(
+            `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+            [otherUserId]
+          );
+          const { tokens, phoneForeground, legacySkip } = tokensNeedingFcm(tokensRes.rows, otherUserId, receiverHasSocket);
+          if (tokens.length) {
+            const msgPreview = String(content || '')
+              || (type === 'VOICE' ? 'Voice message'
+                : type === 'IMAGE' ? 'Photo'
+                : type === 'VIDEO' ? 'Video'
+                : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
+                : '');
+            const push = await sendPush({
+              tokens,
+              // Data-only so the client renders the popup itself (consistent heads-up on
+              // every device, incl. OPPO where system-rendered banners are suppressed).
+              data: {
+                type: 'tojey_chat',
+                conversationId: String(convo.id),
+                messageId: String(message.id),
+                senderId: String(dbUser.userId),
+                senderUsername: dbUser.username,
+                senderName: dbUser.displayName || dbUser.username,
+                senderPic: dbProfilePic || '',
+                receiverId: String(otherUserId),
+                msgType: String(type),
+                msgPreview,
+                body: String(content || ''),
+              },
+            });
+            console.log(`[FCM] chat push to user ${otherUserId}: devices=${tokens.length} fg-skipped=${phoneForeground} legacy-skipped=${legacySkip} invalid=${push.invalidTokens.length} success=${push.success}`);
+            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+          } else {
+            console.log(`[DELIVERY] chat to user ${otherUserId}: no FCM needed (fg-phones=${phoneForeground} legacy-skipped=${legacySkip}) socketOnly=${receiverHasSocket}`);
+          }
+        } catch (pushErr) {
+          console.error('[FCM] chat push failed:', pushErr.message);
+        }
 
         if (receiverHasSocket) {
           setTimeout(() => {
@@ -961,9 +1069,46 @@ io.on('connection', async (socket) => {
         displayName: dbUser.displayName,
         profilePic: dbUser.profile_pic_url || '',
       };
-      // Push popups are intentionally removed: nudges deliver over the socket only
-      // (online/live). Offline recipients see it next time they open Tojey.
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
+
+      // Backgrounded/offline devices get a real FCM push (data-only) so the nudge
+      // vibrates in the tray even when the app is closed.
+      const hasSocket = userSockets(otherUserId).size > 0;
+      if (hasSocket && isUserForeground(otherUserId)) return;
+      try {
+        const tokensRes = await pool.query(
+          `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+          [otherUserId]
+        );
+        const { tokens } = tokensNeedingFcm(tokensRes.rows, otherUserId, hasSocket);
+        if (!tokens.length) return;
+        const convo = (await pool.query(
+          `SELECT id FROM conversations
+           WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
+          [dbUser.userId, otherUserId]
+        )).rows[0];
+        const push = await sendPush({
+          tokens,
+          // Data-only: the client applies the strong nudge vibration + renders the
+          // tray entry itself (never the generic system-rendered one).
+          data: {
+            type: 'tojey_nudge',
+            id: `nudge-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+            senderId: String(dbUser.userId),
+            senderUsername: dbUser.username,
+            senderName: dbUser.displayName || dbUser.username,
+            senderPic: dbUser.profile_pic_url || '',
+            receiverId: String(otherUserId),
+            conversationId: convo ? String(convo.id) : '',
+            title: dbUser.displayName || dbUser.username,
+            body: '👋 nudged you!',
+          },
+        });
+        console.log(`[FCM] nudge push to user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
+        if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
+      } catch (e) {
+        console.error('[FCM] nudge push failed:', e.message);
+      }
     });
 
     socket.on('message:edit', async ({ messageId, content }) => {

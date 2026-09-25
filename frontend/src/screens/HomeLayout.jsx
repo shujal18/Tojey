@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../services/AuthContext';
-import { ChatProvider } from '../services/ChatContext';
+import { ChatProvider, useChat } from '../services/ChatContext';
 import { CallProvider } from '../services/CallContext';
 import CallScreen from '../components/CallScreen';
-import { createSocket } from '../services/socket';
+import { createSocket, emitAppVisibility } from '../services/socket';
+import { subscribeWebPush, stopWebPush } from '../services/webPush';
 import ChatListScreen from './ChatListScreen';
 import ContactsScreen from './ContactsScreen';
 import SettingsScreen from './SettingsScreen';
@@ -12,6 +13,23 @@ import ReelsScreen from './ReelsScreen';
 import { useTheme } from '../theme/ThemeContext';
 import { MessageCircle, Users, Settings, Clapperboard, LogOut } from 'lucide-react';
 
+// Opens the ?chat=<userId> conversation a web-push notification click requested. Waits
+// for the users list (loaded by ChatProvider) so the full contact object is available.
+function DeepLinkOpener({ targetId, onDone }) {
+  const { users, openConversation } = useChat();
+  useEffect(() => {
+    if (!targetId || !users.length) return;
+    const other = users.find((u) => String(u.id) === String(targetId));
+    if (other) {
+      openConversation({ ...other, online: !!other.online, last_seen: other.last_seen });
+      onDone();
+    } else {
+      onDone();
+    }
+  }, [targetId, users, openConversation, onDone]);
+  return null;
+}
+
 export default function HomeLayout() {
   const { user, token, logout } = useAuth();
   const { theme } = useTheme();
@@ -19,6 +37,7 @@ export default function HomeLayout() {
   const [openChat, setOpenChat] = useState(null);
   const [socket, setSocket] = useState(null);
   const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
+  const [pendingChatId, setPendingChatId] = useState(null);
 
   const prevTabRef = React.useRef(activeTab);
   const handleTabPress = (key) => {
@@ -33,11 +52,42 @@ export default function HomeLayout() {
     const s = createSocket(token);
     setSocket(s);
     window.__socket = s;
+    // New tab / reconnect: tell the backend this browser is foreground so messages come
+    // over sockets (no duplicate web push for this device).
+    s.on('connect', () => emitAppVisibility(s, document.visibilityState === 'visible'));
+    // Best-effort web-push subscription (only proceeds if permission was already granted).
+    subscribeWebPush(token);
     return () => {
+      s.off('connect');
       s.disconnect();
       window.__socket = null;
+      stopWebPush(token);
     };
   }, [token]);
+
+  // Foreground/background reporting drives FCM-vs-Socket.IO routing for this browser.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onVis = () => emitAppVisibility(socket, document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, [socket]);
+
+  // Deep link from a web-push click: /?chat=<userId>
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const chat = params.get('chat');
+    if (chat) {
+      setPendingChatId(chat);
+      try { window.history.replaceState({}, '', window.location.pathname); } catch (e) {}
+    }
+  }, []);
+
+  const clearPendingChat = () => setPendingChatId(null);
 
   const currentUser = useMemo(() => ({
     id: user.id,
@@ -66,6 +116,7 @@ export default function HomeLayout() {
             onBack={() => { setOpenChat(null); setActiveTab('chats'); }}
           />
           <CallScreen />
+          <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} />
         </CallProvider>
       </ChatProvider>
     );
@@ -137,6 +188,7 @@ export default function HomeLayout() {
         </button>
       </div>
       <CallScreen />
+      <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} />
       </CallProvider>
     </ChatProvider>
   );

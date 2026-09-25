@@ -1,9 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useTheme } from '../theme/ThemeContext';
 import { useAuth } from '../services/AuthContext';
 import { useChat } from '../services/ChatContext';
-import { ChevronRight, Moon, Sun, Monitor, Type, Lock, LogOut, Camera, User, IdCard, Image as ImageIcon, Palette } from 'lucide-react';
+import { ChevronRight, Moon, Sun, Monitor, Type, Lock, LogOut, Camera, User, IdCard, Image as ImageIcon, Palette, Bell, RefreshCw } from 'lucide-react';
 import { wallpapers, chatColors, getChatColor, setChatColor, shadeColor, quickReactions } from '../theme';
+import { subscribeWebPush, getFirebaseWebConfig, isWebPushConfigured, getWebDeviceId } from '../services/webPush';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -14,7 +15,41 @@ export default function SettingsScreen({ onLogout }) {
   const [fontSize, setFontSize] = useState(() => parseInt(localStorage.getItem('tojey-font') || '16'));
   const [showWallpapers, setShowWallpapers] = useState(false);
   const [chatColor, setChatColorState] = useState(getChatColor());
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushStatus, setPushStatus] = useState(null);
   const fileRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      const cfg = await getFirebaseWebConfig();
+      if (!isWebPushConfigured(cfg)) { setPushStatus({ status: 'unconfigured', deviceId: getWebDeviceId() }); return; }
+      if (!('Notification' in window)) { setPushStatus({ status: 'unsupported' }); return; }
+      setPushStatus({ status: Notification.permission, deviceId: getWebDeviceId() });
+    })();
+  }, []);
+
+  const enablePush = async () => {
+    setPushBusy(true);
+    try {
+      if (Notification.permission !== 'granted') {
+        const p = await Notification.requestPermission();
+        if (p !== 'granted') {
+          setPushStatus({ status: Notification.permission });
+          return;
+        }
+      }
+      const res = await subscribeWebPush(token);
+      if (res.ok) {
+        setPushStatus({ status: 'granted', deviceId: getWebDeviceId(), ok: true });
+      } else {
+        setPushStatus({ status: 'granted', deviceId: getWebDeviceId(), ok: false, note: res.note });
+      }
+    } catch (e) {
+      setPushStatus({ status: 'error', note: e.message });
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   const setFont = (v) => {
     setFontSize(v);
@@ -176,6 +211,44 @@ export default function SettingsScreen({ onLogout }) {
             ))}
           </div>
         </div>
+      </Section>
+
+      <Section title="Push Notifications (Web)">
+        <div style={{ padding: '14px 16px', borderBottom: `1px solid ${theme.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Bell size={18} color={theme.primary} />
+            <span style={{ color: theme.text, fontSize: 14, fontWeight: 600 }}>Web push</span>
+            <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color:
+              pushStatus?.status === 'granted' && pushStatus?.ok !== false ? theme.online
+              : pushStatus?.status === 'denied' || pushStatus?.status === 'unconfigured' ? theme.danger
+              : theme.textSecondary }}>
+              {!pushStatus ? 'Checking…'
+                : pushStatus.status === 'unconfigured' ? 'Server not configured'
+                : pushStatus.status === 'unsupported' ? 'Not supported'
+                : pushStatus.status === 'denied' ? 'Blocked'
+                : pushStatus.status === 'granted' && pushStatus?.ok !== false ? 'Enabled'
+                : pushStatus.status === 'granted' ? 'Not registered'
+                : 'Tap below to enable'}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: theme.textSecondary, marginTop: 8, lineHeight: 1.5 }}>
+            {pushStatus?.status === 'unconfigured' ? (
+              <>Push is disabled on the server. Add <b>FIREBASE_PUBLIC_VAPID_KEY</b>, <b>FIREBASE_MESSAGING_SENDER_ID</b>, <b>FIREBASE_API_KEY</b>, <b>FIREBASE_APP_ID</b> and <b>FIREBASE_PROJECT_ID</b> to the Render backend env and redeploy, then enable here.</>
+            ) : pushStatus?.status === 'granted' && pushStatus?.ok === false ? (
+              <>Subscription failed (<b>{pushStatus.note}</b>). Check the server FCM config, then try again.</>
+            ) : (
+              'Chat and nudge pushes are delivered even when this tab (or the whole browser) is closed, using your FCM Subscription on this browser.'
+            )}
+          </div>
+        </div>
+        <button onClick={enablePush} disabled={pushBusy} style={{
+          width: '100%', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10,
+          color: theme.primary, fontSize: 14, fontWeight: 700, background: 'transparent',
+          borderBottom: `1px solid ${theme.border}`, cursor: pushBusy ? 'wait' : 'pointer',
+        }}>
+          <RefreshCw size={18} style={{ animation: pushBusy ? 'spin 1s linear infinite' : 'none' }} />
+          {pushBusy ? 'Working…' : (pushStatus?.status === 'granted' && pushStatus?.ok !== false ? 'Re-register web push' : 'Enable web push')}
+        </button>
       </Section>
 
       <Section title="Privacy">

@@ -130,6 +130,13 @@ async function sendPush({ tokens, notification, data }) {
             }
           : {}),
       },
+      // Web Push: the browser registers a real FCM web token via the Firebase JS SDK
+      // ("@firebase/messaging") in the web app, stored with platform 'web' in
+      // device_tokens. firebase-admin delivers to it through FCM's HTTP v1 API using
+      // the service account, so NO VAPID key is needed here - the public VAPID key is
+      // used only by the browser to subscribe. Do NOT add any custom webpush field
+      // (e.g. vapidKey): this SDK version has no such field and it risks invalidating
+      // the whole multicast payload.
     };
     const result = await messaging.sendEachForMulticast(payload);
 

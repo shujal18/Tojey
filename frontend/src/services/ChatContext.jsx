@@ -1,9 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { vibrateNudge, askNotifyPermission, showSystemNotification } from './nudge';
+import { onWebPushForegroundMessage } from './webPush';
 
 const ChatContext = createContext();
 
 const NUDGE_COLORS = ['#7C4DFF', '#FF5252', '#FFB300', '#00C853', '#40C4FF', '#FF4081'];
+
+function previewFromWeb(data) {
+  const t = data.msgType;
+  const p = data.msgPreview || data.body || '';
+  if (t === 'VOICE') return 'Voice message' + (p ? ': ' + p : '');
+  if (t === 'IMAGE') return 'Photo' + (p ? ': ' + p : '');
+  if (t === 'VIDEO') return 'Video' + (p ? ': ' + p : '');
+  if (t === 'FILE' || t === 'DOCUMENT') return 'File' + (p ? ': ' + p : '');
+  return p || 'New message';
+}
 
 export function ChatProvider({ socket, currentUser, children }) {
   const [users, setUsers] = useState([]);
@@ -14,6 +25,8 @@ export function ChatProvider({ socket, currentUser, children }) {
   const [toast, setToast] = useState(null);
   const socketRef = useRef(socket);
   socketRef.current = socket;
+  const conversationRef = useRef(conversation);
+  conversationRef.current = conversation;
   const toastTimer = useRef(null);
   const offlineQueueRef = useRef([]);
   const OFFLINE_KEY = 'tojey_offline_queue';
@@ -129,10 +142,13 @@ export function ChatProvider({ socket, currentUser, children }) {
         return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
       });
       if (!isMine) {
+        const viewing = conversationRef.current?.other?.id === message.sender_id;
         const sender = users.find(u => u.id === message.sender_id);
         const senderName = sender?.display_name || sender?.username || 'Someone';
         const preview = message.type === 'VOICE' ? '🎤 Voice message' : (message.content || 'Media message');
-        showSystemNotification(senderName, preview);
+        if (!viewing) {
+          showSystemNotification(senderName, preview);
+        }
       }
     });
 
@@ -206,6 +222,33 @@ export function ChatProvider({ socket, currentUser, children }) {
       socket.off('conversation:opened');
     };
   }, [socket, currentUser?.id, users]);
+
+  // Foreground FCM web pushes (data-only). These normally arrive instead of socket
+  // delivery only in edge cases (the backend routes sockets while a device is
+  // foreground, so tojey_chat duplicates are avoided the same way as the Android app).
+  useEffect(() => {
+    let unsub = () => {};
+    let cancelled = false;
+    onWebPushForegroundMessage((data) => {
+      if (cancelled) return;
+      if (!currentUser) return;
+      if (data.type && data.type !== 'tojey_chat' && data.type !== 'tojey_nudge' && data.type !== 'tojey_notification') return;
+      if (data.receiverId && String(data.receiverId) !== String(currentUser.id)) return;
+      if (data.type === 'tojey_chat') {
+        const otherId = Number(data.senderId);
+        if (conversationRef.current?.other?.id === otherId) return;
+      }
+      const title = data.title || data.senderName || 'Tojey';
+      const body = data.type === 'tojey_nudge'
+        ? (data.senderName ? data.senderName + ' nudged you' : 'Someone nudged you')
+        : previewFromWeb(data);
+      showSystemNotification('nudge' in data ? 'Tojey' : title, body);
+    }).then((u) => {
+      if (cancelled && typeof u === 'function') u();
+      else unsub = u || (() => {});
+    });
+    return () => { cancelled = true; if (typeof unsub === 'function') unsub(); };
+  }, [currentUser?.id, currentUser?.username]);
 
   function openConversation(otherUser) {
     setConversation({ id: null, other: otherUser, messages: [], typing: false });

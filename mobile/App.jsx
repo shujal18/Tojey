@@ -7,13 +7,18 @@ import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
 import { Icon } from './src/components/AppIcon';
+import ChatBanner from './src/components/ChatBanner';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
-import { getDeviceId, nextDeviceSeq } from './src/services/notifications';
+import {
+  startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
+  showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification, getNotifPrefs,
+  getDeviceId, nextDeviceSeq,
+} from './src/services/notifications';
 
 const APP_LOCK_KEY = '@tojey_app_lock';
 const APP_LOCK_PIN_KEY = '@tojey_app_lock_pin';
@@ -33,6 +38,10 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
+  const [chatBanner, setChatBanner] = useState(null);
+
+  // Reference kept fresh so notification listeners (registered once) can always navigate.
+  const openFromNotifRef = useRef(null);
 
   // Reference kept fresh so the video-call invite listener can navigate.
   const openConversationWithRef = useRef(null);
@@ -64,6 +73,15 @@ function Shell() {
   }, [session, activeChat]);
   openConversationWithRef.current = openConversationWith;
 
+  const openFromNotif = useCallback(async (nd) => {
+    if (!nd || !nd.senderId) return;
+    const ownId = session && session.user ? session.user.id : null;
+    // Never open a conversation for a different account on this device.
+    if (ownId && nd.receiverId && nd.receiverId !== ownId) return;
+    await openConversationWith(nd.senderId);
+  }, [openConversationWith]);
+  openFromNotifRef.current = openFromNotif;
+
   const handleLockKey = (k) => {
     if (k === '⌫') {
       setLockInput(l => l.slice(0, -1));
@@ -88,11 +106,14 @@ function Shell() {
   const handleLogin = (user, token) => {
     setSession({ user, token });
     setSocket(connect(token));
+    startPush(token).catch(() => {});
   };
 
   const handleLogout = async () => {
     await logout();
     disconnect();
+    stopPush();
+    try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
     setSession(null);
     setSocket(null);
     setActiveChat(null);
@@ -110,6 +131,7 @@ function Shell() {
         setSession(s);
         if (s) {
           setSocket(connect(s.token));
+          startPush(s.token).catch(() => {});
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
@@ -178,6 +200,108 @@ function Shell() {
     socket.on('video-call:invite', onInvite);
     return () => socket.off('video-call:invite', onInvite);
   }, [socket, activeChat]);
+
+  // Manual "Send Notification" pushes (socket delivery when online) -> a real device
+  // system notification. Foreground FCM data pushes (non-chat, e.g. nudges that slip
+  // the race) are also rendered here.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onNotif = (d) => {
+      if (!d || !d.sender) return;
+      const payload = {
+        senderId: d.sender.userId,
+        senderUsername: d.sender.username,
+        senderName: d.sender.displayName,
+        receiverId: session && session.user ? session.user.id : null,
+        conversationId: d.conversationId,
+        message: (d.notification && d.notification.message) || '',
+        title: d.sender.displayName || 'Tojey',
+        notificationId: d.notification && d.notification.id,
+      };
+      showSystemNotification(payload);
+    };
+    socket.on('notification:receive', onNotif);
+    const unsubFg = onForegroundMessage((p) => {
+      if (!session) return;
+      showSystemNotification(p);
+    });
+    return () => {
+      socket.off('notification:receive', onNotif);
+      if (unsubFg) unsubFg();
+    };
+  }, [socket, session]);
+
+  // Foreground chat popups (WhatsApp-style): the server sends socket-only for
+  // foreground devices (no FCM), so THIS is the popup source while the app is open.
+  // A real heads-up notification + an in-app banner appear when a message arrives
+  // but the user is not currently viewing that exact conversation. Background/
+  // terminated delivery is handled by the FCM headless handler instead, so gate on
+  // AppState 'active' to avoid popping a duplicate alongside the headless tray entry.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onChatMessage = ({ message, sender, conversationId }) => {
+      try {
+        if (!message || !sender) return;
+        const ownId = session && session.user ? session.user.id : null;
+        if (ownId != null && sender.userId != null && String(sender.userId) === String(ownId)) return;
+        if (AppState.currentState !== 'active') return;
+        if (activeChat && activeChat.id === sender.userId) return;
+        getNotifPrefs().then((prefs) => {
+          if (prefs.enabled === false) return;
+          let preview = String(message.content || '') || 'Media';
+          if (message.type === 'VOICE') preview = 'Voice message';
+          else if (message.type === 'IMAGE') preview = 'Photo';
+          else if (message.type === 'VIDEO') preview = 'Video';
+          else if (message.type === 'FILE' || message.type === 'DOCUMENT') preview = 'File';
+          const name = sender.displayName || sender.username || 'Tojey';
+          showSystemNotification({
+            type: 'chat',
+            senderId: sender.userId,
+            senderUsername: sender.username || '',
+            senderName: name,
+            conversationId,
+            message: preview,
+            title: name,
+            notificationId: message.id,
+          });
+          // In-app WhatsApp-style banner: rendered by JS, so OEM notification rules
+          // (DND, per-app banner allowance, quiet) can never hide it.
+          setChatBanner({ userId: sender.userId, name, preview, profilePic: sender.profilePic || '' });
+        });
+      } catch (e) {
+        console.warn('foreground chat popup failed:', e.message);
+      }
+    };
+    socket.on('message:receive', onChatMessage);
+    return () => socket.off('message:receive', onChatMessage);
+  }, [socket, session, activeChat]);
+
+  // Taps on the app's own system notifications (notifee) -> open the conversation.
+  useEffect(() => {
+    const unsubPressed = onSystemNotificationPressed((p) => {
+      if (openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    checkInitialSystemNotification().then((p) => {
+      if (p && openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    return () => {
+      if (unsubPressed) unsubPressed();
+    };
+  }, []);
+
+  // Notification taps from FCM: cold start and while running/backgrounded -> open
+  // that conversation.
+  useEffect(() => {
+    const unsubOpened = onNotificationOpened((p) => {
+      if (openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    checkInitialNotification().then((p) => {
+      if (p && openFromNotifRef.current) openFromNotifRef.current(p);
+    });
+    return () => {
+      if (unsubOpened) unsubOpened();
+    };
+  }, []);
 
   // Android hardware back: chat → chats, settings → home, else exit
   useEffect(() => {
@@ -322,7 +446,19 @@ function Shell() {
     );
   }
 
-  return content;
+  return (
+    <View style={{ flex: 1 }}>
+      {content}
+      <ChatBanner
+        banner={chatBanner}
+        onOpen={(b) => {
+          setChatBanner(null);
+          openFromNotifRef.current({ senderId: b.userId });
+        }}
+        onDismiss={() => setChatBanner(null)}
+      />
+    </View>
+  );
 }
 
 export default function App() {

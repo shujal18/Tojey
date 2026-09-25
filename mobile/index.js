@@ -4,6 +4,11 @@
 import { AppRegistry, Alert } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
+import { registerBackgroundHandler } from './src/services/notifications';
+
+// Headless FCM handler: renders tray notifications + nudge vibration + chat head when
+// the app is backgrounded/terminated. MUST be registered before the app component.
+registerBackgroundHandler();
 
 /**
  * Global JS error trap.

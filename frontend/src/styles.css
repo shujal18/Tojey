@@ -76,6 +76,11 @@ input, textarea {
   100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @keyframes nudgeShake {
   0%, 100% { transform: rotate(0); }
   20% { transform: rotate(-18deg); }

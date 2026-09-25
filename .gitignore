@@ -13,3 +13,7 @@ mobile/google-services.json
 
 # Local APK artifacts
 *.apk
+
+# Generated web-push service worker (rebuilt from scripts/firebase-messaging-sw.tpl.js
+# by `npm run prebuild` / `predev`, which inject the FCM web messaging sender id).
+frontend/public/firebase-messaging-sw.js
