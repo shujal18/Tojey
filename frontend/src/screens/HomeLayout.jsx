@@ -6,12 +6,11 @@ import CallScreen from '../components/CallScreen';
 import { createSocket, emitAppVisibility } from '../services/socket';
 import { subscribeWebPush, stopWebPush } from '../services/webPush';
 import ChatListScreen from './ChatListScreen';
-import ContactsScreen from './ContactsScreen';
 import SettingsScreen from './SettingsScreen';
 import ChatRoomScreen from './ChatRoomScreen';
 import ReelsScreen from './ReelsScreen';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Users, Settings, Clapperboard, LogOut } from 'lucide-react';
+import { MessageCircle, Settings, Clapperboard } from 'lucide-react';
 
 // Opens the ?chat=<userId> conversation a web-push notification click requested. Waits
 // for the users list (loaded by ChatProvider) so the full contact object is available.
@@ -97,7 +96,6 @@ export default function HomeLayout() {
 
   const tabs = [
     { key: 'chats', label: 'Chats', icon: <MessageCircle size={22} /> },
-    { key: 'contacts', label: 'Contacts', icon: <Users size={22} /> },
     { key: 'reels', label: 'Reels', icon: <Clapperboard size={22} /> },
     { key: 'settings', label: 'Settings', icon: <Settings size={22} /> },
   ];
@@ -142,7 +140,6 @@ export default function HomeLayout() {
           flexDirection: 'column',
         }}>
           {activeTab === 'chats' && <ChatListScreen onOpenChat={handleOpenChat} />}
-          {activeTab === 'contacts' && <ContactsScreen onOpenChat={handleOpenChat} />}
           {activeTab === 'reels' && <ReelsScreen token={token} user={currentUser} refreshTick={reelsRefreshTick} onBack={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }} />}
           {activeTab === 'settings' && <SettingsScreen onLogout={logout} />}
         </div>
@@ -173,22 +170,6 @@ export default function HomeLayout() {
               </button>
             ))}
           </div>
-        )}
-
-        {activeTab !== 'reels' && (
-          <button onClick={logout} title="Logout" style={{
-            position: 'absolute',
-            top: 12,
-            right: 12,
-            color: theme.textSecondary,
-            padding: 8,
-            background: theme.card,
-            borderRadius: 10,
-            boxShadow: theme.shadow,
-            zIndex: 10,
-          }}>
-            <LogOut size={16} />
-          </button>
         )}
       </div>
       <CallScreen />

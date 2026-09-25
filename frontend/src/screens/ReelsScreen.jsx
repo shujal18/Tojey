@@ -11,12 +11,12 @@ function sanitizeVideoId(videoId) {
   return null;
 }
 
-function thumbnailUrlFor(item) {
+function thumbnailUrlFor(item, quality = 'hqdefault') {
   if (item && typeof item.thumbnailUrl === 'string' && item.thumbnailUrl.trim()) {
     return item.thumbnailUrl.trim();
   }
   const vid = item && sanitizeVideoId(item.videoId);
-  return vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : '';
+  return vid ? `https://i.ytimg.com/vi/${vid}/${quality}.jpg` : '';
 }
 
 function embedUrl(videoId, paused) {
@@ -50,7 +50,39 @@ function isPlayableError(errorCode) {
   return [2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155].includes(code);
 }
 
-export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
+const PLAYER_VARS = {
+  autoplay: 0,
+  controls: 0,
+  disablekb: 1,
+  fs: 0,
+  rel: 0,
+  iv_load_policy: 3,
+  modestbranding: 1,
+  playsinline: 1,
+  mute: 0,
+  enablejsapi: 1,
+};
+
+let ytApiPromise = null;
+function ensureYouTubeApi() {
+  if (typeof window !== 'undefined' && window.YT && window.YT.Player) return Promise.resolve();
+  if (ytApiPromise) return ytApiPromise;
+  ytApiPromise = new Promise((resolve, reject) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (prev) prev();
+      resolve();
+    };
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    s.async = true;
+    s.onerror = () => reject(new Error('Failed to load YouTube player API'));
+    document.head.appendChild(s);
+  });
+  return ytApiPromise;
+}
+
+export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
   const [videos, setVideos] = useState([]);
@@ -61,6 +93,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [paused, setPaused] = useState(false);
   const [viewH, setViewH] = useState(() => (typeof window !== 'undefined' ? window.innerHeight : 600));
   const [loadMoreSpinner, setLoadMoreSpinner] = useState(false);
+  const [apiState, setApiState] = useState('loading');
+  const [activeSlot, setActiveSlot] = useState(0);
 
   const shellRef = useRef(null);
   const toastTimerRef = useRef(null);
@@ -77,11 +111,17 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const hasMoreRef = useRef(true);
   const isMountedRef = useRef(true);
 
+  const playerElsRef = useRef([null, null]);
+  const playersRef = useRef([null, null]);
+  const loadedVideoIdBySlotRef = useRef([null, null]);
+  const activeSlotRef = useRef(0);
+  const playersReadyRef = useRef(false);
+  const playerHandlersRef = useRef({ onStateChange: null, onError: null });
+
   useEffect(() => { videosRef.current = videos; }, [videos]);
 
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
-  // Track the real container height so reels fill the shell exactly.
   useEffect(() => {
     isMountedRef.current = true;
     const el = shellRef.current;
@@ -122,7 +162,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       if (pageToken) queryParts.push(`pageToken=${encodeURIComponent(pageToken)}`);
       const qs = queryParts.join('&');
 
-      // Cached client-side feed for instant first paint (mirrors the app cache).
       if (!append && !pageToken && !refresh) {
         const cacheKey = `tojey_reels_cache_${cat}`;
         try {
@@ -213,7 +252,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     fetchFeed(category, { append: true, pageToken: tokenToUse });
   }, [category, fetchFeed]);
 
-  // Boot feed; refresh when the category chip changes.
   useEffect(() => {
     seenVideoIdsRef.current.clear();
     nextPageTokenRef.current = null;
@@ -221,7 +259,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     fetchFeed(category, {});
   }, [category, fetchFeed]);
 
-  // Re-tap on the Reels tab (HomeLayout bumps refreshTick) -> fresh feed.
   const prevRefreshTickRef = useRef(0);
   useEffect(() => {
     if (!refreshTick || refreshTick === prevRefreshTickRef.current) return;
@@ -233,7 +270,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     fetchFeed(category, { refresh: true });
   }, [refreshTick, category, fetchFeed]);
 
-  // Pause playback when the tab is hidden.
   useEffect(() => {
     const handler = () => {
       if (document.hidden && !pausedRef.current) {
@@ -243,6 +279,185 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
   }, []);
+
+  const switchToIndex = useCallback((idx) => {
+    const el = shellRef.current;
+    if (!el || !viewH) return;
+    el.scrollTop = idx * viewH;
+  }, [viewH]);
+
+  const playAt = useCallback((idx) => {
+    if (apiState !== 'ok' || !playersReadyRef.current) return;
+    const list = videosRef.current;
+    const videoId = sanitizeVideoId(list[idx] && list[idx].videoId);
+    if (!videoId) {
+      currentVideoIdRef.current = null;
+      return;
+    }
+    const a = activeSlotRef.current;
+    const b = 1 - a;
+    const alreadyActive = loadedVideoIdBySlotRef.current[a] === videoId;
+    const target = alreadyActive ? a : b;
+
+    if (target === a && alreadyActive) {
+      if (!pausedRef.current) {
+        try { playersRef.current[a].playVideo(); } catch (e) {}
+      }
+      setActiveSlot(a);
+      return;
+    }
+
+    const p = playersRef.current[target];
+    if (!p) return;
+
+    if (loadedVideoIdBySlotRef.current[target] !== videoId) {
+      try {
+        p.loadVideoById(videoId);
+        loadedVideoIdBySlotRef.current[target] = videoId;
+      } catch (e) {}
+    }
+    if (!pausedRef.current) {
+      try { p.playVideo(); } catch (e) {}
+    }
+
+    const old = 1 - target;
+    const oldPlayer = playersRef.current[old];
+    if (oldPlayer) {
+      try { oldPlayer.pauseVideo(); } catch (e) {}
+      const nextId = sanitizeVideoId(list[idx + 1] && list[idx + 1].videoId);
+      if (nextId && nextId !== videoId) {
+        try {
+          oldPlayer.cueVideoById(nextId);
+          loadedVideoIdBySlotRef.current[old] = nextId;
+        } catch (e) {}
+      } else {
+        try { oldPlayer.stopVideo(); } catch (e) {}
+        loadedVideoIdBySlotRef.current[old] = null;
+      }
+    }
+
+    currentVideoIdRef.current = videoId;
+    activeSlotRef.current = target;
+    setActiveSlot(target);
+  }, [apiState]);
+
+  const skipOnError = useCallback((erroredVideoId) => {
+    if (erroredVideoId) failedVideoIdsRef.current.add(erroredVideoId);
+    loadedVideoIdBySlotRef.current[activeSlotRef.current] = null;
+    currentVideoIdRef.current = null;
+    const cur = activeIdxRef.current;
+    let next = cur + 1;
+    while (videosRef.current[next] && failedVideoIdsRef.current.has(sanitizeVideoId(videosRef.current[next].videoId))) next++;
+    if (videosRef.current[next]) {
+      switchToIndex(next);
+    } else {
+      showToast('Some videos are unavailable');
+      fetchFeed(category, { refresh: true });
+    }
+  }, [switchToIndex, showToast, category, fetchFeed]);
+
+  const handlePlayerStateChange = useCallback((event) => {
+    if (event.target !== playersRef.current[activeSlotRef.current]) return;
+    if (!window.YT || event.data !== window.YT.PlayerState.ENDED) return;
+    if (pausedRef.current) return;
+    const cur = activeIdxRef.current;
+    const nextItem = videosRef.current[cur + 1];
+    if (nextItem) {
+      switchToIndex(cur + 1);
+    } else if (videosRef.current[cur]) {
+      const vid = sanitizeVideoId(videosRef.current[cur].videoId);
+      const slot = activeSlotRef.current;
+      const p = playersRef.current[slot];
+      if (vid && p) {
+        try { p.seekTo(0); p.playVideo(); } catch (e) {}
+      }
+    }
+  }, [switchToIndex]);
+
+  const handlePlayerError = useCallback((event) => {
+    if (event.target !== playersRef.current[activeSlotRef.current]) return;
+    if (!isPlayableError(event.data)) return;
+    skipOnError(currentVideoIdRef.current);
+  }, [skipOnError]);
+
+  playerHandlersRef.current.onStateChange = handlePlayerStateChange;
+  playerHandlersRef.current.onError = handlePlayerError;
+
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(() => {
+      if (!cancelled && !(window.YT && window.YT.Player)) setApiState('failed');
+    }, 7000);
+    ensureYouTubeApi()
+      .then(() => { if (!cancelled) setApiState('ok'); })
+      .catch(() => { if (!cancelled) setApiState('failed'); });
+    return () => { cancelled = true; clearTimeout(t); };
+  }, []);
+
+  useEffect(() => {
+    if (apiState !== 'ok') return;
+    const el0 = playerElsRef.current[0];
+    const el1 = playerElsRef.current[1];
+    if (!el0 || !el1) return;
+    try {
+      const mk = (el) => new window.YT.Player(el, {
+        width: '100%',
+        height: '100%',
+        playerVars: PLAYER_VARS,
+        events: {
+          onStateChange: (e) => { if (playerHandlersRef.current.onStateChange) playerHandlersRef.current.onStateChange(e); },
+          onError: (e) => { if (playerHandlersRef.current.onError) playerHandlersRef.current.onError(e); },
+        },
+      });
+      playersRef.current[0] = mk(el0);
+      playersRef.current[1] = mk(el1);
+    } catch (e) {
+      setApiState('failed');
+      return;
+    }
+    playersReadyRef.current = true;
+    playAt(activeIdxRef.current);
+    return () => {
+      playersReadyRef.current = false;
+      try { if (playersRef.current[0]) playersRef.current[0].destroy(); } catch (e) {}
+      try { if (playersRef.current[1]) playersRef.current[1].destroy(); } catch (e) {}
+      playersRef.current = [null, null];
+      loadedVideoIdBySlotRef.current = [null, null];
+      activeSlotRef.current = 0;
+    };
+  }, [apiState, playAt]);
+
+  useEffect(() => {
+    if (apiState !== 'ok' || !playersReadyRef.current || videos.length === 0) return;
+    const idx = activeIdxRef.current;
+    const vid = sanitizeVideoId(videos[idx] && videos[idx].videoId);
+    if (vid && currentVideoIdRef.current === vid) return;
+    playAt(idx);
+  }, [videos, apiState, playAt]);
+
+  useEffect(() => {
+    if (apiState !== 'ok' || !playersReadyRef.current || videos.length === 0) return;
+    playAt(activeIdx);
+  }, [activeIdx, apiState, playAt]);
+
+  useEffect(() => {
+    if (apiState !== 'ok' || !playersReadyRef.current) return;
+    const p = playersRef.current[activeSlotRef.current];
+    if (!p) return;
+    if (paused) {
+      try { p.pauseVideo(); } catch (e) {}
+    } else if (currentVideoIdRef.current) {
+      try { p.playVideo(); } catch (e) {}
+    }
+  }, [paused, apiState]);
+
+  useEffect(() => {
+    const nextItem = videos[activeIdx + 1];
+    const nextId = nextItem && sanitizeVideoId(nextItem.videoId);
+    if (!nextId) return;
+    const img = new Image();
+    img.src = thumbnailUrlFor(nextItem, 'maxresdefault');
+  }, [activeIdx, videos]);
 
   const handleScroll = useCallback(() => {
     const el = shellRef.current;
@@ -262,14 +477,18 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   const activeItem = videos[activeIdx];
   const activeVideoId = sanitizeVideoId(activeItem && activeItem.videoId);
-  // Failed/blocked videos fall through to the next one automatically.
   const overlayVideoId = activeVideoId && !failedVideoIdsRef.current.has(activeVideoId)
     ? activeVideoId
     : null;
 
   useEffect(() => {
-    if (overlayVideoId) currentVideoIdRef.current = overlayVideoId;
-  }, [overlayVideoId]);
+    if (apiState !== 'ok' && overlayVideoId) currentVideoIdRef.current = overlayVideoId;
+  }, [overlayVideoId, apiState]);
+
+  const poolVisible = apiState === 'ok';
+  const WINDOW = 3;
+  const windowStart = Math.max(0, activeIdx - WINDOW);
+  const windowEnd = Math.min(videos.length, activeIdx + WINDOW + 1);
 
   return (
     <div
@@ -307,9 +526,12 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           }}
         >
           <style>{'::-webkit-scrollbar{display:none}'}</style>
-          {videos.map((item, i) => {
+          {windowStart > 0 && <div style={{ height: windowStart * viewH }} />}
+
+          {videos.slice(windowStart, windowEnd).map((item, i) => {
+            const index = windowStart + i;
             const thumb = thumbnailUrlFor(item);
-            const isActive = i === activeIdx;
+            const isActive = index === activeIdx;
             const vid = sanitizeVideoId(item.videoId);
             return (
               <div
@@ -335,7 +557,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
                   <div style={{ position: 'absolute', inset: 0, background: '#111' }} />
                 )}
 
-                {/* Active-cell chrome: caption sits inside the cell so it stays in place */}
                 {isActive && (
                   <div style={{ position: 'absolute', left: 14, right: 60, bottom: 16, zIndex: 5, pointerEvents: 'none' }}>
                     <div style={{
@@ -355,6 +576,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
             );
           })}
 
+          {windowEnd < videos.length && <div style={{ height: (videos.length - windowEnd) * viewH }} />}
+
           {videos.length === 0 && !loading && (
             <div style={{ height: viewH, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40 }}>
               <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 15, textAlign: 'center' }}>
@@ -370,38 +593,69 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
             </div>
           )}
 
-          {/* Single active player overlay, translated to follow the active cell.
-              pointer-events:none so wheel/touch scrolling keeps reaching the list. */}
-          {overlayVideoId && (
-            <div
-              style={{
-                position: 'absolute', top: 0, left: 0, width: '100%', height: viewH,
-                transform: `translateY(${-activeIdx * viewH}px)`,
-                transition: 'transform 0.15s ease-out',
-                pointerEvents: 'none',
-                zIndex: 4,
-              }}
-            >
-              <iframe
-                title="reel-player"
-                src={embedUrl(overlayVideoId, paused)}
-                frameBorder="0"
-                allow="autoplay; encrypted-media; picture-in-picture"
-                allowFullScreen
-                style={{ width: '100%', height: '100%', border: 'none', background: '#000' }}
-              />
-              {paused && (
-                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-                  <div style={{
-                    width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
+          <div
+            style={{
+              position: 'absolute', top: 0, left: 0, width: '100%', height: viewH,
+              transform: `translateY(${-activeIdx * viewH}px)`,
+              transition: 'transform 0.15s ease-out',
+              pointerEvents: 'none',
+              zIndex: 4,
+            }}
+          >
+            {poolVisible ? (
+              <>
+                <div
+                  ref={el => { playerElsRef.current[0] = el; }}
+                  style={{
+                    position: 'absolute', inset: 0, background: '#000',
+                    zIndex: 3,
+                    opacity: (overlayVideoId && activeSlot === 0) ? 1 : 0,
+                    pointerEvents: 'none',
+                  }}
+                />
+                <div
+                  ref={el => { playerElsRef.current[1] = el; }}
+                  style={{
+                    position: 'absolute', inset: 0, background: '#000',
+                    zIndex: 2,
+                    opacity: (overlayVideoId && activeSlot === 1) ? 1 : 0,
+                    pointerEvents: 'none',
+                  }}
+                />
+                {overlayVideoId && paused && (
+                  <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                    <div style={{
+                      width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </>
+            ) : overlayVideoId ? (
+              <>
+                <iframe
+                  title="reel-player"
+                  src={embedUrl(overlayVideoId, paused)}
+                  frameBorder="0"
+                  allow="autoplay; encrypted-media; picture-in-picture"
+                  allowFullScreen
+                  style={{ width: '100%', height: '100%', border: 'none', background: '#000' }}
+                />
+                {paused && (
+                  <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                    <div style={{
+                      width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : null}
+          </div>
         </div>
       )}
 

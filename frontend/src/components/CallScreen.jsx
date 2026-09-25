@@ -253,8 +253,24 @@ export default function CallScreen() {
         boxShadow: '0 6px 24px rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.25)',
         background: '#000',
       }}>
-        {localStream && videoEnabled ? (
-          <video ref={localRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+        {localStream ? (
+          <>
+            <video
+              ref={localRef}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)',
+                display: videoEnabled ? 'block' : 'none',
+              }}
+            />
+            {!videoEnabled && (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
+                <Avatar size={40} />
+              </div>
+            )}
+          </>
         ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
             <Avatar size={40} />

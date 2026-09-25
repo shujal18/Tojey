@@ -4,23 +4,23 @@ import { useCall } from '../services/CallContext';
 import { useAuth } from '../services/AuthContext';
 import { useTheme } from '../theme/ThemeContext';
 import {
-  ArrowLeft, Search, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
+  ArrowLeft, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
   Copy, Pencil, Trash, Check, CheckCheck, Lock, Image as ImageIcon, Video, FileText,
-  MoreVertical, ChevronRight, Bell, LogOut,
+  MoreVertical, ChevronRight, Bell,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
 import MediaViewer from '../components/MediaViewer';
 import DrawingCanvas from '../components/DrawingCanvas';
 import MediaPreview from '../components/MediaPreview';
-import { quickReactions, wallpapers, getChatColor, shadeColor } from '../theme';
+import { quickReactions, getChatColor } from '../theme';
 import { uploadFile, makeThumbnail, resolveUrl, formatBytes, isVideoMime, isImageMime } from '../services/upload';
 
 const API = import.meta.env.VITE_API_URL || '';
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
-  const { token, logout } = useAuth();
+  const { token } = useAuth();
   const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation, showToast, clearConversation } = useChat();
   const { startCall } = useCall();
   const { messages, typing, wallpaper } = conversation;
@@ -428,7 +428,6 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
             {typing ? <TypingDots /> : headerText}
           </div>
         </div>
-        <button style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}><Search size={20} /></button>
         <button
           title="Video call"
           onClick={() => startCall(otherUser)}
@@ -448,13 +447,6 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           }}
         >
           👋
-        </button>
-        <button
-          title="Logout"
-          onClick={() => { setShowHeaderMenu(false); logout(); }}
-          style={{ color: theme.danger, padding: 6 }}
-        >
-          <LogOut size={18} />
         </button>
         <div style={{ position: 'relative' }}>
           <button onClick={() => setShowHeaderMenu(s => !s)} style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}>
@@ -525,7 +517,6 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               isSent={isSent}
               grouped={grouped}
               theme={theme}
-              wallpaper={!!wallpaper}
               senderName={isSent ? 'You' : otherUser.display_name}
               repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
               onLongPress={handleLongPress}
@@ -868,7 +859,7 @@ function TypingDots() {
   );
 }
 
-function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia }) {
+function MessageRow({ message, myId, isSent, grouped, theme, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia }) {
   return (
     <div style={{
       display: 'flex',
@@ -876,7 +867,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderNa
       marginTop: grouped ? 2 : 12,
     }}>
       <div style={{
-        maxWidth: '78%',
+        maxWidth: '80%',
         display: 'flex',
         flexDirection: 'column',
         alignItems: isSent ? 'flex-end' : 'flex-start',
@@ -885,35 +876,36 @@ function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderNa
           onContextMenu={(e) => onLongPress(e, message)}
           onDoubleClick={(e) => onLongPress(e, message)}
           style={{
-            background: isSent
-              ? `linear-gradient(135deg, ${getChatColor()} 0%, ${shadeColor(getChatColor(), -40)} 100%)`
-              : (wallpaper ? 'rgba(255,255,255,0.9)' : theme.receivedBubble),
-            color: isSent ? '#fff' : theme.receivedText,
+            background: isSent ? getChatColor() : '#1e2529',
+            color: isSent ? '#fff' : '#E8EAEC',
             padding: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '7px 11px',
             paddingLeft: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
             paddingRight: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
             borderRadius: 14,
             borderBottomRightRadius: isSent ? (grouped ? 6 : 4) : 14,
             borderBottomLeftRadius: isSent ? 14 : (grouped ? 6 : 4),
+            border: isSent ? 'none' : '1px solid rgba(255,255,255,0.07)',
             boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
             animation: 'message-enter 0.25s ease',
             position: 'relative',
             userSelect: 'text',
             wordBreak: 'break-word',
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
             maxWidth: '100%',
           }}
         >
           {message.reply_to && (
             <div style={{
-              marginBottom: 4, padding: '4px 8px',
-              background: isSent ? 'rgba(255,255,255,0.15)' : theme.primaryLight,
-              borderRadius: 6, borderLeft: `3px solid ${theme.primary}`,
-              fontSize: 12, cursor: 'pointer',
+              marginBottom: 4, marginLeft: -2, padding: '3px 8px',
+              background: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)',
+              borderRadius: 6, borderLeft: '3px solid #6C3CE9',
+              fontSize: 11, cursor: 'pointer',
             }} onClick={(e) => e.stopPropagation()}>
-              <div style={{ fontWeight: 600, color: isSent ? '#fff' : theme.primary, fontSize: 11 }}>
+              <div style={{ fontWeight: 700, color: isSent ? '#fff' : '#9C86F5' }}>
                 {repliedMessage ? (repliedMessage.sender_id === myId ? 'You' : senderName) : 'Reply'}
               </div>
-              <div style={{ color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
+              <div style={{ color: isSent ? 'rgba(255,255,255,0.8)' : 'rgba(232,234,236,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
                 {repliedMessage ? replyPreview(repliedMessage) : '…'}
               </div>
             </div>
@@ -923,21 +915,22 @@ function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderNa
           {message.media_url && message.type === 'FILE' && <FileCard message={message} isSent={isSent} theme={theme} onOpen={() => window.open(resolveUrl(message.media_url), '_blank')} />}
 
           {!message.is_deleted_for_everyone && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 1, padding: '0 4px 2px' }}>
-              {message.is_edited && <span style={{ fontSize: 10, opacity: 0.7, color: isSent ? 'rgba(255,255,255,0.7)' : theme.textSecondary }}>edited</span>}
-              <span style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.75)' : theme.textSecondary }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3, padding: '0 4px 2px' }}>
+              {message.is_view_once && <Lock size={10} color={isSent ? '#fff' : '#9B96A8'} />}
+              {message.is_edited && <span style={{ fontSize: 10, opacity: 0.7, color: isSent ? 'rgba(255,255,255,0.7)' : '#9B96A8' }}>edited</span>}
+              <span style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.75)' : '#9B96A8' }}>
                 {timeOf(message.created_at)}
               </span>
               {isSent && (message.status === 'READ'
-                ? <CheckCheck size={14} color={(isSent ? '#A5D6FF' : theme.primary)} />
+                ? <CheckCheck size={message.status === 'READ' ? 15 : 13} color="#53C3FF" />
                 : message.status === 'DELIVERED'
-                  ? <CheckCheck size={14} color={isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary} />
-                  : <Check size={14} color={isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary} />)}
+                  ? <CheckCheck size={13} color="rgba(255,255,255,0.85)" />
+                  : <Check size={13} color="rgba(255,255,255,0.85)" />)}
             </div>
           )}
 
           {message.is_deleted_for_everyone && (
-            <div style={{ fontStyle: 'italic', opacity: 0.7, fontSize: 13, color: isSent ? 'rgba(255,255,255,0.8)' : theme.textSecondary }}>
+            <div style={{ fontStyle: 'italic', opacity: 0.7, fontSize: 13, color: isSent ? 'rgba(255,255,255,0.8)' : '#9B96A8' }}>
               This message was deleted
             </div>
           )}
@@ -1026,7 +1019,7 @@ function FileCard({ message, isSent, theme, onOpen }) {
         <FileText size={18} />
       </div>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: isSent ? '#fff' : theme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: isSent ? '#fff' : '#E8EAEC', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>
           {message.file_name || message.content || 'File'}
         </div>
         <div style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.75)' : theme.textSecondary }}>

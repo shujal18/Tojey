@@ -7,8 +7,8 @@ import { absUrl } from '../config';
 
 // In-call video surface for Tojey. Rendered between the chat header and the
 // existing Tojey text composer (which stays fully functional during a call).
-// Audio is enabled. The local preview is NOT mirrored (identity orientation both
-// ways: the other side sees exactly what you see), kept behind a small
+// Audio is enabled. The local camera preview is MIRRORED like a selfie view so
+// it matches the web client (screen share stays unmirrored), kept behind a small
 // non-rounded surface (SurfaceView cannot be rounded/clipped reliably on some
 // Android versions) with an explicit zIndex/elevation so it always stacks above
 // the remote stream. Controls: flip camera, camera on/off, my-mic mute, local
@@ -47,7 +47,7 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
             streamURL={localUrl}
             objectFit="cover"
             style={StyleSheet.absoluteFill}
-            mirror={false}
+            mirror={!screenSharing}
             zOrder={1}
           />
         </View>

@@ -760,6 +760,44 @@ function tokensNeedingFcm(rows, userId, legacyHasSocket) {
   return { tokens, phoneForeground, legacySkip };
 }
 
+// Short human-readable preview for a chat message push (media/call/system friendly).
+function messagePreview(message) {
+  const t = message && message.type;
+  const raw = typeof message.content === 'string' ? message.content.trim() : '';
+  if (t === 'VOICE') return 'Voice message';
+  if (t === 'IMAGE') return raw ? `Photo: ${raw}` : 'Photo';
+  if (t === 'VIDEO') return raw ? `Video: ${raw}` : 'Video';
+  if (t === 'FILE' || t === 'DOCUMENT') {
+    const name = typeof message.file_name === 'string' && message.file_name ? `: ${message.file_name}` : '';
+    return `File${name}`;
+  }
+  if (t === 'CALL') return raw || 'Video call';
+  if (t === 'TEXT') return raw;
+  return raw || 'New message';
+}
+
+// WhatsApp-style FCM push for a received chat message. Only devices that are NOT
+// foreground-with-socket get a push (closed app / closed tab / backgrounded device);
+// on-screen clients already got the message over the live socket. Fire-and-forget:
+// never blocks the socket handler, never crashes the server.
+async function deliverFcmPush(receiverUserId, data) {
+  try {
+    const online = userSockets(receiverUserId).size > 0;
+    const tokensRes = await pool.query(
+      `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
+      [receiverUserId]
+    );
+    const { tokens } = tokensNeedingFcm(tokensRes.rows, receiverUserId, online);
+    if (!tokens.length) return;
+    const push = await sendPush({ tokens, data });
+    if (push.invalidTokens && push.invalidTokens.length) {
+      await deactivateTokens(push.invalidTokens);
+    }
+  } catch (e) {
+    console.error('deliverFcmPush error:', e && e.message);
+  }
+}
+
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   const user = verifyToken(token);
@@ -772,13 +810,18 @@ io.on('connection', async (socket) => {
   const username = socket.user.username;
 
   try {
-    let dbUser = (await pool.query('SELECT id, username, display_name, profile_pic_url FROM users WHERE username = $1', [username])).rows[0];
-    if (!dbUser) {
+    const dbUserRow = (await pool.query('SELECT id, username, display_name, profile_pic_url FROM users WHERE username = $1', [username])).rows[0];
+    if (!dbUserRow) {
       socket.emit('error', { message: 'User not found' });
       socket.disconnect();
       return;
     }
-    dbUser = { userId: dbUser.id, username: dbUser.username, displayName: dbUser.display_name };
+    const dbUser = {
+      userId: dbUserRow.id,
+      username: dbUserRow.username,
+      displayName: dbUserRow.display_name,
+      profile_pic_url: dbUserRow.profile_pic_url || '',
+    };
 
     // Track every live socket for this user (multi-device / multi-tab support).
     addSocket(dbUser.userId, socket.id);
@@ -976,6 +1019,24 @@ io.on('connection', async (socket) => {
           }, 300);
         }
 
+        // Push a real notification to every receiver device/tab that is NOT currently
+        // foreground-with-socket (closed app, closed web tab, backgrounded device), so
+        // messages pop like WhatsApp/Messenger even when the app is not on screen.
+        deliverFcmPush(otherUserId, {
+          type: 'tojey_chat',
+          messageId: String(message.id),
+          senderId: String(dbUser.userId),
+          senderUsername: dbUser.username,
+          senderName: dbUser.displayName || dbUser.username,
+          senderPic: dbProfilePic,
+          receiverId: String(otherUserId),
+          conversationId: String(convo.id),
+          msgType: message.type,
+          msgPreview: messagePreview(message).slice(0, 140),
+          body: messagePreview(message).slice(0, 140),
+          title: dbUser.displayName || dbUser.username,
+        });
+
         callback({ ok: true, message });
       } catch (e) {
         console.error('message:send error', e);
@@ -1016,9 +1077,6 @@ io.on('connection', async (socket) => {
     });
 
     // Nudge / "vibrate" ping: tells the other person's device to vibrate.
-    // In-app toast + vibration only (via the socket). No FCM push, so a nudge
-    // never spawns a notification popup/tray entry - popups only come from the
-    // explicit "Send Notification" option.
     socket.on('nudge', ({ otherUserId }) => {
       if (!otherUserId || String(otherUserId) === String(dbUser.userId)) return;
       const from = {
@@ -1028,6 +1086,19 @@ io.on('connection', async (socket) => {
         profilePic: dbUser.profile_pic_url || '',
       };
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
+      // Real push for nudges too when the recipient is not on screen (their app/device
+      // vibrates + renders a tray entry even if closed). Same per-device routing as a
+      // chat message; on-screen clients got the socket nudge already.
+      deliverFcmPush(otherUserId, {
+        type: 'tojey_nudge',
+        senderId: String(dbUser.userId),
+        senderUsername: dbUser.username,
+        senderName: dbUser.displayName || dbUser.username,
+        senderPic: dbUser.profile_pic_url || '',
+        receiverId: String(otherUserId),
+        title: dbUser.displayName || dbUser.username,
+        body: '👋 nudged you!',
+      });
     });
 
     socket.on('message:edit', async ({ messageId, content }) => {
