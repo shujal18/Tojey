@@ -7,6 +7,8 @@ import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
 import { Icon } from './src/components/AppIcon';
+import IncomingBanner, { messagePreviewText } from './src/components/IncomingBanner';
+import { getNotifPrefs } from './src/services/notifications';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
@@ -37,6 +39,10 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
+  // In-app heads-up banner (WhatsApp / Facebook Lite style) for incoming chat messages
+  // while the app is OPEN. Shown when a message arrives for a conversation that is not
+  // currently open - independent of FCM so it works on every device / OEM.
+  const [incomingBanner, setIncomingBanner] = useState(null);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -230,6 +236,40 @@ function Shell() {
     };
   }, [socket, session]);
 
+  // Heads-up banner for chat messages landing while the app is open: shows over ANY
+  // screen (home, settings, another chat) when the message is for a conversation that
+  // is not the one currently on screen. Socket already delivered the message, so this
+  // is instant and needs no FCM / permission / OEM cooperation.
+  useEffect(() => {
+    if (!socket || !session) return undefined;
+    const ownId = session.user && session.user.id;
+    const onMsg = ({ message, sender, conversationId }) => {
+      if (!message || !sender || !sender.userId) return;
+      if (String(sender.userId) === String(ownId)) return;
+      if (activeChat && String(activeChat.id) === String(sender.userId)) return; // already on screen
+      getNotifPrefs().then((prefs) => {
+        if (!prefs.enabled) return;
+        setIncomingBanner({
+          key: `${message.id || Date.now()}`,
+          senderId: sender.userId,
+          senderName: sender.displayName || sender.username || 'Tojey',
+          senderPic: sender.profilePic || '',
+          conversationId,
+          preview: messagePreviewText(message).slice(0, 90),
+        });
+      }).catch(() => {});
+    };
+    socket.on('message:receive', onMsg);
+    return () => socket.off('message:receive', onMsg);
+  }, [socket, session, activeChat]);
+
+  const openBanner = () => {
+    if (incomingBanner && incomingBanner.senderId) {
+      openConversationWith(incomingBanner.senderId);
+    }
+    setIncomingBanner(null);
+  };
+
   // Taps on the app's own system notifications (notifee) -> open the conversation.
   useEffect(() => {
     const unsubPressed = onSystemNotificationPressed((p) => {
@@ -403,6 +443,13 @@ function Shell() {
   return (
     <View style={{ flex: 1 }}>
       {content}
+      {booted && !showLockScreen && !!session && (
+        <IncomingBanner
+          data={incomingBanner}
+          onPress={openBanner}
+          onDismiss={() => setIncomingBanner(null)}
+        />
+      )}
     </View>
   );
 }

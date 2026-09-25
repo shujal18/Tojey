@@ -9,6 +9,7 @@ import ChatListScreen from './ChatListScreen';
 import SettingsScreen from './SettingsScreen';
 import ChatRoomScreen from './ChatRoomScreen';
 import ReelsScreen from './ReelsScreen';
+import HeadsUpBanner from '../components/HeadsUpBanner';
 import { useTheme } from '../theme/ThemeContext';
 import { MessageCircle, Settings, Clapperboard } from 'lucide-react';
 
@@ -109,7 +110,7 @@ export default function HomeLayout() {
 
   if (openChat) {
     return (
-      <ChatProvider socket={socket} currentUser={currentUser}>
+      <ChatProvider socket={socket} currentUser={currentUser} onOpenChat={handleOpenChat}>
         <CallProvider socket={socket} currentUser={currentUser}>
           <ChatRoomScreen
             otherUser={openChat}
@@ -118,13 +119,14 @@ export default function HomeLayout() {
           />
           <CallScreen />
           <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
+          <HeadsUpBanner />
         </CallProvider>
       </ChatProvider>
     );
   }
 
   return (
-    <ChatProvider socket={socket} currentUser={currentUser}>
+    <ChatProvider socket={socket} currentUser={currentUser} onOpenChat={handleOpenChat}>
       <CallProvider socket={socket} currentUser={currentUser}>
       <div style={{
         height: '100vh',
@@ -177,6 +179,7 @@ export default function HomeLayout() {
       </div>
       <CallScreen />
       <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
+      <HeadsUpBanner />
       </CallProvider>
     </ChatProvider>
   );

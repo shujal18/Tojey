@@ -16,13 +16,16 @@ function previewFromWeb(data) {
   return p || 'New message';
 }
 
-export function ChatProvider({ socket, currentUser, children }) {
+export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   const [users, setUsers] = useState([]);
   const [conversation, setConversation] = useState({ id: null, other: null, messages: [], typing: false });
   const [presence, setPresence] = useState({});
   const [conversations, setConversations] = useState([]);
   const [wallpaper, setWallpaper] = useState(null);
   const [toast, setToast] = useState(null);
+  // In-app heads-up banner (WhatsApp / Facebook Lite style) for chat messages landing
+  // while this tab is open for a conversation that is NOT currently on screen.
+  const [banner, setBanner] = useState(null);
   const socketRef = useRef(socket);
   socketRef.current = socket;
   const conversationRef = useRef(conversation);
@@ -161,7 +164,7 @@ export function ChatProvider({ socket, currentUser, children }) {
       setConversation(prev => (prev.other && prev.other.id === userId ? { ...prev, typing: false } : prev));
     });
 
-    socket.on('message:receive', ({ message }) => {
+    socket.on('message:receive', ({ message, sender }) => {
       const isMine = message.sender_id === currentUser?.id;
       setConversation(prev => {
         if (prev.id !== message.conversation_id) return prev;
@@ -169,6 +172,17 @@ export function ChatProvider({ socket, currentUser, children }) {
         if (socket) socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
         return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
       });
+      // Heads-up banner for messages that arrived while a DIFFERENT screen/chat is open.
+      if (!isMine && document.visibilityState === 'visible') {
+        setBanner({
+          key: `${message.id || Date.now()}`,
+          senderId: message.sender_id,
+          senderName: sender?.displayName || sender?.username || 'Tojey',
+          senderPic: sender?.profilePic || sender?.profile_pic_url || '',
+          conversationId: message.conversation_id,
+          preview: previewFromWeb({ msgType: message.type, msgPreview: message.content || '' }).slice(0, 90),
+        });
+      }
     });
 
     socket.on('nudge', ({ from }) => {
@@ -347,7 +361,7 @@ export function ChatProvider({ socket, currentUser, children }) {
   }
 
   return (
-    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast }}>
+    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast, banner, dismissBanner: () => setBanner(null), openChatScreen: onOpenChat }}>
       {children}
       {toast && (
         <div style={{
