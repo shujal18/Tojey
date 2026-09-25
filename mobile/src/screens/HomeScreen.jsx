@@ -369,7 +369,7 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
       )}
 
       {tab === 'reels' && (
-        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} />
+        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => setTab('chats')} />
       )}
 
       {/* Long-press actions: send notification / clear messages */}
@@ -470,11 +470,13 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         </View>
       </Modal>
 
-      <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
-        <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
-        <TabBtn label="Reels" active={tab === 'reels'} onPress={() => { setTab('reels'); if (tab === 'reels') setReelsRefreshTick((t) => t + 1); }} icon="videocam-outline" theme={theme} activeIcon="videocam" />
-        <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
-      </View>
+      {tab !== 'reels' && (
+        <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
+          <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
+          <TabBtn label="Reels" active={tab === 'reels'} onPress={() => { setTab('reels'); if (tab === 'reels') setReelsRefreshTick((t) => t + 1); }} icon="videocam-outline" theme={theme} activeIcon="videocam" />
+          <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
+        </View>
+      )}
 
       <Toast message={nudgeToast} bottom={92} />
     </View>

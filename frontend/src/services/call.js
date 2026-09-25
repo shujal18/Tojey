@@ -192,6 +192,9 @@ function cleanupCallButKeepStream() {
   }
   remoteStream = null;
   remoteAudioEnabled = true;
+}
+
+export function clearCallbacks() {
   callbacks = {};
 }
 

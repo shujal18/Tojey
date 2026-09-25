@@ -143,49 +143,53 @@ export default function HomeLayout() {
         }}>
           {activeTab === 'chats' && <ChatListScreen onOpenChat={handleOpenChat} />}
           {activeTab === 'contacts' && <ContactsScreen onOpenChat={handleOpenChat} />}
-          {activeTab === 'reels' && <ReelsScreen token={token} user={currentUser} refreshTick={reelsRefreshTick} />}
+          {activeTab === 'reels' && <ReelsScreen token={token} user={currentUser} refreshTick={reelsRefreshTick} onBack={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }} />}
           {activeTab === 'settings' && <SettingsScreen onLogout={logout} />}
         </div>
 
-        <div style={{
-          display: 'flex',
-          background: theme.navBg,
-          borderTop: `1px solid ${theme.border}`,
-          padding: '6px 0',
-          paddingBottom: '10px',
-        }}>
-          {tabs.map((t) => (
-            <button key={t.key} onClick={() => handleTabPress(t.key)} style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: 2,
-              padding: '6px 0',
-              color: activeTab === t.key ? theme.primary : theme.textSecondary,
-              fontSize: 11,
-              fontWeight: activeTab === t.key ? 600 : 500,
-              transition: 'color 0.2s',
-            }}>
-              {t.icon}
-              {t.label}
-            </button>
-          ))}
-        </div>
+        {activeTab !== 'reels' && (
+          <div style={{
+            display: 'flex',
+            background: theme.navBg,
+            borderTop: `1px solid ${theme.border}`,
+            padding: '6px 0',
+            paddingBottom: '10px',
+          }}>
+            {tabs.map((t) => (
+              <button key={t.key} onClick={() => handleTabPress(t.key)} style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 2,
+                padding: '6px 0',
+                color: activeTab === t.key ? theme.primary : theme.textSecondary,
+                fontSize: 11,
+                fontWeight: activeTab === t.key ? 600 : 500,
+                transition: 'color 0.2s',
+              }}>
+                {t.icon}
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
-        <button onClick={logout} title="Logout" style={{
-          position: 'absolute',
-          top: 12,
-          right: 12,
-          color: theme.textSecondary,
-          padding: 8,
-          background: theme.card,
-          borderRadius: 10,
-          boxShadow: theme.shadow,
-          zIndex: 10,
-        }}>
-          <LogOut size={16} />
-        </button>
+        {activeTab !== 'reels' && (
+          <button onClick={logout} title="Logout" style={{
+            position: 'absolute',
+            top: 12,
+            right: 12,
+            color: theme.textSecondary,
+            padding: 8,
+            background: theme.card,
+            borderRadius: 10,
+            boxShadow: theme.shadow,
+            zIndex: 10,
+          }}>
+            <LogOut size={16} />
+          </button>
+        )}
       </div>
       <CallScreen />
       <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} />

@@ -26,18 +26,6 @@ const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache';
 const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp';
 const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes cache
 
-// Instagram-feed style categories. Each chip switches the whole feed to that
-// genre's reels (backend maps the id to a YouTube search query).
-const CATEGORIES = [
-  { id: 'trending', label: 'For You' },
-  { id: 'memes', label: 'Memes' },
-  { id: 'hindi', label: 'Hindi' },
-  { id: 'hindi_songs', label: 'Hindi Songs' },
-  { id: 'love', label: 'Love & Romantic' },
-];
-
-// Auto-rotate categories every session (default: trending/For You)
-
 const ITEM_HEIGHT = SCREEN_H;
 
 function parseYTErrorCode(errorCode) {
@@ -113,7 +101,7 @@ async function saveFeedCache(category, videos) {
   }
 }
 
-export default function ReelsScreen({ token, user, refreshTick = 0 }) {
+export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
   const [activeIdx, setActiveIdx] = useState(0);
@@ -778,22 +766,10 @@ export default function ReelsScreen({ token, user, refreshTick = 0 }) {
 
       {toast && <Toast message={toast} onDismiss={() => setToast('')} />}
 
-      {/* Instagram-style category chips: tap switches the whole feed genre */}
-      <View style={styles.chipsRow} pointerEvents="box-none">
-        {CATEGORIES.map((c) => {
-          const active = c.id === category;
-          return (
-            <TouchableOpacity
-              key={c.id}
-              onPress={() => setCategory(c.id)}
-              style={[styles.chip, active && { backgroundColor: theme.primary, borderColor: theme.primary }]}
-              accessibilityLabel={`Show ${c.label} reels`}
-            >
-              <Text style={styles.chipLabel}>{c.label}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      {/* Top-left back button: leaves fullscreen Reels and returns to Chats */}
+      <TouchableOpacity onPress={onBack} style={styles.backBtn} accessibilityLabel="Back to chats">
+        <Icon name="chevron-back" size={26} color="#fff" />
+      </TouchableOpacity>
 
       {/* Caption overlay: title + channel over the player (non-interactive) */}
       {activeItem ? (
@@ -863,29 +839,17 @@ const styles = StyleSheet.create({
     paddingVertical: fs(10),
     borderRadius: fs(10),
   },
-  chipsRow: {
+  backBtn: {
     position: 'absolute',
-    top: 30,
-    left: 0,
-    right: 0,
-    zIndex: 45,
-    flexDirection: 'row',
-    paddingHorizontal: 12,
-    gap: 8,
-    alignItems: 'center',
-  },
-  chip: {
+    top: 26,
+    left: 12,
+    zIndex: 50,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  chipLabel: {
-    color: '#fff',
-    fontSize: fs(12),
-    fontWeight: '600',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   caption: {
     position: 'absolute',

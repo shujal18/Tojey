@@ -65,30 +65,34 @@ export function CallProvider({ socket, currentUser, children }) {
     setTimeout(() => updateState('idle'), 700);
   }, []);
 
+  const wireCallbacks = useCallback(() => {
+    const sk = socketRef.current;
+    if (!sk) return;
+    call.applyCallbacks({
+      onIceCandidate: (candidate) => {
+        const meta = metaRef.current;
+        if (!meta || !meta.callId) return;
+        const peerId = stateRef.current === 'outgoing' || stateRef.current === 'active' ? meta.calleeId : meta.callerId;
+        sk.emit('video-call:ice-candidate', { targetUserId: peerId, callId: meta.callId, candidate });
+      },
+      onRemoteStream: (stream) => {
+        setRemoteStream(stream);
+      },
+      onConnectionState: (cs) => {
+        if (cs === 'failed' || cs === 'closed') {
+          if (stateRef.current === 'active' || stateRef.current === 'connecting') {
+            showToast('Call ended');
+            endCall();
+          }
+        }
+      },
+    });
+  }, [endCall, showToast]);
+
   useEffect(() => {
     if (!socket) return;
 
-    if (stateRef.current === 'idle') {
-      call.applyCallbacks({
-        onIceCandidate: (candidate) => {
-          const meta = metaRef.current;
-          if (!meta || !meta.callId) return;
-          const peerId = stateRef.current === 'outgoing' || stateRef.current === 'active' ? meta.calleeId : meta.callerId;
-          socket.emit('video-call:ice-candidate', { targetUserId: peerId, callId: meta.callId, candidate });
-        },
-        onRemoteStream: (stream) => {
-          setRemoteStream(stream);
-        },
-        onConnectionState: (cs) => {
-          if (cs === 'failed' || cs === 'closed') {
-            if (stateRef.current === 'active' || stateRef.current === 'connecting') {
-              showToast('Call ended');
-              endCall();
-            }
-          }
-        },
-      });
-    }
+    wireCallbacks();
 
     const onInvite = (payload) => {
       if (stateRef.current === 'active' || stateRef.current === 'outgoing' || stateRef.current === 'connecting') {
@@ -130,6 +134,7 @@ export function CallProvider({ socket, currentUser, children }) {
         const stream = await call.startLocalStream();
         streamRef.current = stream;
         setLocalStream(stream);
+        wireCallbacks();
         call.createPeerConnection();
         const answer = await call.acceptOffer(payload.offer);
         const peerId = metaRef.current?.callerId;
@@ -180,8 +185,9 @@ export function CallProvider({ socket, currentUser, children }) {
       socket.off('video-call:answer', onAnswer);
       socket.off('video-call:ice-candidate', onCandidate);
       socket.off('video-call:end', onEnd);
+      call.clearCallbacks();
     };
-  }, [socket, cleanup, endCall, showToast]);
+  }, [socket, cleanup, endCall, showToast, wireCallbacks]);
 
   const beginOutgoingConnection = useCallback(async () => {
     const meta = metaRef.current;
@@ -190,6 +196,7 @@ export function CallProvider({ socket, currentUser, children }) {
       const stream = await call.startLocalStream();
       streamRef.current = stream;
       setLocalStream(stream);
+      wireCallbacks();
       call.createPeerConnection();
       const offer = await call.createOffer();
       const sk = socketRef.current;
@@ -201,7 +208,7 @@ export function CallProvider({ socket, currentUser, children }) {
       showToast('Could not access the camera');
       cleanup();
     }
-  }, [cleanup, showToast]);
+  }, [cleanup, showToast, wireCallbacks]);
 
   const startCall = useCallback((otherUser) => {
     if (stateRef.current !== 'idle' || !socketRef.current) return;

@@ -313,5 +313,4 @@ export function cleanupCall() {
   remoteStream = null;
   micMuted = false;
   remoteAudioEnabled = true;
-  callbacks = {};
 }

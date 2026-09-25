@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { vibrateNudge, askNotifyPermission, showSystemNotification } from './nudge';
+import { vibrateNudge, askNotifyPermission, forceNotify } from './nudge';
 import { onWebPushForegroundMessage } from './webPush';
 
 const ChatContext = createContext();
@@ -141,22 +141,22 @@ export function ChatProvider({ socket, currentUser, children }) {
         if (socket) socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
         return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
       });
-      if (!isMine) {
-        const viewing = conversationRef.current?.other?.id === message.sender_id;
-        const sender = users.find(u => u.id === message.sender_id);
-        const senderName = sender?.display_name || sender?.username || 'Someone';
-        const preview = message.type === 'VOICE' ? '🎤 Voice message' : (message.content || 'Media message');
-        if (!viewing) {
-          showSystemNotification(senderName, preview);
-        }
-      }
     });
 
     socket.on('nudge', ({ from }) => {
       const name = from?.displayName || from?.username || 'Someone';
       vibrateNudge();
       showToast(`${name} nudged you`);
-      showSystemNotification('Tojey', `${name} nudged you 👋`);
+    });
+
+    // The explicit "Send Notification" option (from a contact): socket delivery while
+    // the receiver's tab is open -> a real browser notification popup.
+    socket.on('notification:receive', (d) => {
+      if (!d || !d.sender) return;
+      if (d.receiverId && currentUser && String(d.receiverId) !== String(currentUser.id)) return;
+      const name = d.sender.displayName || d.sender.username || 'Someone';
+      const body = (d.notification && (d.notification.title || d.notification.message)) || 'sent you a notification';
+      forceNotify(name, body);
     });
 
     socket.on('message:delivered', ({ messageId }) => {
@@ -213,6 +213,7 @@ export function ChatProvider({ socket, currentUser, children }) {
       socket.off('typing:stop');
       socket.off('message:receive');
       socket.off('nudge');
+      socket.off('notification:receive');
       socket.off('message:delivered');
       socket.off('message:read');
       socket.off('message:edited');
@@ -221,28 +222,21 @@ export function ChatProvider({ socket, currentUser, children }) {
       socket.off('messages:history');
       socket.off('conversation:opened');
     };
-  }, [socket, currentUser?.id, users]);
+  }, [socket, currentUser?.id]);
 
-  // Foreground FCM web pushes (data-only). These normally arrive instead of socket
-  // delivery only in edge cases (the backend routes sockets while a device is
-  // foreground, so tojey_chat duplicates are avoided the same way as the Android app).
+  // Foreground FCM web pushes (data-only). Only the explicit "Send Notification"
+  // option (type tojey_notification) may pop a browser notification, and it pops
+  // even when this tab is focused.
   useEffect(() => {
     let unsub = () => {};
     let cancelled = false;
     onWebPushForegroundMessage((data) => {
       if (cancelled) return;
       if (!currentUser) return;
-      if (data.type && data.type !== 'tojey_chat' && data.type !== 'tojey_nudge' && data.type !== 'tojey_notification') return;
+      if (!data || data.type !== 'tojey_notification') return;
       if (data.receiverId && String(data.receiverId) !== String(currentUser.id)) return;
-      if (data.type === 'tojey_chat') {
-        const otherId = Number(data.senderId);
-        if (conversationRef.current?.other?.id === otherId) return;
-      }
       const title = data.title || data.senderName || 'Tojey';
-      const body = data.type === 'tojey_nudge'
-        ? (data.senderName ? data.senderName + ' nudged you' : 'Someone nudged you')
-        : previewFromWeb(data);
-      showSystemNotification('nudge' in data ? 'Tojey' : title, body);
+      forceNotify(title, previewFromWeb(data) || data.body || '');
     }).then((u) => {
       if (cancelled && typeof u === 'function') u();
       else unsub = u || (() => {});

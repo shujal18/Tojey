@@ -16,11 +16,12 @@ export function askNotifyPermission() {
   } catch (e) {}
 }
 
-export function showSystemNotification(title, body) {
+// Pop a browser notification even when this tab is focused (used for the explicit
+// "Send Notification" feature, unlike chat/nudge which never pop).
+export function forceNotify(title, body) {
   try {
     if (!('Notification' in window)) return;
     if (Notification.permission !== 'granted') return;
-    if (document.hasFocus && document.hasFocus()) return;
     new Notification(title, { body, tag: 'tojey' });
   } catch (e) {}
 }

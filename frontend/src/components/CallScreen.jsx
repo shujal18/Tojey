@@ -19,6 +19,24 @@ export default function CallScreen() {
   const remoteRef = useRef(null);
   const localRef = useRef(null);
   const [elapsed, setElapsed] = useState(0);
+  const [soundUnlocked, setSoundUnlocked] = useState(false);
+
+  // Browsers block unmuted autoplay until the user has interacted with the page.
+  // Start the remote video muted, then unlock sound on the first pointer/focus
+  // gesture so the receiving side always shows video even when autoplay is denied
+  // (and the caller's tab, which has no fresh gesture, gets a "tap for sound" hint).
+  const unlockSound = () => {
+    if (soundUnlocked) return;
+    setSoundUnlocked(true);
+    if (remoteRef.current && remoteRef.current.srcObject) {
+      try {
+        remoteRef.current.muted = false;
+        remoteRef.current.play().catch(() => {});
+      } catch (e) {}
+    }
+  };
+
+  const soundMuted = !remoteAudible || !soundUnlocked;
 
   const other = callMeta?.other || {};
   const name = other.display_name || other.username || '';
@@ -28,7 +46,7 @@ export default function CallScreen() {
       remoteRef.current.srcObject = remoteStream || null;
       if (remoteStream) remoteRef.current.play().catch(() => {});
     }
-  }, [remoteStream]);
+  }, [remoteStream, soundUnlocked]);
 
   useEffect(() => {
     if (localRef.current) {
@@ -94,11 +112,20 @@ export default function CallScreen() {
       }}>
         <div style={{ position: 'relative', width: '100%', height: 150, background: '#000' }}>
           {remoteStream ? (
-            <video ref={remoteRef} autoPlay playsInline muted={!remoteAudible} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            <video ref={remoteRef} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
               <Avatar size={56} />
             </div>
+          )}
+          {remoteStream && !soundUnlocked && (
+            <button onClick={unlockSound} style={{
+              position: 'absolute', bottom: 8, right: 8, zIndex: 3,
+              background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
+              borderRadius: 14, padding: '5px 10px', fontSize: 11, cursor: 'pointer',
+            }}>
+              🔊 Tap for sound
+            </button>
           )}
           <div style={{
             position: 'absolute', top: 8, left: 10,
@@ -191,7 +218,7 @@ export default function CallScreen() {
       </div>
 
       {remoteStream ? (
-        <video ref={remoteRef} autoPlay playsInline muted={!remoteAudible} style={{
+        <video ref={remoteRef} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{
           position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111',
         }} />
       ) : (
@@ -206,6 +233,17 @@ export default function CallScreen() {
             </div>
           </div>
         </div>
+      )}
+
+      {remoteStream && !soundUnlocked && (
+        <button onClick={unlockSound} style={{
+          position: 'absolute', bottom: 104, right: 16, zIndex: 7,
+          background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
+          borderRadius: 18, padding: '8px 14px', fontSize: 13, cursor: 'pointer',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        }}>
+          🔊 Tap for sound
+        </button>
       )}
 
       {/* Local PIP */}

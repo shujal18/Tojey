@@ -965,50 +965,7 @@ io.on('connection', async (socket) => {
           conversationId: convo.id,
         });
 
-        // Push popups (data-only): every device of the receiver that is NOT currently
-        // foreground-with-socket gets a real FCM push - foreground devices already got
-        // the socket message above (deduped by id), backgrounded/offline devices wake
-        // the native MessagingService / web push to render the tray notification.
         const receiverHasSocket = userSockets(otherUserId).size > 0;
-        try {
-          const tokensRes = await pool.query(
-            `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-            [otherUserId]
-          );
-          const { tokens, phoneForeground, legacySkip } = tokensNeedingFcm(tokensRes.rows, otherUserId, receiverHasSocket);
-          if (tokens.length) {
-            const msgPreview = String(content || '')
-              || (type === 'VOICE' ? 'Voice message'
-                : type === 'IMAGE' ? 'Photo'
-                : type === 'VIDEO' ? 'Video'
-                : (type === 'FILE' || type === 'DOCUMENT') ? 'File'
-                : '');
-            const push = await sendPush({
-              tokens,
-              // Data-only so the client renders the popup itself (consistent heads-up on
-              // every device, incl. OPPO where system-rendered banners are suppressed).
-              data: {
-                type: 'tojey_chat',
-                conversationId: String(convo.id),
-                messageId: String(message.id),
-                senderId: String(dbUser.userId),
-                senderUsername: dbUser.username,
-                senderName: dbUser.displayName || dbUser.username,
-                senderPic: dbProfilePic || '',
-                receiverId: String(otherUserId),
-                msgType: String(type),
-                msgPreview,
-                body: String(content || ''),
-              },
-            });
-            console.log(`[FCM] chat push to user ${otherUserId}: devices=${tokens.length} fg-skipped=${phoneForeground} legacy-skipped=${legacySkip} invalid=${push.invalidTokens.length} success=${push.success}`);
-            if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-          } else {
-            console.log(`[DELIVERY] chat to user ${otherUserId}: no FCM needed (fg-phones=${phoneForeground} legacy-skipped=${legacySkip}) socketOnly=${receiverHasSocket}`);
-          }
-        } catch (pushErr) {
-          console.error('[FCM] chat push failed:', pushErr.message);
-        }
 
         if (receiverHasSocket) {
           setTimeout(() => {
@@ -1059,9 +1016,10 @@ io.on('connection', async (socket) => {
     });
 
     // Nudge / "vibrate" ping: tells the other person's device to vibrate.
-    // Works online (socket) AND offline (real FCM push so the tray notification
-    // vibrates even when the app is closed).
-    socket.on('nudge', async ({ otherUserId }) => {
+    // In-app toast + vibration only (via the socket). No FCM push, so a nudge
+    // never spawns a notification popup/tray entry - popups only come from the
+    // explicit "Send Notification" option.
+    socket.on('nudge', ({ otherUserId }) => {
       if (!otherUserId || String(otherUserId) === String(dbUser.userId)) return;
       const from = {
         userId: dbUser.userId,
@@ -1070,45 +1028,6 @@ io.on('connection', async (socket) => {
         profilePic: dbUser.profile_pic_url || '',
       };
       socket.to(`user:${otherUserId}`).emit('nudge', { from });
-
-      // Backgrounded/offline devices get a real FCM push (data-only) so the nudge
-      // vibrates in the tray even when the app is closed.
-      const hasSocket = userSockets(otherUserId).size > 0;
-      if (hasSocket && isUserForeground(otherUserId)) return;
-      try {
-        const tokensRes = await pool.query(
-          `SELECT fcm_token, device_id FROM device_tokens WHERE user_id = $1 AND is_active = TRUE AND fcm_token IS NOT NULL`,
-          [otherUserId]
-        );
-        const { tokens } = tokensNeedingFcm(tokensRes.rows, otherUserId, hasSocket);
-        if (!tokens.length) return;
-        const convo = (await pool.query(
-          `SELECT id FROM conversations
-           WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
-          [dbUser.userId, otherUserId]
-        )).rows[0];
-        const push = await sendPush({
-          tokens,
-          // Data-only: the client applies the strong nudge vibration + renders the
-          // tray entry itself (never the generic system-rendered one).
-          data: {
-            type: 'tojey_nudge',
-            id: `nudge-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-            senderId: String(dbUser.userId),
-            senderUsername: dbUser.username,
-            senderName: dbUser.displayName || dbUser.username,
-            senderPic: dbUser.profile_pic_url || '',
-            receiverId: String(otherUserId),
-            conversationId: convo ? String(convo.id) : '',
-            title: dbUser.displayName || dbUser.username,
-            body: '👋 nudged you!',
-          },
-        });
-        console.log(`[FCM] nudge push to user ${otherUserId}: tokens=${tokens.length} invalid=${push.invalidTokens.length} success=${push.success}`);
-        if (push.invalidTokens.length) await deactivateTokens(push.invalidTokens);
-      } catch (e) {
-        console.error('[FCM] nudge push failed:', e.message);
-      }
     });
 
     socket.on('message:edit', async ({ messageId, content }) => {

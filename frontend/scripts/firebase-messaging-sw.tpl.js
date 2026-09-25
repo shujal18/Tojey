@@ -4,8 +4,9 @@
  * written to public/firebase-messaging-sw.js and copied verbatim into dist/ by Vite.
  *
  * Uses the Firebase compat CDN bundles so this worker needs no bundling. It receives
- * FCM data-only pushes (tojey_chat / tojey_nudge / tojey_notification) and renders the
- * system notification itself; clicking it re-opens the exact conversation (?chat=<id>).
+ * FCM data-only pushes (only type tojey_notification, from the explicit "Send
+ * Notification" option) and renders the system notification itself; clicking it
+ * re-opens the exact conversation (?chat=<id>).
  */
 importScripts('https://www.gstatic.com/firebasejs/11.3.1/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/11.3.1/firebase-messaging-compat.js');

@@ -1,18 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { RefreshCw, AlertTriangle } from 'lucide-react';
+import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
 
 const API = import.meta.env.VITE_API_URL || '';
-
-// Instagram-feed style categories. Each chip switches the whole feed to that
-// genre's reels (backend maps the id to a YouTube search query).
-const CATEGORIES = [
-  { id: 'trending', label: 'For You' },
-  { id: 'memes', label: 'Memes' },
-  { id: 'hindi', label: 'Hindi' },
-  { id: 'hindi_songs', label: 'Hindi Songs' },
-  { id: 'love', label: 'Love & Romantic' },
-];
 
 function sanitizeVideoId(videoId) {
   if (!videoId || typeof videoId !== 'string') return null;
@@ -32,7 +22,7 @@ function thumbnailUrlFor(item) {
 function embedUrl(videoId, paused) {
   const qs = new URLSearchParams({
     autoplay: paused ? '0' : '1',
-    mute: '1',
+    mute: '0',
     controls: '0',
     playsinline: '1',
     rel: '0',
@@ -60,7 +50,7 @@ function isPlayableError(errorCode) {
   return [2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155].includes(code);
 }
 
-export default function ReelsScreen({ token, user, refreshTick = 0 }) {
+export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
   const [videos, setVideos] = useState([]);
@@ -415,31 +405,17 @@ export default function ReelsScreen({ token, user, refreshTick = 0 }) {
         </div>
       )}
 
-      {/* Category chips */}
-      <div style={{ position: 'absolute', top: 10, left: 0, right: 0, zIndex: 45, display: 'flex', gap: 8, padding: '0 12px', alignItems: 'center' }}>
-        {CATEGORIES.map((c) => {
-          const active = c.id === category;
-          return (
-            <button
-              key={c.id}
-              onClick={() => { if (!active) setCategory(c.id); }}
-              style={{
-                background: active ? theme.primary : 'rgba(0,0,0,0.5)',
-                borderRadius: 16,
-                padding: '6px 12px',
-                border: `1px solid ${active ? theme.primary : 'rgba(255,255,255,0.35)'}`,
-                color: '#fff',
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {c.label}
-            </button>
-          );
-        })}
-      </div>
+      {onBack && (
+        <button onClick={onBack} title="Back to chats" style={{
+          position: 'absolute', top: 10, left: 12, zIndex: 50,
+          width: 38, height: 38, borderRadius: 19,
+          background: 'rgba(0,0,0,0.5)', color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', cursor: 'pointer',
+        }}>
+          <ArrowLeft size={20} />
+        </button>
+      )}
 
       {loadMoreSpinner && (
         <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 45 }}>

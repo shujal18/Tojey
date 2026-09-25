@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, Switch, ScrollView, StyleSheet, Image, TextInput,
-  Platform, AppState, Linking, PermissionsAndroid,
+  AppState,
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -16,128 +16,16 @@ import {
   canDrawOverlay, openOverlaySettings,
   getNudgeVibrationEnabled, setNudgeVibrationEnabled,
 } from '../services/chatHead';
-import { startPush, getNotifPrefs, setNotifPrefs } from '../services/notifications';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
   const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
   const [readReceipts, setReadReceipts] = useState(true);
-  const [notifications, setNotifications] = useState(true);
-  const [sound, setSound] = useState(true);
-  const [vibration, setVibration] = useState(true);
   const [saving, setSaving] = useState(false);
   const [appLockPINEntry, setAppLockPINEntry] = useState('');
   const [confirmingPIN, setConfirmingPIN] = useState(false);
   const [chatHead, setChatHead] = useState(false);
   const [chatHeadPending, setChatHeadPending] = useState(false);
   const [nudgeVib, setNudgeVib] = useState(true);
-  const [fcmStatus, setFcmStatus] = useState(null);
-  const [fcmBusy, setFcmBusy] = useState(false);
-  const [notifPermission, setNotifPermission] = useState(true);
-
-  useEffect(() => {
-    if (Platform.Version >= 33) {
-      (async () => {
-        try {
-          setNotifPermission(await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS));
-        } catch (e) {}
-      })();
-    }
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const prefs = await getNotifPrefs();
-      if (!mounted) return;
-      setNotifications(prefs.enabled !== false);
-      setSound(prefs.sound !== false);
-      setVibration(prefs.vibration !== false);
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  const toggleNotifications = async (v) => {
-    setNotifications(v);
-    await setNotifPrefs({ enabled: v });
-  };
-  const toggleSound = async (v) => {
-    setSound(v);
-    await setNotifPrefs({ sound: v });
-  };
-  const toggleVibration = async (v) => {
-    setVibration(v);
-    await setNotifPrefs({ vibration: v });
-  };
-
-  const loadFcmStatus = async () => {
-    setFcmStatus({ loading: true, data: null, error: null });
-    try {
-      const res = await fetch(`${SERVER_URL}/api/fcm/status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      let data;
-      try {
-        data = await res.json();
-      } catch (parseErr) {
-        data = null;
-      }
-      if (!res.ok) throw new Error((data && data.error) || `Server responded ${res.status}`);
-      setFcmStatus({ loading: false, data, error: null });
-    } catch (e) {
-      console.warn('FCM status fetch failed:', e.message);
-      setFcmStatus({ loading: false, data: null, error: e.message });
-    }
-  };
-
-  const reRegisterFCM = async () => {
-    if (fcmBusy) return;
-    setFcmBusy(true);
-    try {
-      const ok = await startPush(token);
-      alert(ok ? 'Push token re-registered successfully.' : 'Could not register a fresh push token. Check console logs for [FCM].');
-    } catch (e) {
-      console.warn('FCM re-register failed:', e);
-      alert('Failed to re-register: ' + e.message);
-    } finally {
-      setFcmBusy(false);
-      loadFcmStatus();
-    }
-  };
-
-  const sendFCMPush = async () => {
-    if (fcmBusy) return;
-    setFcmBusy(true);
-    try {
-      const res = await fetch(`${SERVER_URL}/api/devices/tokens/sendtest`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      let data;
-      try {
-        data = await res.json();
-      } catch (parseErr) {
-        data = {};
-      }
-      if (!res.ok) throw new Error(data.error || `Server responded ${res.status}`);
-      if (data.note === 'fcm-unconfigured') {
-        alert('Server FCM is DISABLED — nothing was sent. In Render add the FIREBASE_SERVICE_ACCOUNT_B64 env var for the Firebase project, redeploy the backend, then test again.');
-      } else if (!data.sent) {
-        alert(`Test push not delivered (tokens=${data.tokens || 0}, note=${data.note || 'unknown'}).`);
-      } else {
-        alert(`Test push SENT (messageId ${data.messageId || 'ok'}). Check your device notification tray now.`);
-      }
-      loadFcmStatus();
-    } catch (e) {
-      console.warn('FCM test push failed:', e.message);
-      alert('Test push request failed: ' + e.message);
-    } finally {
-      setFcmBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    if (token) loadFcmStatus();
-  }, [token]);
 
   useEffect(() => {
     let mounted = true;
@@ -431,92 +319,6 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </SettingRow>
       </Section>
 
-      <Section title="Notifications" theme={theme}>
-        <SettingRow label="Message notifications" icon="notifications-outline" theme={theme}>
-          <Switch value={notifications} onValueChange={toggleNotifications} trackColor={{ true: theme.primary }} />
-        </SettingRow>
-        <SettingRow label="Sound" icon="volume-high-outline" theme={theme}>
-          <Switch value={sound} onValueChange={toggleSound} trackColor={{ true: theme.primary }} />
-        </SettingRow>
-        <SettingRow label="Vibration" icon="finger-print-outline" theme={theme}>
-          <Switch value={vibration} onValueChange={toggleVibration} trackColor={{ true: theme.primary }} />
-        </SettingRow>
-        {Platform.OS === 'android' && (
-          <SettingRow label="Notification permission" icon="shield-checkmark-outline" theme={theme}>
-            <TouchableOpacity onPress={() => Linking.openSettings()} style={{ paddingVertical: 2 }}>
-              <Text style={{ color: notifPermission ? theme.online : theme.danger, fontSize: 13, fontWeight: '700' }}>
-                {Platform.Version >= 33
-                  ? (notifPermission ? 'Allowed' : 'Blocked · Tap to fix')
-                  : 'Open settings · Check popups'}
-              </Text>
-            </TouchableOpacity>
-          </SettingRow>
-        )}
-      </Section>
-
-      <Section title="Push Notifications (FCM)" theme={theme}>
-        {fcmStatus && fcmStatus.data && (
-          <View style={{ paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: theme.border }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={[styles.helperText, { flex: 1, padding: 0, fontSize: 13, color: theme.textSecondary }]}>Server Firebase</Text>
-              <Text style={{
-                fontSize: 13, fontWeight: '700', color: fcmStatus.data.firebaseAdmin === 'ENABLED' ? theme.online : theme.danger,
-              }}>
-                {fcmStatus.data.firebaseAdmin === 'ENABLED' ? 'ENABLED' : 'DISABLED'}
-              </Text>
-            </View>
-            {fcmStatus.data.firebaseProjectId ? (
-              <Text style={{ fontSize: 12, color: theme.textSecondary, marginTop: 4 }}>
-                Firebase project: {fcmStatus.data.firebaseProjectId}
-              </Text>
-            ) : null}
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-              <Text style={{ flex: 1, fontSize: 13, color: theme.textSecondary }}>Registered push tokens</Text>
-              <Text style={{ fontSize: 13, fontWeight: '700', color: theme.text }}>{fcmStatus.data.totalActiveTokens || 0}</Text>
-            </View>
-          </View>
-        )}
-
-        {fcmStatus && fcmStatus.data && fcmStatus.data.firebaseAdmin !== 'ENABLED' && (
-          <Text style={[styles.helperText, { color: theme.danger }]}>
-            Push is NOT being delivered to backgrounded/killed devices. In the Render dashboard add a backend env var
-            FIREBASE_SERVICE_ACCOUNT_B64 (base64 of the Firebase service-account JSON: Firebase console →
-            Project settings → Service accounts → Generate new private key), then Redeploy and press "Re-register token".
-          </Text>
-        )}
-
-        {fcmStatus && fcmStatus.error && (
-          <Text style={[styles.helperText, { color: theme.danger }]}>Diagnostics unavailable: {fcmStatus.error}</Text>
-        )}
-        {(!fcmStatus || fcmStatus.loading) && (
-          <Text style={[styles.helperText, { color: theme.textSecondary }]}>Checking FCM status…</Text>
-        )}
-
-        <View style={{ flexDirection: 'row', padding: 14, gap: 8 }}>
-          <TouchableOpacity
-            onPress={() => loadFcmStatus()}
-            disabled={fcmBusy}
-            style={[styles.fcmBtn, { backgroundColor: theme.primaryLight }]}
-          >
-            <Text style={{ color: theme.primary, fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Refresh'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={reRegisterFCM}
-            disabled={fcmBusy}
-            style={[styles.fcmBtn, { backgroundColor: theme.primaryLight }]}
-          >
-            <Text style={{ color: theme.primary, fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Re-register token'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={sendFCMPush}
-            disabled={fcmBusy}
-            style={[styles.fcmBtn, { flex: 1, backgroundColor: theme.primary }]}
-          >
-            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>{fcmBusy ? 'Working…' : 'Send test push'}</Text>
-          </TouchableOpacity>
-        </View>
-      </Section>
-
       <Section title="Chat Head & Nudge" theme={theme}>
         <SettingRow label="Chat Head" icon="chatbubbles-outline" theme={theme}>
           <Switch value={chatHead} onValueChange={toggleChatHead} trackColor={{ true: theme.primary }} />
@@ -663,6 +465,5 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   logoutText: { fontSize: 15, fontWeight: '700' },
-  fcmBtn: { borderRadius: 10, paddingVertical: 9, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' },
   footer: { textAlign: 'center', fontSize: 13, paddingVertical: 30 },
 });

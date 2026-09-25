@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useChat } from '../services/ChatContext';
 import { useCall } from '../services/CallContext';
+import { useAuth } from '../services/AuthContext';
 import { useTheme } from '../theme/ThemeContext';
 import {
   ArrowLeft, Search, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
   Copy, Pencil, Trash, Check, CheckCheck, Lock, Image as ImageIcon, Video, FileText,
-  MoreVertical, ChevronRight,
+  MoreVertical, ChevronRight, Bell, LogOut,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
@@ -15,8 +16,11 @@ import MediaPreview from '../components/MediaPreview';
 import { quickReactions, wallpapers, getChatColor, shadeColor } from '../theme';
 import { uploadFile, makeThumbnail, resolveUrl, formatBytes, isVideoMime, isImageMime } from '../services/upload';
 
+const API = import.meta.env.VITE_API_URL || '';
+
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
+  const { token, logout } = useAuth();
   const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation, showToast, clearConversation } = useChat();
   const { startCall } = useCall();
   const { messages, typing, wallpaper } = conversation;
@@ -44,6 +48,10 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const [isSendingMedia, setIsSendingMedia] = useState(false);
   const [drawingItem, setDrawingItem] = useState(null);
   const [viewing, setViewing] = useState(null);
+  const [showNotifComposer, setShowNotifComposer] = useState(false);
+  const [notifMsg, setNotifMsg] = useState('');
+  const [notifSending, setNotifSending] = useState(false);
+  const [notifResult, setNotifResult] = useState(null);
 
   const listRef = useRef(null);
   const recTimer = useRef(null);
@@ -89,6 +97,60 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     const s = window.__socket;
     if (s) s.emit('typing:stop', { otherUserId: otherUser.id });
     if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+  };
+
+  // The explicit "Send Notification" option: pushes a real notification popup to
+  // the other user's device (socket when they are online, FCM when closed).
+  const sendNotification = async () => {
+    const msg = notifMsg.trim();
+    if (!msg) { setNotifResult({ error: 'Write a message first' }); return; }
+    setNotifSending(true);
+    setNotifResult(null);
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(`${API}/api/notifications/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token || ''}` },
+        body: JSON.stringify({
+          receiverId: otherUser.id,
+          message: msg,
+          conversationId: conversation.id || null,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      if (!res.ok) {
+        setNotifResult({ error: (data && (data.error || data.message)) || `Server error (${res.status})` });
+        return;
+      }
+      if (data && data.status === 'failed') {
+        let errorMsg = data.note || 'Delivery failed';
+        if (data.fcmNote === 'fcm-unconfigured') errorMsg = 'Push is disabled on the server. Configure FIREBASE_SERVICE_ACCOUNT_B64 in the Render backend environment to enable FCM.';
+        else if (data.fcmNote === 'fcm-rejected') errorMsg = 'FCM rejected the token(s). The receiver may need to reinstall for a fresh push token.';
+        setNotifResult({ error: errorMsg });
+        return;
+      }
+      if (!data || !data.ok) {
+        setNotifResult({ error: (data && data.error) || 'No response from server' });
+        return;
+      }
+      const via = data.deliveryMethod === 'socket' ? 'live connection' : 'push notification';
+      setNotifResult({ ok: true, text: `Notification sent (${via})` });
+      setTimeout(() => {
+        setShowNotifComposer(false);
+        setNotifMsg('');
+        setNotifResult(null);
+      }, 1600);
+    } catch (e) {
+      console.error('sendNotification failed:', e);
+      if (e.name === 'AbortError') setNotifResult({ error: 'Request timed out. Try again.' });
+      else setNotifResult({ error: e.message || 'Failed to send notification' });
+    } finally {
+      setNotifSending(false);
+    }
   };
 
   const sendText = () => {
@@ -387,6 +449,13 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         >
           👋
         </button>
+        <button
+          title="Logout"
+          onClick={() => { setShowHeaderMenu(false); logout(); }}
+          style={{ color: theme.danger, padding: 6 }}
+        >
+          <LogOut size={18} />
+        </button>
         <div style={{ position: 'relative' }}>
           <button onClick={() => setShowHeaderMenu(s => !s)} style={{ color: wallpaper ? '#fff' : theme.textSecondary, padding: 6 }}>
             <MoreVertical size={20} />
@@ -397,6 +466,15 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               background: theme.card, borderRadius: 12, boxShadow: '0 8px 30px rgba(0,0,0,0.22)',
               padding: 6, minWidth: 180,
             }}>
+              <button
+                onClick={() => {
+                  setShowNotifComposer(true);
+                  setShowHeaderMenu(false);
+                }}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 8, color: theme.text, fontSize: 14 }}
+              >
+                <Bell size={16} /> Send Notification
+              </button>
               <button
                 onClick={() => {
                   clearConversation(otherUser.id);
@@ -658,6 +736,51 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           onDone={doneDrawing}
         />
       )}
+
+      {/* Send Notification composer */}
+      {showNotifComposer && (
+        <div onClick={() => { if (!notifSending) { setShowNotifComposer(false); setNotifResult(null); } }} style={{
+          position: 'absolute', inset: 0, zIndex: 40,
+          background: 'rgba(0,0,0,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 20,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: '100%', maxWidth: 360, background: theme.card, borderRadius: 16,
+            padding: 18, boxShadow: '0 14px 50px rgba(0,0,0,0.35)',
+          }}>
+            <div style={{ fontSize: 17, fontWeight: 700, color: theme.text }}>Send Notification</div>
+            <div style={{ fontSize: 13, color: theme.textSecondary, marginTop: 3 }}>To {otherUser.display_name}</div>
+            <textarea
+              value={notifMsg}
+              onChange={(e) => { setNotifMsg(e.target.value); setNotifResult(null); }}
+              placeholder="Notification message…"
+              maxLength={200}
+              rows={3}
+              autoFocus
+              style={{
+                width: '100%', marginTop: 12, padding: '10px 12px', borderRadius: 10,
+                border: `1px solid ${theme.border}`,
+                background: theme.inputBg, color: theme.text, fontSize: 14, resize: 'none',
+                outline: 'none', fontFamily: 'inherit',
+              }}
+            />
+            {notifResult && (
+              <div style={{ marginTop: 10, fontSize: 13, fontWeight: 600, color: notifResult.error ? theme.danger : theme.online }}>{notifResult.error || notifResult.text}</div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 14 }}>
+              <button onClick={() => { setShowNotifComposer(false); setNotifResult(null); }} disabled={notifSending} style={{
+                padding: '9px 16px', borderRadius: 10, border: 'none', cursor: 'pointer',
+                background: theme.inputBg, color: theme.text, fontWeight: 600, fontSize: 14,
+              }}>Cancel</button>
+              <button onClick={sendNotification} disabled={notifSending} style={{
+                padding: '9px 18px', borderRadius: 10, border: 'none', cursor: 'pointer',
+                background: 'linear-gradient(135deg,#6C3CE9,#4E22B8)', color: '#fff', fontWeight: 700, fontSize: 14,
+              }}>{notifSending ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -753,7 +876,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderNa
       marginTop: grouped ? 2 : 12,
     }}>
       <div style={{
-        maxWidth: '75%',
+        maxWidth: '78%',
         display: 'flex',
         flexDirection: 'column',
         alignItems: isSent ? 'flex-end' : 'flex-start',
@@ -776,7 +899,8 @@ function MessageRow({ message, myId, isSent, grouped, theme, wallpaper, senderNa
             animation: 'message-enter 0.25s ease',
             position: 'relative',
             userSelect: 'text',
-            maxWidth: 260,
+            wordBreak: 'break-word',
+            maxWidth: '100%',
           }}
         >
           {message.reply_to && (

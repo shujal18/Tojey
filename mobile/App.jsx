@@ -7,7 +7,6 @@ import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
 import { Icon } from './src/components/AppIcon';
-import ChatBanner from './src/components/ChatBanner';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
@@ -16,7 +15,7 @@ import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import {
   startPush, stopPush, deactivateToken, onForegroundMessage, checkInitialNotification, onNotificationOpened,
-  showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification, getNotifPrefs,
+  showSystemNotification, onSystemNotificationPressed, checkInitialSystemNotification,
   getDeviceId, nextDeviceSeq,
 } from './src/services/notifications';
 
@@ -38,7 +37,6 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
-  const [chatBanner, setChatBanner] = useState(null);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -201,9 +199,9 @@ function Shell() {
     return () => socket.off('video-call:invite', onInvite);
   }, [socket, activeChat]);
 
-  // Manual "Send Notification" pushes (socket delivery when online) -> a real device
-  // system notification. Foreground FCM data pushes (non-chat, e.g. nudges that slip
-  // the race) are also rendered here.
+  // Manual "Send Notification" pushes (socket delivery when online, FCM push when
+  // the app is closed/backgrounded) -> a real device system notification. Foreground
+  // FCM data pushes (type tojey_notification) are also rendered here.
   useEffect(() => {
     if (!socket) return undefined;
     const onNotif = (d) => {
@@ -223,6 +221,7 @@ function Shell() {
     socket.on('notification:receive', onNotif);
     const unsubFg = onForegroundMessage((p) => {
       if (!session) return;
+      if (p && p.data && p.data.type && p.data.type !== 'tojey_notification') return;
       showSystemNotification(p);
     });
     return () => {
@@ -230,51 +229,6 @@ function Shell() {
       if (unsubFg) unsubFg();
     };
   }, [socket, session]);
-
-  // Foreground chat popups (WhatsApp-style): the server sends socket-only for
-  // foreground devices (no FCM), so THIS is the popup source while the app is open.
-  // A real heads-up notification + an in-app banner appear when a message arrives
-  // but the user is not currently viewing that exact conversation. Background/
-  // terminated delivery is handled by the FCM headless handler instead, so gate on
-  // AppState 'active' to avoid popping a duplicate alongside the headless tray entry.
-  useEffect(() => {
-    if (!socket) return undefined;
-    const onChatMessage = ({ message, sender, conversationId }) => {
-      try {
-        if (!message || !sender) return;
-        const ownId = session && session.user ? session.user.id : null;
-        if (ownId != null && sender.userId != null && String(sender.userId) === String(ownId)) return;
-        if (AppState.currentState !== 'active') return;
-        if (activeChat && activeChat.id === sender.userId) return;
-        getNotifPrefs().then((prefs) => {
-          if (prefs.enabled === false) return;
-          let preview = String(message.content || '') || 'Media';
-          if (message.type === 'VOICE') preview = 'Voice message';
-          else if (message.type === 'IMAGE') preview = 'Photo';
-          else if (message.type === 'VIDEO') preview = 'Video';
-          else if (message.type === 'FILE' || message.type === 'DOCUMENT') preview = 'File';
-          const name = sender.displayName || sender.username || 'Tojey';
-          showSystemNotification({
-            type: 'chat',
-            senderId: sender.userId,
-            senderUsername: sender.username || '',
-            senderName: name,
-            conversationId,
-            message: preview,
-            title: name,
-            notificationId: message.id,
-          });
-          // In-app WhatsApp-style banner: rendered by JS, so OEM notification rules
-          // (DND, per-app banner allowance, quiet) can never hide it.
-          setChatBanner({ userId: sender.userId, name, preview, profilePic: sender.profilePic || '' });
-        });
-      } catch (e) {
-        console.warn('foreground chat popup failed:', e.message);
-      }
-    };
-    socket.on('message:receive', onChatMessage);
-    return () => socket.off('message:receive', onChatMessage);
-  }, [socket, session, activeChat]);
 
   // Taps on the app's own system notifications (notifee) -> open the conversation.
   useEffect(() => {
@@ -449,14 +403,6 @@ function Shell() {
   return (
     <View style={{ flex: 1 }}>
       {content}
-      <ChatBanner
-        banner={chatBanner}
-        onOpen={(b) => {
-          setChatBanner(null);
-          openFromNotifRef.current({ senderId: b.userId });
-        }}
-        onDismiss={() => setChatBanner(null)}
-      />
     </View>
   );
 }
