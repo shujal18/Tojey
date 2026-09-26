@@ -17,7 +17,7 @@ import {
   getNudgeVibrationEnabled, setNudgeVibrationEnabled,
 } from '../services/chatHead';
 
-export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange }) {
+export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange, onOpenBatteryGuide }) {
   const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
   const [readReceipts, setReadReceipts] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -319,6 +319,22 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </SettingRow>
       </Section>
 
+      <Section title="Notifications" theme={theme}>
+        {!!onOpenBatteryGuide && (
+          <TouchableOpacity
+            onPress={onOpenBatteryGuide}
+            style={[styles.row, { borderBottomColor: theme.border }]}
+          >
+            <Icon name="notifications-outline" size={20} color={theme.primary} style={{ marginRight: 12 }} />
+            <Text style={[styles.rowLabel, { color: theme.text }]}>Closed-app pop-ups not working?</Text>
+            <Icon name="chevron-forward" size={18} color={theme.textSecondary} />
+          </TouchableOpacity>
+        )}
+        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+          Open the notification setup guide to allow notifications, auto-start and battery background access for Tojey on this phone.
+        </Text>
+      </Section>
+
       <Section title="Chat Head & Nudge" theme={theme}>
         <SettingRow label="Chat Head" icon="chatbubbles-outline" theme={theme}>
           <Switch value={chatHead} onValueChange={toggleChatHead} trackColor={{ true: theme.primary }} />
@@ -387,7 +403,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <Text style={[styles.logoutText, { color: theme.danger }]}>Log Out</Text>
       </TouchableOpacity>
 
-      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.15.0</Text>
+      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.16.0</Text>
     </ScrollView>
   );
 }

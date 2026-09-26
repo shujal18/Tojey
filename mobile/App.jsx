@@ -13,6 +13,8 @@ import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import ChatRoomScreen from './src/screens/ChatRoomScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import BatteryGuideScreen from './src/screens/BatteryGuideScreen';
+import { isAggressiveOem } from './src/services/battery';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import {
@@ -23,6 +25,7 @@ import {
 
 const APP_LOCK_KEY = '@tojey_app_lock';
 const APP_LOCK_PIN_KEY = '@tojey_app_lock_pin';
+const BATTERY_GUIDE_SEEN_KEY = '@tojey_battery_guide_seen';
 
 function Shell() {
   const { theme, booted: themeBooted } = useTheme();
@@ -39,6 +42,7 @@ function Shell() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [lockInput, setLockInput] = useState('');
   const [lockError, setLockError] = useState('');
+  const [showBatteryGuide, setShowBatteryGuide] = useState(false);
   // In-app heads-up banner (WhatsApp / Facebook Lite style) for incoming chat messages
   // while the app is OPEN. Shown when a message arrives for a conversation that is not
   // currently open - independent of FCM so it works on every device / OEM.
@@ -139,10 +143,21 @@ function Shell() {
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
+        const lockOn = lockEnabled === 'true' && !!pin;
         setAppLockEnabled(lockEnabled === 'true');
         setAppLockPIN(pin || '');
-        if (lockEnabled === 'true' && pin) {
+        if (lockOn) {
           setShowLockScreen(true);
+        }
+        // First time on a phone with an aggressive battery manager (OPPO, realme,
+        // vivo, Xiaomi, Huawei...): show the notification/battery setup guide once
+        // so closed-app pop-ups actually work. Re-openable anytime from Settings.
+        if (s) {
+          const seen = await AsyncStorage.getItem(BATTERY_GUIDE_SEEN_KEY);
+          if (seen !== '1' && isAggressiveOem()) {
+            await AsyncStorage.setItem(BATTERY_GUIDE_SEEN_KEY, '1');
+            if (mounted && !lockOn) setShowBatteryGuide(true);
+          }
         }
       } catch (e) {
         console.error('App initialization failed:', e);
@@ -408,6 +423,7 @@ function Shell() {
               setAppLockEnabled(enabled);
               setAppLockPIN(newPin || '');
             }}
+            onOpenBatteryGuide={() => setShowBatteryGuide(true)}
           />
         </SafeAreaView>
       </>
@@ -455,6 +471,13 @@ function Shell() {
           onPress={openBanner}
           onDismiss={() => setIncomingBanner(null)}
         />
+      )}
+      {showBatteryGuide && (
+        <View
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, zIndex: 50, elevation: 20 }}
+        >
+          <BatteryGuideScreen onClose={() => setShowBatteryGuide(false)} />
+        </View>
       )}
     </View>
   );
