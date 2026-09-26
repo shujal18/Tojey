@@ -671,12 +671,20 @@ const socketToDevice = new Map(); // socketId -> deviceId
 // Unknown/missing state defaults to foreground while a socket exists (a client that
 // never sent app:foreground is either a legacy/desktop tab or still rendering - Socket.IO
 // already delivered the message there, and the client dedups by id, so skipping FCM is safe).
+// A foreground report is only trusted for FOREGROUND_TRUST_MS: an app whose process was
+// killed by the OS/OEM (OPPO/ColorOS power manager) or a dropped network can leave a
+// half-open socket that never disconnects. Treating that zombie as foreground suppressed
+// FCM forever - silent notifications after the app looked closed. Open apps keep their
+// report fresh with a ~30s heartbeat, so only dead/unreachable devices age out to FCM.
+const FOREGROUND_TRUST_MS = 90 * 1000;
 function deviceIsForeground(deviceId) {
   if (!deviceId || typeof deviceId !== 'string') return false;
   const sockets = deviceSockets.get(deviceId);
   if (!sockets || sockets.size === 0) return false;
   const st = deviceStateMap.get(deviceId);
-  return !st || st.state === 'foreground';
+  if (!st) return true;
+  if (st.state !== 'foreground') return false;
+  return Date.now() - st.ts <= FOREGROUND_TRUST_MS;
 }
 
 // Record a device's foreground/background report with out-of-order protection.

@@ -48,10 +48,13 @@ The Android test matrix A-G below cannot be executed in this environment:
    streamed" signal stays accurate but the "popped a notification" signal does not.
    Push-initiated stream opens (data payload) are *not* governed by the permission (they
    are an in-app navigation), so chat heads can still open the chat.
-3. **Data-only vs. notification messages.** All pushes here are data-only
-   (`notification` key is intentionally avoided) so the app controls the UI - the side
-   effect is that the OS does not render anything if the app process/JS thread is killed
-   and the `RNHeadlessJsTaskService` handler cannot run.
+3. **Platform-aware payload (since the `16ec282` rework).** Android tokens receive
+   `notification` + `data` so Google Play Services renders the tray entry on its own even
+   if the app process is dead - the app no longer needs the JS thread alive to show a
+   notification. Web tokens receive `data`-only so the service worker renders without
+   double-notifying (a `notification` key would let the browser produce its own popup in
+   addition to the SW's). Cold-start, process-killed, and data-only caveats below apply
+   to the web path and to any platform sending without a `notification` key.
 4. **Process killed → cold JS start.** For exact OS-kill cases the message may already be
    reconciled via socket/history on next open; the notification tap carries the payload
    and routes to the conversation, but a *notification popup* for a message received

@@ -181,8 +181,14 @@ function Shell() {
     const so = getSocket();
     if (so) so.on('connect', onConnect);
     const t = sendToServer();
+    // Foreground heartbeat: re-report while on-screen so the server's per-device
+    // freshness window (FOREGROUND_TRUST_MS) never expires for a live app. If the
+    // process is later killed (OPPO/OS, network cut) the heartbeat stops and the
+    // server falls back to FCM for this device instead of suppressing push forever.
+    const heartbeat = setInterval(emitAppState, 30 * 1000);
     return () => {
       clearTimeout(t);
+      clearInterval(heartbeat);
       sub.remove();
       if (so) so.off('connect', onConnect);
     };
