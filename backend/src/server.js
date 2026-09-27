@@ -476,6 +476,27 @@ app.get('/api/fcm/status', authMiddleware, async (req, res) => {
   }
 });
 
+// Build/version diagnostic: proves which deploy is live and whether keep-alive
+// devices are reaching the in-memory router. Harmless counters only, no PII.
+app.get('/api/version', (req, res) => {
+  let trackedDevices = 0;
+  let keepAliveDevices = 0;
+  let foregroundDevices = 0;
+  for (const st of deviceStateMap.values()) {
+    trackedDevices++;
+    if (st.keepAlive) keepAliveDevices++;
+    if (st.state === 'foreground') foregroundDevices++;
+  }
+  res.json({
+    version: 'v1.17.0',
+    deployment: process.env.RENDER_DEPLOYMENT_ID || null,
+    trackedDevices,
+    keepAliveDevices,
+    foregroundDevices,
+    now: new Date().toISOString(),
+  });
+});
+
 // Reels feed endpoint - returns short video metadata from YouTube via backend proxy
 app.get('/api/reels/feed', authMiddleware, async (req, res) => {
   try {
