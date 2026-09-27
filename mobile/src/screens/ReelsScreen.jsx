@@ -10,6 +10,7 @@ import {
   Image,
   Animated,
   AppState,
+  ScrollView,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -24,9 +25,30 @@ const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache';
 const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp';
-const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes cache
+const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes local cache
+const STORAGE_KEY_SEEN = '@tojey_reels_seen_v1';
+const STORAGE_KEY_CURSOR = '@tojey_reels_cursor_v1';
+const SEEN_MAX_IDS = 500;
+const AUTO_ADVANCE_MAX_PAGES = 4;
+const MIN_FRESH_BATCH = 8;
+
+const CATEGORY_FALLBACK = [
+  { id: 'trending', label: 'For You' },
+  { id: 'memes', label: 'Memes' },
+  { id: 'hindi', label: 'Hindi' },
+  { id: 'hindi_songs', label: 'Hindi Songs' },
+  { id: 'love', label: 'Love & Romantic' },
+];
 
 const ITEM_HEIGHT = SCREEN_H;
+
+// ---- small helpers ----------------------------------------------------------
+
+function esc(str) {
+  return String(str == null ? '' : str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
+}
 
 function parseYTErrorCode(errorCode) {
   if (typeof errorCode === 'number') return errorCode;
@@ -41,7 +63,6 @@ function parseYTErrorCode(errorCode) {
 function isPlayableError(errorCode) {
   const code = parseYTErrorCode(errorCode);
   if (code === null) return false;
-  // Codes indicating the video cannot be played at all.
   return [2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155].includes(code);
 }
 
@@ -65,17 +86,55 @@ function thumbnailUrlFor(item) {
   return vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : '';
 }
 
+// ---- persistent seen / cursor / feed cache ----------------------------------
+
+async function loadSeen(userId) {
+  try {
+    const raw = await AsyncStorage.getItem(`${STORAGE_KEY_SEEN}/${userId}`);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr);
+    }
+  } catch (e) {
+    console.warn('[Reels] Failed to load seen set:', e);
+  }
+  return new Set();
+}
+
+async function saveSeen(userId, set) {
+  try {
+    const arr = Array.from(set);
+    await AsyncStorage.setItem(`${STORAGE_KEY_SEEN}/${userId}`, JSON.stringify(arr));
+  } catch (e) {
+    console.warn('[Reels] Failed to save seen set:', e);
+  }
+}
+
+async function loadCursor(userId, category) {
+  try {
+    return (await AsyncStorage.getItem(`${STORAGE_KEY_CURSOR}/${userId}/${category}`)) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveCursor(userId, category, token) {
+  try {
+    if (token) await AsyncStorage.setItem(`${STORAGE_KEY_CURSOR}/${userId}/${category}`, token);
+  } catch (e) {
+    console.warn('[Reels] Failed to save cursor:', e);
+  }
+}
+
 async function loadFeedCache(category) {
   try {
     const [storedData, storedTimestamp] = await Promise.all([
       AsyncStorage.getItem(`${STORAGE_KEY_FEED_CACHE}_${category}`),
       AsyncStorage.getItem(`${STORAGE_KEY_FEED_CACHE_TIMESTAMP}_${category}`),
     ]);
-
     if (storedData && storedTimestamp) {
       const timestamp = parseInt(storedTimestamp, 10);
-      const now = Date.now();
-      if (now - timestamp < FEED_CACHE_MAX_AGE_MS) {
+      if (nowWithin(timestamp)) {
         const parsed = JSON.parse(storedData);
         if (Array.isArray(parsed) && parsed.length > 0) {
           console.log('[Reels] Loaded feed from cache for category:', category);
@@ -89,21 +148,27 @@ async function loadFeedCache(category) {
   return null;
 }
 
+function nowWithin(timestamp) {
+  return Date.now() - timestamp < FEED_CACHE_MAX_AGE_MS;
+}
+
 async function saveFeedCache(category, videos) {
   try {
     await Promise.all([
       AsyncStorage.setItem(`${STORAGE_KEY_FEED_CACHE}_${category}`, JSON.stringify(videos)),
       AsyncStorage.setItem(`${STORAGE_KEY_FEED_CACHE_TIMESTAMP}_${category}`, String(Date.now())),
     ]);
-    console.log('[Reels] Saved feed cache for category:', category);
   } catch (e) {
     console.warn('[Reels] Failed to save feed cache:', e);
   }
 }
 
+// ---- component ---------------------------------------------------------------
+
 export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
+  const [categories, setCategories] = useState(CATEGORY_FALLBACK);
   const [activeIdx, setActiveIdx] = useState(0);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -118,7 +183,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const activeIndexRef = useRef(0);
   const currentVideoIdRef = useRef(null);
   const playerStateRef = useRef('idle'); // idle, loading, ready, playing, paused, buffering, error
-  const webViewReadyRef = useRef(false);
+  const readyRef = useRef(false);
   const lastPlayingVideoIdRef = useRef(null);
   const playWatchRef = useRef(null);
   const isMountedRef = useRef(true);
@@ -130,51 +195,200 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const touchStartTimeRef = useRef(0);
   const failedVideoIdsRef = useRef(new Set());
   const pendingSkipRef = useRef(false);
+  const categoryRef = useRef(category);
 
-  // Session-seen videos for feed rotation
-  const seenVideoIdsRef = useRef(new Set());
+  // Persistent (device-wide) history: videos the user already saw + pagination cursor.
+  const seenSetRef = useRef(new Set());
+  const seenLoadedRef = useRef(false);
 
   const nextPageTokenRef = useRef(null);
   const hasMoreRef = useRef(true);
   const isLoadingMoreRef = useRef(false);
+  const preloadTargetRef = useRef(null); // {idx,id} of the reel now warming
+  const noPlayCountRef = useRef(0);
 
-  // Latest values for stable callbacks (avoids FlatList viewability warnings).
+  // Latest values for stable callbacks.
   const videosRef = useRef([]);
+  const fetchFeedRef = useRef(null);
   const loadMoreRef = useRef(null);
-  const loadVideoRef = useRef(null);
+  const primeFeedRef = useRef(null);
+  const onActivateRef = useRef(null);
   const skipToIndexRef = useRef(null);
+  const settleToIndexRef = useRef(null);
+  const markSeenRef = useRef(null);
 
   useEffect(() => {
     videosRef.current = videos;
   }, [videos]);
+  useEffect(() => {
+    categoryRef.current = category;
+  }, [category]);
 
   const authHeaders = useMemo(() => ({
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token || ''}`,
   }), [token]);
 
-  // Stable WebView source so the single player is never reloaded by re-renders.
-  // baseUrl gives the page a real https origin (not about:blank) so YouTube
-  // allows video playback; without it the embed stays stuck on the thumbnail.
   const webViewSource = useMemo(() => ({
     html: REELS_PLAYER_HTML,
     baseUrl: 'https://tojey.app/',
   }), []);
 
+  // ---- seen-set helpers ------------------------------------------------------
+
+  const markSeen = useCallback((list) => {
+    if (!list || !list.length) return;
+    const set = seenSetRef.current;
+    list.forEach((v) => { if (v && v.videoId) set.add(v.videoId); });
+    if (set.size > SEEN_MAX_IDS) {
+      const arr = Array.from(set);
+      seenSetRef.current = new Set(arr.slice(arr.length - SEEN_MAX_IDS));
+    }
+    saveSeen(user.id, seenSetRef.current);
+  }, [user.id]);
+
+  // Broken reels are never playable, so treat them as seen: they will be skipped
+  // on every future visit instead of re-shown at the top of the feed.
+  const markSeenIds = useCallback((ids) => {
+    if (!ids || !ids.length) return;
+    const set = seenSetRef.current;
+    ids.forEach((id) => { if (id) set.add(id); });
+    if (set.size > SEEN_MAX_IDS) {
+      const arr = Array.from(set);
+      seenSetRef.current = new Set(arr.slice(arr.length - SEEN_MAX_IDS));
+    }
+    saveSeen(user.id, seenSetRef.current);
+  }, [user.id]);
+
+  // ---- playback wiring (double-buffered HTML engine) -------------------------
+
+  const primeFeed = useCallback((list) => {
+    const wv = webViewRef.current;
+    if (!wv || !readyRef.current) return;
+    if (!list || !list.length) return;
+    const v0 = list[0];
+    const id0 = sanitizeVideoId(v0 && v0.videoId);
+    if (!id0) return;
+    const v1 = list[1];
+    const id1 = v1 ? sanitizeVideoId(v1.videoId) : null;
+    currentVideoIdRef.current = id0;
+    playerStateRef.current = 'loading';
+    lastPlayingVideoIdRef.current = null;
+    const t0 = esc(thumbnailUrlFor(v0));
+    const t1 = v1 ? esc(thumbnailUrlFor(v1)) : 'null';
+    console.log('[Reels] prime:', id0, id1);
+    wv.injectJavaScript(
+      `window.__prime('${id0}','${t0}','${id1 || 'null'}','${t1}'); true;`
+    );
+  }, []);
+
+  const schedulePlayWatch = useCallback(() => {
+    const target = currentVideoIdRef.current;
+    if (playWatchRef.current) clearTimeout(playWatchRef.current);
+    playWatchRef.current = setTimeout(() => {
+      playWatchRef.current = null;
+      if (!isMountedRef.current || !webViewRef.current || !readyRef.current) return;
+      if (
+        target &&
+        lastPlayingVideoIdRef.current !== target &&
+        playerStateRef.current !== 'paused'
+      ) {
+        noPlayCountRef.current += 1;
+        if (noPlayCountRef.current >= 2) {
+          // Never park on a silent reel: after two nudges that failed to play,
+          // force-advance past it.
+          console.log('[Reels] No play after retries, advancing:', target);
+          noPlayCountRef.current = 0;
+          if (skipToIndexRef.current) skipToIndexRef.current(activeIndexRef.current);
+        } else {
+          console.log('[Reels] No PLAYING yet, nudging:', target);
+          webViewRef.current.injectJavaScript('window.__retryPlay && window.__retryPlay(); true;');
+          schedulePlayWatch();
+        }
+      }
+    }, 2500);
+  }, []);
+
+  const preloadAt = useCallback((preIdx) => {
+    const list = videosRef.current;
+    const wv = webViewRef.current;
+    if (!list || !list[preIdx] || !wv || !readyRef.current) return;
+    const nid = sanitizeVideoId(list[preIdx].videoId);
+    if (!nid) return;
+    preloadTargetRef.current = { idx: preIdx, id: nid };
+    wv.injectJavaScript(
+      `window.__preload(${preIdx},'${nid}','${esc(thumbnailUrlFor(list[preIdx]))}'); true;`
+    );
+  }, []);
+
+  const preloadNeighbor = useCallback((index) => {
+    const list = videosRef.current;
+    if (!list || !list.length) return;
+    const failed = failedVideoIdsRef.current;
+    let preIdx = -1;
+    for (let off = 1; off <= 6; off++) {
+      const idx = index + off;
+      if (idx >= list.length) break;
+      if (!failed.has(list[idx].videoId)) { preIdx = idx; break; }
+    }
+    if (preIdx < 0) return;
+    preloadAt(preIdx);
+  }, [preloadAt]);
+
+  const onActivate = useCallback((index) => {
+    const list = videosRef.current;
+    const item = list && list[index];
+    const wv = webViewRef.current;
+    if (!item || !wv || !readyRef.current) return;
+
+    const id = sanitizeVideoId(item.videoId);
+    if (!id) {
+      console.warn('[Reels] Invalid videoId, skipping:', item.videoId);
+      failedVideoIdsRef.current.add(item.videoId);
+      if (skipToIndexRef.current) skipToIndexRef.current(index);
+      return;
+    }
+
+    currentVideoIdRef.current = id;
+    playerStateRef.current = 'loading';
+    noPlayCountRef.current = 0;
+    console.log('[Reels] activate idx', index, id);
+    wv.injectJavaScript(
+      `window.__activate(${index},'${id}','${esc(thumbnailUrlFor(item))}'); true;`
+    );
+
+    // Warm the next valid reel so the NEXT swipe plays instantly (back-swipes
+    // reuse the demoted layer, which still holds the previous video -> instant).
+    preloadNeighbor(index);
+    schedulePlayWatch();
+  }, [preloadNeighbor, schedulePlayWatch]);
+
   const skipToIndex = useCallback((index) => {
     if (pendingSkipRef.current || !isMountedRef.current) return;
     pendingSkipRef.current = true;
     const list = videosRef.current;
-    const nextIdx = index + 1;
-    console.log('[Reels] Skipping video, scrolling to next:', nextIdx);
-
-    if (nextIdx < list.length && flatListRef.current) {
+    const failed = failedVideoIdsRef.current;
+    const seen = seenSetRef.current;
+    // Jump past broken & already-watched reels so we never land on (or park at) one.
+    let target = -1;
+    for (let t = index + 1; t < list.length; t++) {
+      const id = list[t] && sanitizeVideoId(list[t].videoId);
+      if (id && !failed.has(id) && !seen.has(id)) { target = t; break; }
+    }
+    if (target === -1) {
+      // Everything ahead is watched/broken: land on the nearest playable-unknown.
+      for (let t = index + 1; t < list.length; t++) {
+        if (!failed.has(list[t].videoId)) { target = t; break; }
+      }
+    }
+    console.log('[Reels] Skipping video, scrolling to next:', target);
+    if (target >= 0 && flatListRef.current) {
+      preloadAt(target); // warm the skip destination while it scrolls into view
       setTimeout(() => {
-        if (!isMountedRef.current || !flatListRef.current) return;
         try {
-          flatListRef.current.scrollToIndex({ index: nextIdx, animated: true });
+          flatListRef.current.scrollToIndex({ index: target, animated: true });
         } catch (e) {
-          flatListRef.current.scrollToOffset({ offset: nextIdx * ITEM_HEIGHT, animated: true });
+          flatListRef.current.scrollToOffset({ offset: target * ITEM_HEIGHT, animated: true });
         }
       }, 250);
     } else if (list.length === 0) {
@@ -182,182 +396,131 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     } else if (loadMoreRef.current) {
       loadMoreRef.current();
     }
-  }, []);
+  }, [preloadAt]);
 
-  // If the embed never reports PLAYING (blocked autoplay), nudge it a few times.
-  const schedulePlayWatch = useCallback(() => {
-    const targetId = currentVideoIdRef.current;
-    if (playWatchRef.current) clearTimeout(playWatchRef.current);
-    playWatchRef.current = setTimeout(() => {
-      playWatchRef.current = null;
-      if (!isMountedRef.current) return;
-      if (
-        webViewRef.current &&
-        targetId &&
-        lastPlayingVideoIdRef.current !== targetId
-      ) {
-        console.log('[Reels] No PLAYING event yet, retrying playback:', targetId);
-        webViewRef.current.injectJavaScript('window.__retryPlay && window.__retryPlay(); true;');
-        // One more nudge after the retry window if it still has not started.
-        playWatchRef.current = setTimeout(() => {
-          playWatchRef.current = null;
-          if (
-            isMountedRef.current &&
-            webViewRef.current &&
-            lastPlayingVideoIdRef.current !== targetId
-          ) {
-            webViewRef.current.injectJavaScript('window.__retryPlay && window.__retryPlay(); true;');
-          }
-        }, 5000);
-      }
-    }, 7000);
-  }, []);
+  // ---- feed fetching ----------------------------------------------------------
 
-  const loadVideo = useCallback((item, index) => {
-    if (!webViewReadyRef.current || !item) return;
+  async function fetchFeedPage(cat, token) {
+    const q = [`category=${encodeURIComponent(cat)}`, `refresh=false`];
+    if (token) q.push(`pageToken=${encodeURIComponent(token)}`);
+    const res = await fetch(`${SERVER_URL}/api/reels/feed?${q.join('&')}`, { headers: authHeaders });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load feed');
+    return data;
+  }
 
-    const videoId = sanitizeVideoId(item.videoId);
-    if (!videoId) {
-      console.warn('[Reels] Invalid videoId, skipping:', item.videoId);
-      failedVideoIdsRef.current.add(item.videoId);
-      if (skipToIndexRef.current) skipToIndexRef.current(index);
-      return;
-    }
-
-    // Don't restart the same video that is already loading/playing.
-    if (
-      currentVideoIdRef.current === videoId &&
-      playerStateRef.current !== 'idle' &&
-      playerStateRef.current !== 'error'
-    ) {
-      return;
-    }
-
-    const thumb = thumbnailUrlFor(item);
-    currentVideoIdRef.current = videoId;
-    playerStateRef.current = 'loading';
-    activeIndexRef.current = index;
-
-    const safeThumb = thumb.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    if (webViewRef.current) {
-      webViewRef.current.injectJavaScript(
-        `window.__loadVideo('${videoId}', '${safeThumb}'); true;`
-      );
-      // Preload the NEXT reel in the background so the swipe plays instantly.
-      const list = videosRef.current;
-      const nextItem = list && list[index + 1];
-      const nextId = nextItem ? sanitizeVideoId(nextItem.videoId) : null;
-      if (nextId) {
-        webViewRef.current.injectJavaScript(
-          `window.__cueVideo('${nextId}'); true;`
-        );
-      }
-      schedulePlayWatch();
-    }
-  }, [schedulePlayWatch]);
-
-  const fetchFeed = useCallback(async (cat, isRefresh = false, append = false, pageToken = null) => {
-    const currentRequestId = ++requestIdRef.current;
+  const fetchFeed = useCallback(async (cat, opts = {}) => {
+    const { refresh = false, append = false, pageToken = null } = opts;
+    const reqId = ++requestIdRef.current;
     if (loadingPageRef.current) return;
     loadingPageRef.current = true;
 
     try {
       if (!append) setLoading(true);
-      if (isRefresh) setRefreshing(true);
       setError(null);
 
-      if (!isRefresh && !append && !pageToken) {
-        const cachedVideos = await loadFeedCache(cat);
-        if (cachedVideos && cachedVideos.length > 0) {
-          const validCachedVideos = cachedVideos.filter(v =>
-            v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
-            !failedVideoIdsRef.current.has(v.videoId)
-          );
+      if (!seenLoadedRef.current) {
+        seenSetRef.current = await loadSeen(user.id);
+        seenLoadedRef.current = true;
+      }
 
-          if (validCachedVideos.length > 0) {
-            const unseenVideos = validCachedVideos.filter(v => !seenVideoIdsRef.current.has(v.videoId));
-            const videosToUse = unseenVideos.length >= 3 ? unseenVideos : validCachedVideos;
-            const entryCount = seenVideoIdsRef.current.size;
-            let validVideos = videosToUse;
-            if (videosToUse.length > 1) {
-              const rotateBy = Math.min(entryCount, videosToUse.length - 1);
-              validVideos = [...videosToUse.slice(rotateBy), ...videosToUse.slice(0, rotateBy)];
-            }
-
-            validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
-
-            if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
-
-            videosRef.current = validVideos;
-            setVideos(validVideos);
-            failedVideoIdsRef.current.clear();
-            nextPageTokenRef.current = null;
-            hasMoreRef.current = true;
-            setLoading(false);
-            setRefreshing(false);
-            loadingPageRef.current = false;
-            console.log('[Reels] Rendered feed from local cache');
-
-            // Reset to the first item for the freshly-rendered feed.
-            activeIndexRef.current = 0;
-            setActiveIdx(0);
-            scrollOffsetYRef.current = 0;
-            overlayTranslateY.setValue(0);
-            if (flatListRef.current) flatListRef.current.scrollToOffset({ offset: 0, animated: false });
-            currentVideoIdRef.current = null;
-            playerStateRef.current = 'idle';
-            if (webViewReadyRef.current && loadVideoRef.current) {
-              loadVideoRef.current(validVideos[0], 0);
+      if (!append) {
+        // Instant paint + start playing from the local cache while we refresh.
+        // The cached list must respect seen-history so re-entry never replays
+        // reels the user has already watched (or that are known-failed).
+        if (!refresh && !pageToken) {
+          const cached = await loadFeedCache(cat);
+          if (
+            cached &&
+            cached.length &&
+            reqId === requestIdRef.current &&
+            isMountedRef.current &&
+            !videosRef.current.length
+          ) {
+            const fresh = cached.filter((v) => v && v.videoId &&
+              !seenSetRef.current.has(v.videoId) &&
+              !failedVideoIdsRef.current.has(v.videoId));
+            if (fresh.length) {
+              videosRef.current = fresh;
+              setVideos(fresh);
+              if (primeFeedRef.current) primeFeedRef.current(fresh);
             }
           }
         }
       }
 
-      const queryParts = [`category=${encodeURIComponent(cat)}`, `refresh=${isRefresh ? 'true' : 'false'}`];
-      if (pageToken) queryParts.push(`pageToken=${encodeURIComponent(pageToken)}`);
+      let data = await fetchFeedPage(cat, pageToken);
+      if (!isMountedRef.current || reqId !== requestIdRef.current) return;
 
-      const res = await fetch(`${SERVER_URL}/api/reels/feed?${queryParts.join('&')}`, { headers: authHeaders });
-      const data = await res.json();
+      let finalVideos = [];
+      let cursor = data.nextPageToken || pageToken || null;
+      let hasMore = data.hasMore === true;
 
-      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
+      if (!append && !pageToken) {
+        // Prefer NEW (unseen) content. On re-entry, jump to the saved cursor so
+        // the user gets reels they've never seen instead of page 1 again.
+        const novel = (list) =>
+          (list || []).filter((v) => v && v.videoId &&
+            !seenSetRef.current.has(v.videoId) &&
+            !failedVideoIdsRef.current.has(v.videoId));
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to load feed');
-      }
+        let unseen = novel(data.videos);
 
-      let validVideos = (data.videos || []).filter(v =>
-        v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
-        !failedVideoIdsRef.current.has(v.videoId)
-      );
-
-      if (!append && !pageToken && !isRefresh) {
-        const unseenVideos = validVideos.filter(v => !seenVideoIdsRef.current.has(v.videoId));
-        const videosToUse = unseenVideos.length >= 3 ? unseenVideos : validVideos;
-        const entryCount = seenVideoIdsRef.current.size;
-        if (videosToUse.length > 1) {
-          const rotateBy = Math.min(entryCount, videosToUse.length - 1);
-          validVideos = [...videosToUse.slice(rotateBy), ...videosToUse.slice(0, rotateBy)];
-        } else {
-          validVideos = videosToUse;
+        if (!refresh) {
+          const savedCursor = await loadCursor(user.id, cat);
+          if (savedCursor && savedCursor !== data.nextPageToken) {
+            try {
+              const deeper = await fetchFeedPage(cat, savedCursor);
+              if (!isMountedRef.current || reqId !== requestIdRef.current) return;
+              unseen = novel(deeper.videos);
+              data = deeper;
+              cursor = deeper.nextPageToken || savedCursor;
+              hasMore = deeper.hasMore === true;
+            } catch (e) { /* keep page-1 data */ }
+          }
         }
+
+        finalVideos = unseen;
+        if (finalVideos.length < MIN_FRESH_BATCH && data.nextPageToken && hasMore) {
+          let token = data.nextPageToken;
+          for (let i = 0; i < AUTO_ADVANCE_MAX_PAGES; i++) {
+            const p = await fetchFeedPage(cat, token);
+            if (!isMountedRef.current || reqId !== requestIdRef.current) return;
+            finalVideos = [...finalVideos, ...novel(p.videos)];
+            cursor = p.nextPageToken || token;
+            hasMore = p.hasMore === true;
+            if (finalVideos.length >= MIN_FRESH_BATCH || !hasMore || !p.nextPageToken) break;
+            token = p.nextPageToken;
+          }
+        }
+
+        if (finalVideos.length >= 3) {
+          finalVideos = finalVideos.slice(0, 40);
+        } else if (data.videos && data.videos.length) {
+          // Nothing novel left (fully seen / quota fallback). Prefer anything
+          // still unseen or not-yet-failed; only show repeats as a last resort
+          // so the screen is never blank.
+          const stillFresh = data.videos.filter((v) => v && v.videoId &&
+            !seenSetRef.current.has(v.videoId) &&
+            !failedVideoIdsRef.current.has(v.videoId));
+          finalVideos = (stillFresh.length ? stillFresh : data.videos.filter((v) => v && v.videoId)).slice(0, 40);
+        }
+      } else {
+        finalVideos = (data.videos || []).filter((v) => v && v.videoId);
+        cursor = data.nextPageToken || pageToken || null;
+        hasMore = data.hasMore === true;
       }
 
-      validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
+      if (cursor) await saveCursor(user.id, cat, cursor);
 
-      if (append) {
-        setVideos(prev => {
-          const existingIds = new Set(prev.map(v => v.videoId));
-          const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
-          const merged = [...prev, ...newVideos];
-          videosRef.current = merged;
-          return merged;
-        });
-      } else {
-        videosRef.current = validVideos;
-        setVideos(validVideos);
+      if (!append) {
+        videosRef.current = finalVideos;
+        setVideos(finalVideos);
+        markSeenRef.current(finalVideos);
         failedVideoIdsRef.current.clear();
+        nextPageTokenRef.current = cursor;
+        hasMoreRef.current = hasMore && !!cursor;
 
-        // Fresh feed -> restart at the first video.
         activeIndexRef.current = 0;
         setActiveIdx(0);
         scrollOffsetYRef.current = 0;
@@ -365,73 +528,70 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         if (flatListRef.current) flatListRef.current.scrollToOffset({ offset: 0, animated: false });
         currentVideoIdRef.current = null;
         playerStateRef.current = 'idle';
-        if (webViewReadyRef.current && loadVideoRef.current && validVideos[0]) {
-          loadVideoRef.current(validVideos[0], 0);
-        }
-      }
-
-      nextPageTokenRef.current = data.nextPageToken || null;
-      hasMoreRef.current = data.hasMore === true;
-
-      if (!append && !pageToken && validVideos.length > 0) {
-        saveFeedCache(cat, validVideos);
+        if (primeFeedRef.current) primeFeedRef.current(finalVideos);
+        if (!refresh && finalVideos.length) saveFeedCache(cat, finalVideos.slice(0, 20));
+        console.log('[Reels] Feed ready:', cat, finalVideos.length);
+      } else {
+        setVideos((prev) => {
+          const ids = new Set(prev.map((v) => v.videoId));
+          const fresh = finalVideos.filter((v) => !ids.has(v.videoId));
+          const merged = [...prev, ...fresh];
+          videosRef.current = merged;
+          return merged;
+        });
+        markSeenRef.current(finalVideos);
       }
 
       if (data.warning) setToast(data.warning);
-      if (data.quota?.exceeded) {
-        console.warn('[Reels] YouTube quota exceeded:', data.quota);
-      }
     } catch (e) {
-      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
-      setError(e.message);
-      setToast(e.message);
+      if (!isMountedRef.current || reqId !== requestIdRef.current) return;
+      console.warn('[Reels] feed error:', e.message);
+      if (!append || !videosRef.current.length) {
+        setError(e.message);
+        setToast(e.message);
+      } else {
+        setToast(e.message);
+      }
     } finally {
-      if (isMountedRef.current && currentRequestId === requestIdRef.current) {
+      if (isMountedRef.current && reqId === requestIdRef.current) {
         setLoading(false);
         setRefreshing(false);
         loadingPageRef.current = false;
       }
     }
-  }, [authHeaders, overlayTranslateY]);
+  }, [authHeaders, overlayTranslateY, user.id]);
 
   const loadMore = useCallback(async () => {
     if (isLoadingMoreRef.current || !hasMoreRef.current || loadingPageRef.current) return;
-
-    const tokenToUse = nextPageTokenRef.current;
-    if (!tokenToUse) return;
+    const token = nextPageTokenRef.current;
+    if (!token) return;
 
     isLoadingMoreRef.current = true;
     loadingPageRef.current = true;
-
+    const currentCategory = categoryRef.current;
     try {
-      const res = await fetch(
-        `${SERVER_URL}/api/reels/feed?category=${encodeURIComponent(category)}&refresh=false&pageToken=${encodeURIComponent(tokenToUse)}`,
-        { headers: authHeaders }
-      );
-      const data = await res.json();
-
+      const data = await fetchFeedPage(currentCategory, token);
       if (!isMountedRef.current) return;
 
-      if (res.ok && data.videos && data.videos.length > 0) {
-        const validVideos = data.videos.filter(v =>
-          v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
-          !failedVideoIdsRef.current.has(v.videoId) &&
-          !seenVideoIdsRef.current.has(v.videoId)
-        );
+      const valid = (data.videos || []).filter((v) => v && v.videoId &&
+        !failedVideoIdsRef.current.has(v.videoId) &&
+        !seenSetRef.current.has(v.videoId));
 
-        validVideos.forEach(v => seenVideoIdsRef.current.add(v.videoId));
-
-        setVideos(prev => {
-          const existingIds = new Set(prev.map(v => v.videoId));
-          const newVideos = validVideos.filter(v => !existingIds.has(v.videoId));
-          const merged = [...prev, ...newVideos];
+      if (valid.length) {
+        markSeenRef.current(valid);
+        setVideos((prev) => {
+          const ids = new Set(prev.map((v) => v.videoId));
+          const fresh = valid.filter((v) => !ids.has(v.videoId));
+          const merged = [...prev, ...fresh];
           videosRef.current = merged;
           return merged;
         });
-
-        nextPageTokenRef.current = data.nextPageToken || null;
-        hasMoreRef.current = data.hasMore === true;
       }
+
+      const cursor = data.nextPageToken || token;
+      nextPageTokenRef.current = cursor;
+      hasMoreRef.current = data.hasMore === true && !!cursor;
+      if (cursor) await saveCursor(user.id, currentCategory, cursor);
     } catch (e) {
       console.warn('[Reels] loadMore failed:', e.message);
     } finally {
@@ -440,35 +600,51 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         isLoadingMoreRef.current = false;
       }
     }
-  }, [authHeaders, category]);
+  }, [authHeaders, user.id]);
 
-  // Keep stable refs pointing at the latest callbacks.
-  useEffect(() => {
-    loadMoreRef.current = loadMore;
-  }, [loadMore]);
-  useEffect(() => {
-    loadVideoRef.current = loadVideo;
-  }, [loadVideo]);
-  useEffect(() => {
-    skipToIndexRef.current = skipToIndex;
-  }, [skipToIndex]);
+  // ---- stable refs ------------------------------------------------------------
+
+  useEffect(() => { fetchFeedRef.current = fetchFeed; }, [fetchFeed]);
+  useEffect(() => { loadMoreRef.current = loadMore; }, [loadMore]);
+  useEffect(() => { primeFeedRef.current = primeFeed; }, [primeFeed]);
+  useEffect(() => { onActivateRef.current = onActivate; }, [onActivate]);
+  useEffect(() => { skipToIndexRef.current = skipToIndex; }, [skipToIndex]);
+  useEffect(() => { markSeenRef.current = markSeen; }, [markSeen]);
+
+  // ---- webview messages --------------------------------------------------------
 
   const handleWebViewMessage = useCallback((event) => {
     try {
       const data = typeof event.nativeEvent?.data === 'string' ? JSON.parse(event.nativeEvent.data) : null;
       if (!data || !data.type) return;
 
-      if (data.type === 'ytPlayerEvent') {
-        // Drop stale events from a video we no longer target.
-        if (currentVideoIdRef.current && data.videoId && data.videoId !== currentVideoIdRef.current) {
-          return;
+      if (data.type === 'ytBufferError') {
+        // A warmed neighbor failed to buffer: exclude it so we never present it.
+        const vid = typeof data.videoId === 'string' ? data.videoId : '';
+        if (vid) {
+          failedVideoIdsRef.current.add(vid);
+          markSeenIds([vid]);
+          console.log('[Reels] Buffer error, excluding:', vid, data.errorCode);
+          // If that was the reel we were warming, preload the next valid one so
+          // the upcoming swipe stays instant.
+          if (preloadTargetRef.current && preloadTargetRef.current.id === vid) {
+            preloadNeighbor(activeIndexRef.current);
+          }
         }
+        return;
+      }
 
+      if (data.type === 'ytPlayerEvent') {
+        if (currentVideoIdRef.current && data.videoId && data.videoId !== currentVideoIdRef.current) {
+          return; // stale event from a layer that is not the target anymore
+        }
         const evt = data.event;
         if (evt === 'ready') {
           playerStateRef.current = 'ready';
         } else if (evt === 'playing') {
           playerStateRef.current = 'playing';
+          noPlayCountRef.current = 0;
+          console.log('[Reels] playing:', data.videoId);
           lastPlayingVideoIdRef.current = currentVideoIdRef.current;
           if (playWatchRef.current) {
             clearTimeout(playWatchRef.current);
@@ -478,6 +654,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           playerStateRef.current = 'paused';
         } else if (evt === 'buffering') {
           playerStateRef.current = 'buffering';
+          console.log('[Reels] BUFFERING:', data.videoId);
         } else if (evt === 'cued') {
           playerStateRef.current = 'ready';
         }
@@ -492,12 +669,10 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         if (currentIndex < videosRef.current.length && isMountedRef.current) {
           console.log('[Reels] YouTube player error (skip?):', errorCode, 'videoId:', currentVideoIdRef.current);
           const shouldSkip = isPlayableError(errorCode) || errorCode === 'API_LOAD_FAILED';
-
-          if (shouldSkip) {
-            const item = videosRef.current[currentIndex];
-            if (item && item.videoId) {
-              failedVideoIdsRef.current.add(item.videoId);
-            }
+          const item = videosRef.current[currentIndex];
+          if (shouldSkip && item && item.videoId) {
+            failedVideoIdsRef.current.add(item.videoId);
+            markSeenIds([item.videoId]);
             if (skipToIndexRef.current) skipToIndexRef.current(currentIndex);
           } else {
             playerStateRef.current = 'error';
@@ -509,11 +684,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     }
   }, []);
 
+  // ---- scroll / settle (unchanged behaviour) ----------------------------------
+
   const handleScroll = useCallback((event) => {
     const y = event.nativeEvent.contentOffset.y;
     scrollOffsetYRef.current = y;
-    // The overlay tracks the currently-settled cell while the list is dragged,
-    // so the playing video moves with its own cell instead of jumping early.
     overlayTranslateY.setValue(activeIndexRef.current * ITEM_HEIGHT - y);
   }, [overlayTranslateY]);
 
@@ -527,14 +702,13 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     overlayTranslateY.setValue(0);
     setActiveIdx(index);
 
-    if (loadVideoRef.current) loadVideoRef.current(list[index], index);
+    if (onActivateRef.current) onActivateRef.current(index);
   }, [overlayTranslateY]);
 
   const onViewableItemsChanged = useCallback(({ viewableItems }) => {
     if (!viewableItems || !viewableItems.length) return;
     const newIndex = viewableItems[0].index;
     if (newIndex == null) return;
-
     if (newIndex >= videosRef.current.length - 3 && loadMoreRef.current) {
       loadMoreRef.current();
     }
@@ -547,7 +721,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   }, [settleToIndex]);
 
   const onScrollEndDrag = useCallback(() => {
-    // Fallback for a release that produces no momentum: settle after the snap.
     setTimeout(() => {
       if (!isMountedRef.current) return;
       const y = scrollOffsetYRef.current;
@@ -580,26 +753,33 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     const deltaX = Math.abs(touchEndX - touchStartXRef.current);
     const deltaTime = Date.now() - touchStartTimeRef.current;
 
-    if (deltaX < 15 && deltaY < 15 && deltaTime < 250 && webViewReadyRef.current) {
-      const index = activeIndexRef.current;
-      const item = videosRef.current[index];
-      const videoId = item && sanitizeVideoId(item.videoId);
-      if (!videoId) return;
-
-      if (playerStateRef.current === 'playing' || playerStateRef.current === 'buffering') {
-        if (webViewRef.current) webViewRef.current.injectJavaScript('window.__pause(); true;');
-        playerStateRef.current = 'paused';
-      } else if (playerStateRef.current === 'paused') {
-        if (webViewRef.current) webViewRef.current.injectJavaScript('window.__play(); true;');
-        playerStateRef.current = 'playing';
+    if (deltaX < 15 && deltaY < 15 && deltaTime < 250 && readyRef.current) {
+      if (webViewRef.current) {
+        if (playerStateRef.current === 'playing' || playerStateRef.current === 'buffering') {
+          webViewRef.current.injectJavaScript('window.__pause(); true;');
+          playerStateRef.current = 'paused';
+        } else if (playerStateRef.current === 'paused') {
+          webViewRef.current.injectJavaScript('window.__play(); true;');
+          playerStateRef.current = 'playing';
+        }
       }
     }
   }, []);
 
-  // Boot feed and handle app lifecycle.
+  // ---- boot / lifecycle -------------------------------------------------------
+
   useEffect(() => {
     isMountedRef.current = true;
-    fetchFeed(category, false, false);
+
+    (async () => {
+      try {
+        const res = await fetch(`${SERVER_URL}/api/reels/categories`, { headers: authHeaders });
+        const data = await res.json();
+        if (data.categories && data.categories.length && isMountedRef.current) {
+          setCategories(data.categories);
+        }
+      } catch (e) { /* keep fallback list */ }
+    })();
 
     const subscription = AppState.addEventListener('change', (nextState) => {
       const wasActive = appVisibleRef.current;
@@ -607,12 +787,10 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       appVisibleRef.current = isActive;
 
       if (isActive && !wasActive) {
-        seenVideoIdsRef.current.clear();
-        nextPageTokenRef.current = null;
-        hasMoreRef.current = true;
-        fetchFeed(category, true, false);
+        // Returning to the app: refresh so never-seen reels keep coming.
+        if (fetchFeedRef.current) fetchFeedRef.current(categoryRef.current, { refresh: true });
       } else if (!isActive) {
-        if (webViewRef.current && webViewReadyRef.current) {
+        if (webViewRef.current && readyRef.current) {
           webViewRef.current.injectJavaScript('window.__pause(); true;');
           playerStateRef.current = 'paused';
         }
@@ -626,38 +804,54 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         clearTimeout(playWatchRef.current);
         playWatchRef.current = null;
       }
-      if (webViewRef.current && webViewReadyRef.current) {
+      if (webViewRef.current && readyRef.current) {
         try {
           webViewRef.current.injectJavaScript('window.__destroy(); true;');
         } catch (e) {}
       }
     };
-  }, [category, fetchFeed]);
+  }, [authHeaders]);
 
-  // Bottom-nav Reels icon tapped while ALREADY inside Reels -> refresh the feed.
-  // (HomeScreen bumps refreshTick on each re-tap of the active Reels tab.)
+  // Initial feed load + category changes.
+  useEffect(() => {
+    if (isMountedRef.current) {
+      // Cancel any in-flight fetch for the previous category and reset the list.
+      requestIdRef.current += 1;
+      loadingPageRef.current = false;
+      isLoadingMoreRef.current = false;
+      nextPageTokenRef.current = null;
+      hasMoreRef.current = true;
+      setVideos([]);
+      videosRef.current = [];
+      if (webViewRef.current && readyRef.current) {
+        try { webViewRef.current.injectJavaScript('window.__destroy(); true;'); } catch (e) {}
+      }
+      if (fetchFeedRef.current) fetchFeedRef.current(category, { refresh: false });
+    }
+  }, [category]);
+
+  // Bottom-nav Reels icon tapped while ALREADY inside Reels -> fresh feed.
   const prevRefreshTickRef = useRef(0);
   useEffect(() => {
     if (!refreshTick || refreshTick === prevRefreshTickRef.current) return;
     prevRefreshTickRef.current = refreshTick;
-    seenVideoIdsRef.current.clear();
-    failedVideoIdsRef.current.clear();
-    nextPageTokenRef.current = null;
-    hasMoreRef.current = true;
-    fetchFeed(category, true, false);
-  }, [refreshTick, category, fetchFeed]);
+    if (fetchFeedRef.current) fetchFeedRef.current(categoryRef.current, { refresh: true });
+  }, [refreshTick]);
 
   const onWebViewLoadEnd = useCallback(() => {
-    webViewReadyRef.current = true;
+    readyRef.current = true;
+    console.log('[Reels] webview ready');
     const item = videosRef.current[activeIndexRef.current];
-    if (item && loadVideoRef.current) {
-      loadVideoRef.current(item, activeIndexRef.current);
+    if (item && primeFeedRef.current) {
+      primeFeedRef.current(videosRef.current);
     }
   }, []);
 
   const onWebViewError = useCallback(() => {
     playerStateRef.current = 'error';
   }, []);
+
+  // ---- render ------------------------------------------------------------------
 
   if (loading && !videos.length) {
     return (
@@ -673,7 +867,10 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         <View style={styles.errorContainer}>
           <Icon name="alert-circle" size={48} color={theme.danger} />
           <Text style={[styles.errorText, { color: theme.text }]}>{error}</Text>
-          <TouchableOpacity onPress={() => fetchFeed(category, true)} style={[styles.retryBtn, { backgroundColor: theme.primary }]}>
+          <TouchableOpacity
+            onPress={() => fetchFeedRef.current && fetchFeedRef.current(categoryRef.current, { refresh: true })}
+            style={[styles.retryBtn, { backgroundColor: theme.primary }]}
+          >
             <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
           </TouchableOpacity>
         </View>
@@ -724,7 +921,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
             </Text>
             {toast && (
               <TouchableOpacity
-                onPress={() => fetchFeed(category, true)}
+                onPress={() => fetchFeedRef.current && fetchFeedRef.current(categoryRef.current, { refresh: true })}
                 style={[styles.retryBtn, { backgroundColor: theme.primary, marginTop: 16 }]}
               >
                 <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
@@ -738,7 +935,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         removeClippedSubviews={true}
       />
 
-      {/* Single active player: one WebView hosting one YT player, translated to follow the active cell. */}
+      {/* Single overlay WebView hosting the two double-buffered players. */}
       <Animated.View
         style={[styles.playerOverlay, { transform: [{ translateY: overlayTranslateY }] }]}
         pointerEvents="none"
@@ -770,6 +967,30 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       <TouchableOpacity onPress={onBack} style={styles.backBtn} accessibilityLabel="Back to chats">
         <Icon name="chevron-back" size={26} color="#fff" />
       </TouchableOpacity>
+
+      {/* Category chips */}
+      <View style={styles.chipRowWrap} pointerEvents="box-none">
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipRow}
+        >
+          {categories.map((c) => {
+            const active = c.id === category;
+            return (
+              <TouchableOpacity
+                key={c.id}
+                onPress={() => setCategory(c.id)}
+                style={[styles.chip, active && { backgroundColor: theme.primary }]}
+              >
+                <Text style={[styles.chipText, active && { color: '#fff' }]}>
+                  {c.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
 
       {/* Caption overlay: title + channel over the player (non-interactive) */}
       {activeItem ? (
@@ -813,6 +1034,31 @@ const styles = StyleSheet.create({
   video: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  chipRowWrap: {
+    position: 'absolute',
+    top: 74,
+    left: 0,
+    right: 0,
+    zIndex: 46,
+  },
+  chipRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 8,
+  },
+  chip: {
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: 18,
+    backgroundColor: 'rgba(15,15,15,0.6)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  chipText: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: fs(13),
+    fontWeight: '600',
   },
   empty: {
     flex: 1,

@@ -56,8 +56,8 @@ android {
         applicationId "com.tojey"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 25
-        versionName "1.15.0"
+        versionCode 26
+        versionName "1.18.0"
     }
 
     signingConfigs {

@@ -1,16 +1,29 @@
 /**
- * Single-active-player YouTube embed HTML for the Reels screen.
+ * Double-buffered YouTube embed player for the Reels screen.
  *
- * One WebView hosts ONE YT IFrame player for the whole list. React Native tells
- * the page which video to load (>__loadVideo(id, thumbUrl)); the page swaps the
- * underlying player's video via loadVideoById() and reports state changes back
- * through window.ReactNativeWebView.postMessage — the ONLY bridge that works.
+ * One WebView hosts TWO full-screen layers (A / B). While reel N plays in the
+ * visible layer, the other layer sits one viewport off-screen and has ALREADY
+ * loadVideoById'd + started muted playback of reel N+1 (or N-1 on up-swipes),
+ * so the media is actually buffered. Swiping to the next cell just promotes
+ * the already-playing layer -> near-zero-delay transitions with no
+ * thumbnail/black flash between reels.
  *
- * Thumbnail-first: an <img> sits above the player and stays visible until the
- * new video reports PLAYING, so swipes never show a black/white flash.
+ * React Native drives it through injectJavaScript:
+ *   window.__prime(id0, thumb0, id1, thumb1)  first reel visible + next warming
+ *   window.__activate(idx, id, thumb)         settle on a cell (promotes buffer)
+ *   window.__preload(idx, id, thumb)          warm the off-screen layer
+ *   window.__play / __pause / __destroy
  *
- * Race protection: every load gets a generation token; late-resolving loads
- * (API not ready, slow network) are dropped if a newer generation superseded it.
+ * Layer positioning: a layer holding video k is translated to
+ * (k - activeIndex) * 100vh inside the WebView, so it always maps exactly onto
+ * physical cell k regardless of where the WebView overlay currently sits.
+ *
+ * Events bridge via window.ReactNativeWebView.postMessage — the only reliable
+ * RN->WebView->RN channel. The ACTIVE layer reports state (playing/paused/
+ * buffering) + errors; the off-screen buffer reports errors as ytBufferError.
+ *
+ * Race protection: every load carries a per-slot generation token; late
+ * resolves (slow API bootstrap/network) drop if a newer target superseded them.
  */
 
 export const REELS_PLAYER_HTML = `<!DOCTYPE html>
@@ -29,37 +42,38 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       -webkit-user-select: none;
       user-select: none;
     }
-    #player-wrap {
+    #wrap {
       position: absolute;
       top: 0; left: 0;
       width: 100vw;
       height: 100vh;
       background: #000;
     }
-    #preload-frame {
+    .layer {
       position: absolute;
       top: 0; left: 0;
-      width: 1px; height: 1px;
-      overflow: hidden;
-      visibility: hidden;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+      will-change: transform;
     }
-    #player, #player-frame {
+    .layer .host {
       position: absolute;
       top: 0; left: 0;
       width: 100%;
       height: 100%;
     }
-    #thumb {
+    .layer .thumb {
       position: absolute;
       top: 0; left: 0;
       width: 100%;
       height: 100%;
       background: #000 center / cover no-repeat;
-      z-index: 20;
+      z-index: 10;
       transition: opacity 160ms ease-out;
     }
-    #thumb.hidden { display: none; }
-    #spinner {
+    .layer .thumb.hidden { display: none; }
+    .spinner {
       position: absolute;
       top: 50%; left: 50%;
       width: 34px; height: 34px;
@@ -67,37 +81,50 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       border: 3px solid rgba(255,255,255,0.25);
       border-top-color: #fff;
       border-radius: 50%;
-      z-index: 30;
+      z-index: 20;
       animation: spin 0.8s linear infinite;
       display: none;
     }
-    #spinner.show { display: block; }
+    .spinner.show { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div id="player-wrap">
-    <div id="player-frame"><div id="player"></div></div>
-    <div id="thumb"></div>
-    <div id="spinner"></div>
+  <div id="wrap">
+    <div id="slotA" class="layer">
+      <div class="host"></div><div class="thumb hidden"></div><div class="spinner"></div>
+    </div>
+    <div id="slotB" class="layer">
+      <div class="host"></div><div class="thumb hidden"></div><div class="spinner"></div>
+    </div>
   </div>
-  <div id="preload-frame"><div id="preload-host"></div></div>
 
   <script>
     (function () {
       'use strict';
 
-      var gen = 0;                 // generation token: drops stale loads
-      var currentVideoId = null;   // videoId currently loaded in the player
-      var player = null;           // YT.Player instance (the visible reel)
-      var playerReady = false;     // onReady fired
-      var apiLoading = false;      // iframe_api script in flight
-      var apiCallbacks = [];       // callbacks waiting for the IFrame API
-      var preloadPlayer = null;    // hidden warm-up player for the NEXT reel
-      var preloadVideoId = null;   // videoId currently cued in preloadPlayer
+      var gen = 0;                 // global generation-ish; bumped on destroy
+      var apiLoading = false;
+      var apiCallbacks = [];
 
-      var thumbEl = document.getElementById('thumb');
-      var spinnerEl = document.getElementById('spinner');
+      function createSlot(name, layerEl) {
+        return {
+          name: name,
+          layerEl: layerEl,
+          hostEl: layerEl.querySelector('.host'),
+          thumbEl: layerEl.querySelector('.thumb'),
+          spinnerEl: layerEl.querySelector('.spinner'),
+          player: null,
+          index: -1,
+          videoId: null,
+          token: 0,
+        };
+      }
+
+      var SLOT_A = createSlot('A', document.getElementById('slotA'));
+      var SLOT_B = createSlot('B', document.getElementById('slotB'));
+      var activeSlot = SLOT_A;
+      var activeIndex = -1;
 
       // ---- bridge ----------------------------------------------------------
       function post(type, payload) {
@@ -107,95 +134,90 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         window.ReactNativeWebView.postMessage(JSON.stringify(msg));
       }
 
+      function activeVideoId() {
+        return activeSlot && activeSlot.videoId;
+      }
+
       function emit(event, extra) {
-        var p = { event: event, videoId: currentVideoId };
+        var p = { event: event, videoId: activeVideoId() };
         for (var k in (extra || {})) p[k] = extra[k];
         post('ytPlayerEvent', p);
       }
 
       // ---- thumbnail / spinner --------------------------------------------
-      function showThumb(url) {
-        if (url) thumbEl.style.backgroundImage = 'url("' + url.replace(/"/g, '') + '")';
-        thumbEl.classList.remove('hidden');
+      function showThumb(slot, url) {
+        if (url) slot.thumbEl.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
+        slot.thumbEl.classList.remove('hidden');
       }
+      function hideThumb(slot) { slot.thumbEl.classList.add('hidden'); }
+      function spinnerOn(slot) { slot.spinnerEl.classList.add('show'); }
+      function spinnerOff(slot) { slot.spinnerEl.classList.remove('show'); }
 
-      function hideThumb() {
-        thumbEl.classList.add('hidden');
+      // ---- layer positioning ------------------------------------------------
+      // Layer holding index k maps onto physical cell k: offset (k - activeIndex)*100vh.
+      function offsetVh(slot) {
+        if (slot.index < 0 || activeIndex < 0) return -9999;
+        return (slot.index - activeIndex) * 100;
+      }
+      function applyPositions() {
+        SLOT_A.layerEl.style.transform = 'translateY(' + offsetVh(SLOT_A) + 'vh)';
+        SLOT_B.layerEl.style.transform = 'translateY(' + offsetVh(SLOT_B) + 'vh)';
       }
 
       // ---- player wiring ----------------------------------------------------
-      // Autoplay must START muted (Android WebView blocks unmuted programmatic
-      // autoplay), but Chrome/YouTube allow unmuting a muted-autoplay video once
-      // playback has begun — so audio comes out normally on autoplay.
-      function unmutePlayback() {
-        if (!player) return;
-        try { player.unMute(); } catch (e) {}
-        try { player.setVolume(100); } catch (e) {}
-      }
-
-      // Muted start + retries: keep nudging until the player reports PLAYING.
-      function forcePlay() {
-        if (!player) return;
-        try { player.mute(); } catch (e) {}
-        try { player.playVideo(); } catch (e) {}
-        var attempts = 0;
-        var timer = setInterval(function () {
-          attempts++;
-          if (attempts >= 8) { clearInterval(timer); return; }
-          try {
-            var st = player.getPlayerState ? player.getPlayerState() : -1;
-            if (st === 1) { clearInterval(timer); return; } // PLAYING
-            player.mute();
-            player.playVideo();
-          } catch (e) { clearInterval(timer); }
-        }, 700);
-      }
-
-      function onPlayerReady() {
-        playerReady = true;
-        emit('ready');
-        forcePlay();
-      }
-
-      function onStateChange(event) {
-        var st = event && event.data;
-        if (st === 1) {           // PLAYING
-          hideThumb();
-          spinnerEl.classList.remove('show');
-          unmutePlayback();       // audio on while autoplaying (user requested)
+      function onStateChange(slot, st) {
+        if (slot !== activeSlot) {
+          // Buffer: just keep it buffering; hide its own thumbnail when it plays
+          // (no events to RN — RN tracks only the active layer).
+          if (st === 1) hideThumb(slot);
+          return;
+        }
+        if (st === 1) {                 // PLAYING
+          hideThumb(slot);
+          spinnerOff(slot);
+          unmuteIfAutoplayed(slot);
           emit('playing');
-        } else if (st === 2) {    // PAUSED
+        } else if (st === 2) {          // PAUSED
           emit('paused');
-        } else if (st === 3) {    // BUFFERING
-          spinnerEl.classList.add('show');
+        } else if (st === 3) {          // BUFFERING
+          spinnerOn(slot);
           emit('buffering');
-        } else if (st === 0) {    // ENDED -> loop
-          if (player) {
-            try { player.seekTo(0); player.playVideo(); } catch (e) {}
-          }
-        } else if (st === 5) {    // CUED
+        } else if (st === 0) {          // ENDED -> loop
+          if (slot.player) { try { slot.player.seekTo(0); slot.player.playVideo(); } catch (e) {} }
+        } else if (st === 5) {          // CUED
           emit('cued');
         }
       }
 
-      function onError(event) {
-        var code = event && event.data;
-        console.log('[YoutubeEmbed] error ' + code + ' for ' + currentVideoId);
-        spinnerEl.classList.remove('show');
-        post('ytPlayerError', { errorCode: code, videoId: currentVideoId });
+      function onError(slot, code) {
+        spinnerOff(slot);
+        if (slot === activeSlot) {
+          post('ytPlayerError', { errorCode: code, videoId: slot.videoId });
+        } else {
+          post('ytBufferError', { errorCode: code, videoId: slot.videoId });
+        }
       }
 
-      function buildPlayer(videoId) {
-        // YT.Player replaces its host element with an iframe, so create a fresh
-        // host each time to make re-creation after destroy safe.
-        var frame = document.getElementById('player-frame');
-        frame.innerHTML = '';
-        var host = document.createElement('div');
-        frame.appendChild(host);
+      // Autoplay must START muted (Android WebView blocks unmuted programmatic
+      // autoplay), but Chrome/YouTube allow unmuting once playback has begun.
+      function unmuteIfAutoplayed(slot) {
+        if (!slot.player) return;
+        try { slot.player.unMute(); } catch (e) {}
+        try { slot.player.setVolume(100); } catch (e) {}
+      }
 
-        player = new YT.Player(host, {
+      function forcePlay(slot) {
+        if (!slot.player) return;
+        try { slot.player.mute(); } catch (e) {}
+        try { slot.player.playVideo(); } catch (e) {}
+      }
+
+      function buildPlayer(slot) {
+        slot.hostEl.innerHTML = '';
+        var host = document.createElement('div');
+        slot.hostEl.appendChild(host);
+        slot.player = new YT.Player(host, {
           host: 'https://www.youtube-nocookie.com',
-          videoId: videoId,
           width: window.innerWidth,
           height: window.innerHeight,
           playerVars: {
@@ -212,19 +234,16 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
             widget_referrer: 'https://tojey.app/'
           },
           events: {
-            onReady: onPlayerReady,
-            onStateChange: onStateChange,
-            onError: onError
+            onReady: function () { forcePlay(slot); },
+            onStateChange: function (e) { onStateChange(slot, e && e.data); },
+            onError: function (e) { onError(slot, e && e.data); }
           }
         });
       }
 
       // ---- IFrame API bootstrap --------------------------------------------
       function ensureAPI(cb) {
-        if (window.YT && window.YT.Player) {
-          cb();
-          return;
-        }
+        if (window.YT && window.YT.Player) { cb(null); return; }
         apiCallbacks.push(cb);
         if (apiLoading) return;
         apiLoading = true;
@@ -243,95 +262,148 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         };
       }
 
-      // ---- public commands (called via injectJavaScript from RN) ------------
-      window.__loadVideo = function (videoId, thumbUrl) {
-        var myGen = ++gen;
-        currentVideoId = videoId;
-        spinnerEl.classList.remove('show');
-        showThumb(thumbUrl);          // thumbnail-first; stays until PLAYING
+      // ---- load a video into a slot (thumbnail-first, muted warm start) -----
+      function loadIntoSlot(slot, videoId, thumbUrl) {
+        if (!videoId) {                 // nothing to load: clear the slot
+          slot.index = -1;
+          slot.videoId = null;
+          hideThumb(slot);
+          spinnerOff(slot);
+          return;
+        }
+        var token = (slot.token = ++gen);
+        slot.videoId = videoId;
+        spinnerOff(slot);
+        showThumb(slot, thumbUrl);
 
         ensureAPI(function (err) {
           if (err) {
-            post('ytPlayerError', { errorCode: 'API_LOAD_FAILED', videoId: videoId });
+            if (slot === activeSlot) {
+              post('ytPlayerError', { errorCode: 'API_LOAD_FAILED', videoId: videoId });
+            } else {
+              post('ytBufferError', { errorCode: 'API_LOAD_FAILED', videoId: videoId });
+            }
             return;
           }
-          if (myGen !== gen || !currentVideoId) return; // superseded
-          if (player && player.loadVideoById) {
+          if (slot.token !== token) return;   // superseded
+          if (slot.player && slot.player.loadVideoById) {
             try {
-              player.loadVideoById({ videoId: videoId, startSeconds: 0 });
-              player.mute();
-              player.playVideo();
+              slot.player.loadVideoById({ videoId: videoId, startSeconds: 0 });
+              slot.player.mute();
+              slot.player.playVideo();        // warm: fetch + buffer media now
             } catch (e) {}
             return;
           }
-          buildPlayer(videoId);
-        });
-      };
-
-      window.__retryPlay = function () {
-        forcePlay();
-      };
-
-      // Preload the NEXT reel in the background so the swipe plays instantly.
-      // A SEPARATE hidden player warms the next video via cueVideoById() — never
-      // the visible one, because cueing stops whatever is currently playing.
-      // The hidden player has no state-change listeners, so it can't disturb the
-      // visible player's events or the RN-side current-video tracking.
-      function ensurePreloadPlayer() {
-        if (preloadPlayer) return;
-        if (!window.YT || !window.YT.Player) return;
-        var host = document.getElementById('preload-host');
-        preloadPlayer = new YT.Player(host, {
-          host: 'https://www.youtube-nocookie.com',
-          width: 1,
-          height: 1,
-          playerVars: {
-            autoplay: 0,
-            controls: 0,
-            modestbranding: 1,
-            rel: 0,
-            iv_load_policy: 3,
-            disablekb: 1,
-            fs: 0,
-            enablejsapi: 1,
-            widget_referrer: 'https://tojey.app/'
-          },
-          events: {
-            onError: function () { preloadPlayer = null; preloadVideoId = null; }
-          }
+          buildPlayer(slot);                  // onReady -> forcePlay (muted)
         });
       }
 
-      window.__cueVideo = function (videoId) {
-        var id = videoId ? String(videoId) : '';
-        if (!id) return;
-        if (preloadPlayer && preloadVideoId === id) return; // already warmed
-        ensurePreloadPlayer();
-        if (!preloadPlayer) return;
-        try {
-          preloadPlayer.cueVideoById({ videoId: id, startSeconds: 0 });
-          preloadVideoId = id;
-        } catch (e) {}
+      // ---- warm the off-screen layer with a neighbor ------------------------
+      function preloadAt(idx, videoId, thumbUrl) {
+        if (SLOT_A.index === idx && SLOT_B.index === idx) return; // weird; skip
+        var target = (activeSlot === SLOT_A) ? SLOT_B : SLOT_A;
+        if (target.index === idx && target.videoId === videoId) return; // already warmed
+        target.index = idx;
+        loadIntoSlot(target, videoId, thumbUrl);
+        applyPositions();
+      }
+
+      // ---- promote / activate a cell ----------------------------------------
+      function activateAt(idx, videoId, thumbUrl) {
+        var target = (SLOT_A.index === idx) ? SLOT_A : (SLOT_B.index === idx ? SLOT_B : null);
+        if (!target) {
+          // Missed warm (fast reverse scroll / buffer error) -> load here with qs spinner.
+          target = (activeSlot === SLOT_A) ? SLOT_B : SLOT_A;
+          target.index = idx;
+          loadIntoSlot(target, videoId, thumbUrl);
+        }
+        target.videoId = videoId;
+        activeIndex = idx;
+        activeSlot = target;
+        applyPositions();
+
+        var p = activeSlot.player;
+        var st = -1;
+        if (p) {
+          try { p.unMute(); p.setVolume(100); } catch (e) {}
+          try { p.playVideo(); } catch (e) {}
+          try { st = p.getPlayerState(); } catch (e) {}
+        }
+        if (st === 1) {           // already buffered/playing -> report instantly
+          hideThumb(activeSlot);
+          spinnerOff(activeSlot);
+          emit('playing');
+        } else if (st === 3) {
+          spinnerOn(activeSlot);
+          emit('buffering');
+        } else {
+          // Not started yet: retry a few times so a slow first load still plays.
+          var attempts = 0;
+          var timer = setInterval(function () {
+            attempts++;
+            if (activeSlot !== target || attempts >= 8) { clearInterval(timer); return; }
+            try {
+              var s = target.player.getPlayerState();
+              if (s === 1) { clearInterval(timer); return; }
+              target.player.mute();
+              target.player.playVideo();
+            } catch (e) { clearInterval(timer); }
+          }, 600);
+        }
+      }
+
+      // ---- RN commands -------------------------------------------------------
+      window.__prime = function (id0, thumb0, id1, thumb1) {
+        gen++;                       // cancel in-flight targets
+        activeIndex = 0;
+        SLOT_A.token = ++gen; SLOT_A.videoId = id0; SLOT_A.index = 0;
+        SLOT_B.token = ++gen; SLOT_B.videoId = id1; SLOT_B.index = 1;
+        activeSlot = SLOT_A;
+        loadIntoSlot(SLOT_A, id0, thumb0);
+        loadIntoSlot(SLOT_B, id1, thumb1);
+        applyPositions();
+        var p = SLOT_A.player;
+        if (p) { try { p.playVideo(); } catch (e) {} }
+      };
+
+      window.__activate = function (idx, videoId, thumbUrl) {
+        activateAt(idx, videoId, thumbUrl);
+      };
+
+      window.__preload = function (idx, videoId, thumbUrl) {
+        preloadAt(idx, videoId, thumbUrl);
+      };
+
+      window.__retryPlay = function () {
+        if (activeSlot && activeSlot.player) {
+          try { activeSlot.player.unMute(); activeSlot.player.playVideo(); } catch (e) {}
+        }
       };
 
       window.__play = function () {
-        if (player && player.playVideo) { try { player.unMute(); player.playVideo(); } catch (e) {} }
+        if (activeSlot && activeSlot.player) {
+          try { activeSlot.player.unMute(); activeSlot.player.playVideo(); } catch (e) {}
+        }
       };
 
       window.__pause = function () {
-        if (player && player.pauseVideo) { try { player.pauseVideo(); } catch (e) {} }
+        [SLOT_A, SLOT_B].forEach(function (slot) {
+          if (slot && slot.player) { try { slot.player.pauseVideo(); } catch (e) {} }
+        });
       };
 
       window.__destroy = function () {
-        gen++;                       // invalidate anything in flight
-        spinnerEl.classList.remove('show');
-        try { if (player && player.destroy) player.destroy(); } catch (e) {}
-        player = null;
-        playerReady = false;
-        currentVideoId = null;
-        try { if (preloadPlayer && preloadPlayer.destroy) preloadPlayer.destroy(); } catch (e) {}
-        preloadPlayer = null;
-        preloadVideoId = null;
+        gen++;
+        [SLOT_A, SLOT_B].forEach(function (slot) {
+          try { if (slot.player && slot.player.destroy) slot.player.destroy(); } catch (e) {}
+          slot.player = null;
+          slot.index = -1;
+          slot.videoId = null;
+          slot.token = ++gen;
+          spinnerOff(slot);
+        });
+        activeSlot = SLOT_A;
+        activeIndex = -1;
       };
     })();
   </script>

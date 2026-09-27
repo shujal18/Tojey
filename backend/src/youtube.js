@@ -33,6 +33,9 @@ const refreshLocks = new Map();
 
 const reelsMemoryCache = new Map();
 
+const reelsPageCache = new Map();
+const REELS_PAGE_CACHE_TTL_MS = 30 * 60 * 1000;
+
 const failedVideoMemory = new Map();
 const FAILED_VIDEO_TTL_MS = 30 * 60 * 1000;
 
@@ -193,10 +196,11 @@ function getCacheEntry(category) {
   return reelsMemoryCache.get(category);
 }
 
-function setCacheEntry(category, videos) {
+function setCacheEntry(category, videos, nextPageToken) {
   const now = Date.now();
   reelsMemoryCache.set(category, {
     items: videos,
+    nextPageToken: nextPageToken || null,
     fetchedAt: now,
     expiresAt: now + CACHE_TTL_MS,
     staleAt: now + STALE_WHILE_REVALIDATE_MS,
@@ -205,6 +209,31 @@ function setCacheEntry(category, videos) {
   if (reelsMemoryCache.size > 50) {
     const oldestKey = reelsMemoryCache.keys().next().value;
     if (oldestKey) reelsMemoryCache.delete(oldestKey);
+  }
+}
+
+function getPageCacheEntry(category, pageToken) {
+  const key = `${category}:${pageToken}`;
+  const entry = reelsPageCache.get(key);
+  if (!entry) return null;
+  const now = Date.now();
+  if (now - entry.fetchedAt > REELS_PAGE_CACHE_TTL_MS) {
+    reelsPageCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function setPageCacheEntry(category, pageToken, videos, nextPageToken, hasMore) {
+  reelsPageCache.set(`${category}:${pageToken}`, {
+    videos,
+    nextPageToken: nextPageToken || null,
+    hasMore,
+    fetchedAt: Date.now(),
+  });
+  if (reelsPageCache.size > 200) {
+    const oldestKey = reelsPageCache.keys().next().value;
+    if (oldestKey) reelsPageCache.delete(oldestKey);
   }
 }
 
@@ -300,10 +329,11 @@ async function fetchCategoryVideos(category, pageToken = null) {
     }
 
     const result = allVideos.slice(0, BATCH_SIZE);
+    const token = allVideos.length >= BATCH_SIZE && data.nextPageToken ? data.nextPageToken : null;
     return {
       videos: result,
-      nextPageToken: allVideos.length >= BATCH_SIZE ? data.nextPageToken || 'continue' : null,
-      hasMore: allVideos.length >= BATCH_SIZE,
+      nextPageToken: token,
+      hasMore: !!token,
     };
   } catch (error) {
     if (error.message.startsWith('QUOTA_')) {
@@ -330,6 +360,22 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
     }
   }
 
+  // Cursor pages: serve from a short-lived per-page cache so repeated advances
+  // (re-entry from the same saved cursor) don't burn YouTube quota.
+  if (!forceRefresh && pageToken) {
+    const pageCached = getPageCacheEntry(category, pageToken);
+    if (pageCached) {
+      console.log(`[Reels] Serving page cache for ${category} (pageToken: ${pageToken}, ${pageCached.videos.length} videos)`);
+      return {
+        videos: pageCached.videos,
+        cached: true,
+        nextPageToken: pageCached.nextPageToken,
+        hasMore: pageCached.hasMore,
+        source: 'page_cache',
+      };
+    }
+  }
+
   if (!forceRefresh) {
     const cached = getCacheEntry(category);
     if (cached) {
@@ -340,8 +386,8 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
         return { 
           videos: cached.items, 
           cached: true, 
-          nextPageToken: null, 
-          hasMore: false,
+          nextPageToken: cached.nextPageToken || null, 
+          hasMore: !!cached.nextPageToken,
           source: 'cache',
           cacheAge: age,
         };
@@ -352,8 +398,8 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
         return { 
           videos: cached.items, 
           cached: true, 
-          nextPageToken: null, 
-          hasMore: false,
+          nextPageToken: cached.nextPageToken || null, 
+          hasMore: !!cached.nextPageToken,
           source: 'stale_cache',
           cacheAge: age,
           stale: true,
@@ -369,8 +415,8 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
       return { 
         videos: cached.items, 
         cached: true, 
-        nextPageToken: null, 
-        hasMore: false,
+        nextPageToken: cached.nextPageToken || null, 
+        hasMore: !!cached.nextPageToken,
         source: 'cache_quota_fallback',
         warning: 'YouTube quota exceeded - showing cached results',
       };
@@ -389,9 +435,11 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
     try {
       console.log(`[Reels] Fetching fresh YouTube data for ${category} (forceRefresh=${forceRefresh}, pageToken=${pageToken})`);
       const result = await fetchCategoryVideos(category, pageToken);
-      // Only cache the initial page (no pageToken)
+      // Only cache the initial page (no pageToken); cursor pages get a short TTL page cache.
       if (!pageToken) {
-        setCacheEntry(category, result.videos);
+        setCacheEntry(category, result.videos, result.nextPageToken);
+      } else if (result.videos.length > 0) {
+        setPageCacheEntry(category, pageToken, result.videos, result.nextPageToken, result.hasMore);
       }
       return { 
         videos: result.videos, 
@@ -446,7 +494,7 @@ function refreshCategoryInBackground(category) {
       console.log(`[Reels] Background refresh for ${category}`);
       const result = await fetchCategoryVideos(category);
       if (result.videos.length > 0) {
-        setCacheEntry(category, result.videos);
+        setCacheEntry(category, result.videos, result.nextPageToken);
         console.log(`[Reels] Background refresh completed for ${category}: ${result.videos.length} videos`);
       }
     } catch (error) {
@@ -478,6 +526,7 @@ function getQuotaStatus() {
 
 function clearMemoryCache() {
   reelsMemoryCache.clear();
+  reelsPageCache.clear();
   failedVideoMemory.clear();
   refreshLocks.clear();
   console.log('[Reels] Memory cache cleared');
