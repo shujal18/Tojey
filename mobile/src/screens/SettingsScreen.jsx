@@ -16,6 +16,10 @@ import {
   canDrawOverlay, openOverlaySettings,
   getNudgeVibrationEnabled, setNudgeVibrationEnabled,
 } from '../services/chatHead';
+import {
+  supportsKeepAlive, getKeepAliveEnabled, setKeepAliveEnabled,
+  startKeepAlive, stopKeepAlive,
+} from '../services/keepAlive';
 
 export default function SettingsScreen({ user, token, onBack, onLogout, setUser, appLockEnabled, appLockPIN, onAppLockChange, onOpenBatteryGuide }) {
   const { theme, mode, setMode, chatColorId, setChatColor } = useTheme();
@@ -26,18 +30,30 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [chatHead, setChatHead] = useState(false);
   const [chatHeadPending, setChatHeadPending] = useState(false);
   const [nudgeVib, setNudgeVib] = useState(true);
+  const [keepAlive, setKeepAlive] = useState(true);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [ch, nv] = await Promise.all([getChatHeadEnabled(), getNudgeVibrationEnabled()]);
+      const [ch, nv, ka] = await Promise.all([
+        getChatHeadEnabled(),
+        getNudgeVibrationEnabled(),
+        supportsKeepAlive() ? getKeepAliveEnabled() : Promise.resolve(false),
+      ]);
       if (mounted) {
         setChatHead(ch);
         setNudgeVib(nv);
+        setKeepAlive(ka);
       }
     })();
     return () => { mounted = false; };
   }, []);
+
+  const toggleKeepAlive = async (enabled) => {
+    setKeepAlive(enabled);
+    await setKeepAliveEnabled(enabled);
+    if (enabled) startKeepAlive(); else stopKeepAlive();
+  };
 
   // If the user toggled Chat Head on before granting "Display over other apps",
   // watch for the app to come back from the system overlay settings screen and
@@ -350,6 +366,15 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </Text>
       </Section>
 
+      <Section title="Connection" theme={theme}>
+        <SettingRow label="Instant delivery" icon="flash-outline" theme={theme}>
+          <Switch value={keepAlive} onValueChange={toggleKeepAlive} trackColor={{ true: theme.primary }} />
+        </SettingRow>
+        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+          Keeps Tojey running in the background with a silent "Notifications active" status so messages arrive the moment they are sent on every phone. Turn off to rely on push notifications only.
+        </Text>
+      </Section>
+
       <Section title="App Lock" theme={theme}>
         <SettingRow label="App Lock" icon="lock-closed-outline" theme={theme}>
           <Switch
@@ -403,7 +428,7 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         <Text style={[styles.logoutText, { color: theme.danger }]}>Log Out</Text>
       </TouchableOpacity>
 
-      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.16.0</Text>
+      <Text style={[styles.footer, { color: theme.textSecondary }]}>Tojey · Private Chat · v1.17.0</Text>
     </ScrollView>
   );
 }

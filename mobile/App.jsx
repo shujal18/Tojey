@@ -15,6 +15,9 @@ import ChatRoomScreen from './src/screens/ChatRoomScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import BatteryGuideScreen from './src/screens/BatteryGuideScreen';
 import { isAggressiveOem } from './src/services/battery';
+import {
+  supportsKeepAlive, getKeepAliveEnabled, startKeepAlive, stopKeepAlive, isKeepAliveActive,
+} from './src/services/keepAlive';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import {
@@ -111,16 +114,28 @@ function Shell() {
     }
   };
 
+  // Foreground keep-alive service: on by default after login on supported builds so
+  // the process survives backgrounding and messages deliver instantly over the socket
+  // on every device/OEM (FCM stays the backstop). Off when the user disables it.
+  const maybeStartKeepAlive = async () => {
+    try {
+      if (!supportsKeepAlive()) return;
+      if (await getKeepAliveEnabled()) startKeepAlive();
+    } catch (e) {}
+  };
+
   const handleLogin = (user, token) => {
     setSession({ user, token });
     setSocket(connect(token));
     startPush(token).catch(() => {});
+    maybeStartKeepAlive().catch(() => {});
   };
 
   const handleLogout = async () => {
     await logout();
     disconnect();
     stopPush();
+    stopKeepAlive();
     try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
     setSession(null);
     setSocket(null);
@@ -140,6 +155,7 @@ function Shell() {
         if (s) {
           setSocket(connect(s.token));
           startPush(s.token).catch(() => {});
+          maybeStartKeepAlive().catch(() => {});
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
@@ -180,11 +196,14 @@ function Shell() {
       const s = getSocket();
       if (!s) return;
       const active = AppState.currentState === 'active';
-      Promise.all([getDeviceId(), nextDeviceSeq()])
-        .then(([deviceId, seq]) => {
+      // When backgrounded on a keep-alive device, the server routes over the socket
+      // (client renders the popup locally - instant on any OEM) instead of FCM.
+      const keepAlive = active ? false : isKeepAliveActive();
+      Promise.all([getDeviceId(), nextDeviceSeq(), keepAlive])
+        .then(([deviceId, seq, ka]) => {
           const so = getSocket();
           if (!so || !so.connected) return;
-          so.emit(active ? 'app:foreground' : 'app:background', { deviceId, seq });
+          so.emit(active ? 'app:foreground' : 'app:background', { deviceId, seq, keepAlive: active ? undefined : ka });
         })
         .catch(() => {});
     };
@@ -264,21 +283,46 @@ function Shell() {
   useEffect(() => {
     if (!socket || !session) return undefined;
     const ownId = session.user && session.user.id;
-    const onMsg = ({ message, sender, conversationId }) => {
+    const onMsg = async ({ message, sender, conversationId }) => {
       if (!message || !sender || !sender.userId) return;
       if (String(sender.userId) === String(ownId)) return;
-      if (activeChat && String(activeChat.id) === String(sender.userId)) return; // already on screen
-      getNotifPrefs().then((prefs) => {
-        if (!prefs.enabled) return;
-        setIncomingBanner({
-          key: `${message.id || Date.now()}`,
+      // In the foreground and already viewing this chat: the UI shows the message.
+      // Anywhere else render a system popup - via this local path only on keep-alive
+      // devices (the server routes over the socket there, so GMS/FCM is not used).
+      if (
+        AppState.currentState === 'active' &&
+        activeChat && String(activeChat.id) === String(sender.userId)
+      ) return;
+      const prefs = await getNotifPrefs().catch(() => null);
+      if (!prefs || !prefs.enabled) return;
+      const preview = messagePreviewText(message).slice(0, 90);
+      if (AppState.currentState !== 'active') {
+        // Not keep-alive -> the server sent an FCM popup (GMS renders it). Rendering
+        // here too would double-notify, so only render when the keep-alive service is
+        // actually running underneath this process.
+        const ka = await isKeepAliveActive().catch(() => false);
+        if (!ka) return;
+        showSystemNotification({
+          type: 'tojey_chat',
+          notificationId: message.id,
           senderId: sender.userId,
+          senderUsername: sender.username || '',
           senderName: sender.displayName || sender.username || 'Tojey',
-          senderPic: sender.profilePic || '',
+          receiverId: ownId,
           conversationId,
-          preview: messagePreviewText(message).slice(0, 90),
+          message: preview,
+          title: sender.displayName || sender.username || 'Tojey',
         });
-      }).catch(() => {});
+        return;
+      }
+      setIncomingBanner({
+        key: `${message.id || Date.now()}`,
+        senderId: sender.userId,
+        senderName: sender.displayName || sender.username || 'Tojey',
+        senderPic: sender.profilePic || '',
+        conversationId,
+        preview,
+      });
     };
     socket.on('message:receive', onMsg);
     return () => socket.off('message:receive', onMsg);

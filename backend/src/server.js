@@ -690,6 +690,9 @@ function deviceIsForeground(deviceId) {
 // Record a device's foreground/background report with out-of-order protection.
 // Each device sends a monotonic seq (persisted across app restarts) so a stale
 // duplicate (reconnect echo, two processes) can never downgrade a newer report.
+// A background report may carry `keepAlive: true` - the device's foreground
+// keep-alive service is running, so the socket stays connected and the CLIENT
+// renders popups locally; the server then skips FCM for it.
 function setDeviceState(deviceId, state, meta) {
   if (!deviceId || typeof deviceId !== 'string') return;
   const now = Date.now();
@@ -702,7 +705,20 @@ function setDeviceState(deviceId, state, meta) {
     if (seq >= 0 && cur.seq >= 0 && seq <= cur.seq) return; // duplicate / out-of-order
     if (seq < 0 && now <= cur.ts) return;                   // legacy client, ts fallback
   }
-  deviceStateMap.set(deviceId, { state, seq, ts: now });
+  const keepAlive = state === 'background' && !!(meta && meta.keepAlive);
+  deviceStateMap.set(deviceId, { state, seq, ts: now, keepAlive });
+}
+
+// A device with a live foreground keep-alive service: backgrounded but still connected,
+// so the client renders message popups locally over the socket. Treat it like foreground
+// for FCM purposes - sending a GMS popup too would double-notify.
+function deviceHasKeepAlive(deviceId) {
+  if (!deviceId || typeof deviceId !== 'string') return false;
+  const sockets = deviceSockets.get(deviceId);
+  if (!sockets || sockets.size === 0) return false;
+  const st = deviceStateMap.get(deviceId);
+  if (!st || st.state !== 'background' || !st.keepAlive) return false;
+  return true;
 }
 
 function addDeviceSocket(socketId, deviceId) {
@@ -760,11 +776,13 @@ function removeSocket(userId, socketId) {
 function tokensNeedingFcm(rows, userId, legacyHasSocket) {
   const tokens = [];
   let phoneForeground = 0;
+  let keepAliveSkip = 0;
   let legacySkip = 0;
   for (const r of rows) {
     if (!r || !r.fcm_token) continue;
     if (r.device_id) {
       if (deviceIsForeground(r.device_id)) { phoneForeground += 1; continue; }
+      if (deviceHasKeepAlive(r.device_id)) { keepAliveSkip += 1; continue; }
       tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     } else {
       // Legacy rows: keep the old behavior - skip FCM only when the whole user is
@@ -773,7 +791,7 @@ function tokensNeedingFcm(rows, userId, legacyHasSocket) {
       tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     }
   }
-  return { tokens, phoneForeground, legacySkip };
+  return { tokens, phoneForeground, keepAliveSkip, legacySkip };
 }
 
 // Short human-readable preview for a chat message push (media/call/system friendly).
