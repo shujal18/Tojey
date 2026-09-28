@@ -1,29 +1,24 @@
 /**
- * Double-buffered YouTube embed player for the Reels screen.
+ * Double-buffered direct-stream player for the Reels screen.
  *
- * One WebView hosts TWO full-screen layers (A / B). While reel N plays in the
- * visible layer, the other layer sits one viewport off-screen and has ALREADY
- * loadVideoById'd + started muted playback of reel N+1 (or N-1 on up-swipes),
- * so the media is actually buffered. Swiping to the next cell just promotes
- * the already-playing layer -> near-zero-delay transitions with no
- * thumbnail/black flash between reels.
+ * YouTube web embeds get throttled/gated when several devices behind one IP open
+ * the same app at once ("second device just loads"). Instead of `youtube.com/embed`
+ * iframe sessions, each reel is played from DIRECT signed stream URLs resolved by
+ * our backend (yt-dlp) and pushed in by React Native via window.__setStream:
+ * the layer holds a silent full-screen <video> (video-only mp4) plus a matched
+ * <audio> (m4a) element, synced every few seconds. No anonymous embed session
+ * exists, so multiple devices can stream at the same time and every device plays.
  *
- * React Native drives it through injectJavaScript:
- *   window.__prime(id0, thumb0, id1, thumb1)  first reel visible + next warming
- *   window.__activate(idx, id, thumb)         settle on a cell (promotes buffer)
- *   window.__preload(idx, id, thumb)          warm the off-screen layer
- *   window.__play / __pause / __destroy
+ * The RN <-> WebView contract is otherwise identical to the old embed engine:
+ *   window.__prime(id0, t0, id1, t1)      first reel visible + next warming
+ *   window.__setStream(idx, id, v, a)     attach direct video/audio URLs to a slot
+ *   window.__activate(idx, id, thumb)     settle on a cell (promote buffered layer)
+ *   window.__preload(idx, id, thumb)      warm the off-screen layer
+ *   window.__play / __pause / __destroy / __setMuted
  *
- * Layer positioning: a layer holding video k is translated to
- * (k - activeIndex) * 100vh inside the WebView, so it always maps exactly onto
- * physical cell k regardless of where the WebView overlay currently sits.
- *
- * Events bridge via window.ReactNativeWebView.postMessage — the only reliable
- * RN->WebView->RN channel. The ACTIVE layer reports state (playing/paused/
- * buffering) + errors; the off-screen buffer reports errors as ytBufferError.
- *
- * Race protection: every load carries a per-slot generation token; late
- * resolves (slow API bootstrap/network) drop if a newer target superseded them.
+ * State events (playing/paused/buffering/ready/cued) and errors travel over
+ * window.ReactNativeWebView.postMessage exactly as before; the RN watchdog needs
+ * no changes.
  */
 
 export const REELS_PLAYER_HTML = `<!DOCTYPE html>
@@ -63,6 +58,17 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       width: 100%;
       height: 100%;
     }
+    video, audio {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      -webkit-user-select: none;
+      user-select: none;
+      pointer-events: none;
+    }
+    audio { width: 0; height: 0; }
     .layer .thumb {
       position: absolute;
       top: 0; left: 0;
@@ -103,9 +109,8 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
     (function () {
       'use strict';
 
-      var gen = 0;                 // global generation-ish; bumped on destroy
-      var apiLoading = false;
-      var apiCallbacks = [];
+      var gen = 0;                 // generation token bumped on every (re)load
+      var wantedMuted = false;     // user choice; warm start is always silent
 
       function createSlot(name, layerEl) {
         return {
@@ -114,11 +119,16 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
           hostEl: layerEl.querySelector('.host'),
           thumbEl: layerEl.querySelector('.thumb'),
           spinnerEl: layerEl.querySelector('.spinner'),
-          player: null,
+          videoEl: null,
+          audioEl: null,
           index: -1,
           videoId: null,
           token: 0,
+          streamSet: false,
           watchdog: null,
+          streamWatch: null,
+          syncTimer: null,
+          loopPending: false,
         };
       }
 
@@ -126,8 +136,6 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       var SLOT_B = createSlot('B', document.getElementById('slotB'));
       var activeSlot = SLOT_A;
       var activeIndex = -1;
-      var wantedMuted = false;   // user choice; warm-start is always muted, sound
-                                 // is restored after the first frame unless toggled
 
       // ---- bridge ----------------------------------------------------------
       function post(type, payload) {
@@ -156,24 +164,60 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       function spinnerOn(slot) { slot.spinnerEl.classList.add('show'); }
       function spinnerOff(slot) { slot.spinnerEl.classList.remove('show'); }
 
+      // ---- volume ------------------------------------------------------------
+      function applyVolume(slot) {
+        if (slot.audioEl) {
+          try { slot.audioEl.volume = wantedMuted ? 0 : 1; } catch (e) {}
+        }
+      }
+
       // ---- dead-load watchdog ----------------------------------------------
-      // If a slot never reaches PLAYING within the timeout it is almost always an
-      // embed that buffers forever (region/age-restricted, or a broken URL).
-      // Report it so RN jumps PAST it instead of leaving a static thumbnail up.
+      // Fires only once a stream is attached (or the stream-waiting window is up),
+      // and reports a BUFFER_TIMEOUT so RN jumps PAST a video that never plays
+      // instead of parking on a static thumbnail.
       var WATCH_TICK = 1500;   // ms
-      var WATCH_MAX = 6;       // ticks -> ~9s worst case
+      var WATCH_MAX = 6;       // buffering ticks -> ~9s worst case
+      var STREAM_WAIT_MAX = 26; // ticks (~39s) waiting for __setStream before failing
+
+      function slotDeadByWatch(slot) {
+        var v = slot.videoEl;
+        if (!slot.streamSet || !v) return false; // still waiting for a URL
+        if (v.error) return false;               // error path handles directly
+        if (v.paused) return false;              // intentionally paused by user
+        // Playing = alive; stalled-forever-with-process = dead.
+        if (v.readyState >= 3 && v.currentTime > 0) return false;
+        return true;
+      }
+
       function stopWatchdog(slot) {
         if (slot.watchdog) { clearInterval(slot.watchdog); slot.watchdog = null; }
+        if (slot.streamWatch) { clearInterval(slot.streamWatch); slot.streamWatch = null; }
       }
-      function startWatchdog(slot) {
-        if (slot.watchdog) return;
+
+      function startBehaviorWatch(slot) {
+        if (!slot.watchdog && slot.streamSet && slot.videoEl) {
+          var ticks = 0;
+          slot.watchdog = setInterval(function () {
+            ticks++;
+            if (!slotDeadByWatch(slot)) { stopWatchdog(slot); return; }
+            if (ticks < WATCH_MAX) return;
+            stopWatchdog(slot);
+            if (slot === activeSlot) {
+              post('ytPlayerError', { errorCode: 'BUFFER_TIMEOUT', videoId: slot.videoId });
+            } else {
+              post('ytBufferError', { errorCode: 'BUFFER_TIMEOUT', videoId: slot.videoId });
+            }
+          }, WATCH_TICK);
+        }
+      }
+
+      function startStreamWaitWatch(slot) {
+        if (slot.streamWatch || slot.streamSet) return;
         var ticks = 0;
-        slot.watchdog = setInterval(function () {
+        slot.streamWatch = setInterval(function () {
           ticks++;
-          var s = -1;
-          if (slot.player) { try { s = slot.player.getPlayerState(); } catch (e) {} }
-          if (s === 1 || s === 2 || s === 0) { stopWatchdog(slot); return; } // fine
-          if (ticks < WATCH_MAX) return;
+          if (slot.streamSet || slot.token !== slot.genRef) { stopWatchdog(slot); return; }
+          if (ticks < STREAM_WAIT_MAX) return;
           stopWatchdog(slot);
           if (slot === activeSlot) {
             post('ytPlayerError', { errorCode: 'BUFFER_TIMEOUT', videoId: slot.videoId });
@@ -183,8 +227,29 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         }, WATCH_TICK);
       }
 
+      // Sync the audio element to the video once drift grows past a sub-second
+      // bound (audio-only + video-only files start on slightly different clocks).
+      function startSync(slot) {
+        stopSync(slot);
+        if (!slot.videoEl || !slot.audioEl) return;
+        slot.syncTimer = setInterval(function () {
+          if (slot !== activeSlot) return;
+          var v = slot.videoEl, a = slot.audioEl;
+          if (!v || !a || v.paused || a.paused || v.error || a.error) return;
+          try {
+            var vt = v.audioElement ? v.currentTime : v.currentTime;
+            var at = a.currentTime;
+            if (isFinite(vt) && isFinite(at) && Math.abs(vt - at) > 0.45) {
+              a.currentTime = vt;
+            }
+          } catch (e) {}
+        }, 8000);
+      }
+      function stopSync(slot) {
+        if (slot.syncTimer) { clearInterval(slot.syncTimer); slot.syncTimer = null; }
+      }
+
       // ---- layer positioning ------------------------------------------------
-      // Layer holding index k maps onto physical cell k: offset (k - activeIndex)*100vh.
       function offsetVh(slot) {
         if (slot.index < 0 || activeIndex < 0) return -9999;
         return (slot.index - activeIndex) * 100;
@@ -194,167 +259,148 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         SLOT_B.layerEl.style.transform = 'translateY(' + offsetVh(SLOT_B) + 'vh)';
       }
 
-      // ---- player wiring ----------------------------------------------------
-      function onStateChange(slot, st) {
-        if (slot !== activeSlot) {
-          // Buffer: just keep it buffering; hide its own thumbnail as soon as
-          // media starts arriving (no events to RN — RN tracks only the active
-          // layer). A buffer stuck forever is reported via the watchdog.
-          if (st === 1) { hideThumb(slot); spinnerOff(slot); stopWatchdog(slot); }
-          else if (st === 3) { hideThumb(slot); spinnerOn(slot); startWatchdog(slot); }
-          else if (st === 5) { startWatchdog(slot); }
-          return;
-        }
-        if (st === 1) {                 // PLAYING
-          hideThumb(slot);
-          spinnerOff(slot);
-          stopWatchdog(slot);
-          unmuteIfAutoplayed(slot);
-          emit('playing');
-        } else if (st === 2) {          // PAUSED
-          stopWatchdog(slot);
-          emit('paused');
-        } else if (st === 3) {          // BUFFERING
-          hideThumb(slot);
-          spinnerOn(slot);
-          startWatchdog(slot);
-          emit('buffering');
-        } else if (st === 0) {          // ENDED -> loop
-          if (slot.player) { try { slot.player.seekTo(0); slot.player.playVideo(); } catch (e) {} }
-        } else if (st === 5) {          // CUED
-          startWatchdog(slot);
-          emit('cued');
+      // ---- element players ----------------------------------------------------
+      function playPair(slot) {
+        if (!slot.videoEl) return;
+        try { var vp = slot.videoEl.play(); if (vp && vp.catch) vp.catch(function () {}); } catch (e) {}
+        if (slot.audioEl) {
+          try { var ap = slot.audioEl.play(); if (ap && ap.catch) ap.catch(function () {}); } catch (e) {}
         }
       }
 
-      function onError(slot, code) {
+      function pausePair(slot) {
+        if (slot.videoEl) { try { slot.videoEl.pause(); } catch (e) {} }
+        if (slot.audioEl) { try { slot.audioEl.pause(); } catch (e) {} }
+      }
+
+      function onPlaying(slot) {
+        hideThumb(slot);
         spinnerOff(slot);
         stopWatchdog(slot);
-        if (slot === activeSlot) {
-          post('ytPlayerError', { errorCode: code, videoId: slot.videoId });
-        } else {
-          post('ytBufferError', { errorCode: code, videoId: slot.videoId });
-        }
+        applyVolume(slot);
+        startSync(slot);
+        if (slot === activeSlot) emit('playing');
       }
 
-      // Autoplay must START muted (Android WebView blocks unmuted programmatic
-      // autoplay), but Chrome/YouTube allow unmuting once playback has begun.
-      function unmuteIfAutoplayed(slot) {
-        if (!slot.player) return;
-        if (wantedMuted) {
-          try { slot.player.mute(); } catch (e) {}
+      function onBuffering(slot) {
+        if (slot !== activeSlot) return;
+        hideThumb(slot);
+        spinnerOn(slot);
+        startBehaviorWatch(slot);
+        emit('buffering');
+      }
+
+      function onLooped(slot) {
+        if (slot.loopPending) return;
+        slot.loopPending = true;
+        var endOT = setTimeout(function () { slot.loopPending = false; }, 1500);
+        if (slot.videoEl) { try { slot.videoEl.currentTime = 0; } catch (e) {} }
+        if (slot.audioEl) { try { slot.audioEl.currentTime = 0; } catch (e) {} }
+        playPair(slot);
+        endOT; // keep loop from stacking
+      }
+
+      function onMediaError(slot, fromAudio) {
+        stopWatchdog(slot);
+        stopSync(slot);
+        spinnerOff(slot);
+        if (fromAudio && slot.videoEl) {
+          // Audio failed: keep playing the silent video rather than killing it.
+          try { slot.videoEl.play(); } catch (e) {}
           return;
         }
-        try { slot.player.unMute(); } catch (e) {}
-        try { slot.player.setVolume(100); } catch (e) {}
+        if (slot === activeSlot) {
+          post('ytPlayerError', { errorCode: 'STREAM_ERROR', videoId: slot.videoId });
+        } else {
+          post('ytBufferError', { errorCode: 'STREAM_ERROR', videoId: slot.videoId });
+        }
       }
 
-      window.__setMuted = function (m) {
-        wantedMuted = !!m;
-        [SLOT_A, SLOT_B].forEach(function (slot) {
-          if (!slot.player) return;
-          try {
-            if (wantedMuted) { slot.player.mute(); } else { slot.player.unMute(); slot.player.setVolume(100); }
-          } catch (e) {}
-        });
-      };
-
-      function forcePlay(slot) {
-        if (!slot.player) return;
-        try { slot.player.mute(); } catch (e) {}
-        try { slot.player.playVideo(); } catch (e) {}
-      }
-
-      function buildPlayer(slot) {
+      function buildMedia(slot, videoUrl, audioUrl) {
         slot.hostEl.innerHTML = '';
-        var host = document.createElement('div');
-        slot.hostEl.appendChild(host);
-        var myToken = slot.token;
-        slot.player = new YT.Player(host, {
-          host: 'https://www.youtube-nocookie.com',
-          width: window.innerWidth,
-          height: window.innerHeight,
-          playerVars: {
-            autoplay: 1,
-            mute: 1,
-            playsinline: 1,
-            controls: 0,
-            modestbranding: 1,
-            rel: 0,
-            iv_load_policy: 3,
-            disablekb: 1,
-            fs: 0,
-            enablejsapi: 1,
-            widget_referrer: 'https://tojey.app/'
-          },
-          events: {
-            onReady: function () {
-              if (slot.token === myToken) { forcePlay(slot); startWatchdog(slot); }
-            },
-            onStateChange: function (e) { onStateChange(slot, e && e.data); },
-            onError: function (e) { onError(slot, e && e.data); }
-          }
-        });
+        var video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('playsinline', '');
+        video.setAttribute('webkit-playsinline', '');
+        video.preload = 'auto';
+        video.src = videoUrl;
+        slot.hostEl.appendChild(video);
+        slot.videoEl = video;
+
+        var audio = null;
+        if (audioUrl) {
+          audio = document.createElement('audio');
+          audio.volume = 0;
+          audio.preload = 'auto';
+          audio.src = audioUrl;
+          slot.hostEl.appendChild(audio);
+          slot.audioEl = audio;
+        } else {
+          slot.audioEl = null;
+        }
+
+        video.addEventListener('playing', function () { onPlaying(slot); });
+        video.addEventListener('waiting', function () { onBuffering(slot); });
+        video.addEventListener('canplay', function () { if (slot === activeSlot) { spinnerOff(slot); } });
+        video.addEventListener('ended', function () { onLooped(slot); });
+        video.addEventListener('error', function () { onMediaError(slot, false); });
+        video.addEventListener('stalled', function () { startBehaviorWatch(slot); });
+        if (audio) {
+          audio.addEventListener('error', function () { onMediaError(slot, true); });
+        }
       }
 
-      // ---- IFrame API bootstrap --------------------------------------------
-      function ensureAPI(cb) {
-        if (window.YT && window.YT.Player) { cb(null); return; }
-        apiCallbacks.push(cb);
-        if (apiLoading) return;
-        apiLoading = true;
-        var tag = document.createElement('script');
-        tag.src = 'https://www.youtube.com/iframe_api';
-        tag.onerror = function () {
-          apiLoading = false;
-          var list = apiCallbacks.splice(0);
-          list.forEach(function (c) { c(new Error('youtube_iframe_api_load_failed')); });
-        };
-        document.head.appendChild(tag);
-        window.onYouTubeIframeAPIReady = function () {
-          apiLoading = false;
-          var list = apiCallbacks.splice(0);
-          list.forEach(function (c) { c(null); });
-        };
-      }
-
-      // ---- load a video into a slot (thumbnail-first, muted warm start) -----
+      // ---- load a video into a slot (thumbnail-first, stream attached later) --
       function loadIntoSlot(slot, videoId, thumbUrl) {
-        if (!videoId) {                 // nothing to load: clear the slot
+        if (!videoId) {
           slot.index = -1;
           slot.videoId = null;
+          slot.streamSet = false;
           hideThumb(slot);
           spinnerOff(slot);
+          stopWatchdog(slot);
+          stopSync(slot);
+          slot.hostEl.innerHTML = '';
+          slot.videoEl = null;
+          slot.audioEl = null;
           return;
         }
         var token = (slot.token = ++gen);
+        slot.genRef = token;
         slot.videoId = videoId;
+        slot.streamSet = false;
+        slot.loopPending = false;
         spinnerOff(slot);
         stopWatchdog(slot);
+        stopSync(slot);
+        slot.hostEl.innerHTML = '';
+        slot.videoEl = null;
+        slot.audioEl = null;
         showThumb(slot, thumbUrl);
-
-        ensureAPI(function (err) {
-          if (err) {
-            if (slot === activeSlot) {
-              post('ytPlayerError', { errorCode: 'API_LOAD_FAILED', videoId: videoId });
-            } else {
-              post('ytBufferError', { errorCode: 'API_LOAD_FAILED', videoId: videoId });
-            }
-            return;
-          }
-          if (slot.token !== token) return;   // superseded
-          if (slot.player && slot.player.loadVideoById) {
-            try {
-              slot.player.loadVideoById({ videoId: videoId, startSeconds: 0 });
-              slot.player.mute();
-              slot.player.playVideo();        // warm: fetch + buffer media now
-              startWatchdog(slot);
-            } catch (e) {}
-            return;
-          }
-          buildPlayer(slot);                  // onReady -> forcePlay (muted); watchdog started there
-        });
+        startStreamWaitWatch(slot);
       }
+
+      // ---- attach direct stream URLs (called by RN when format resolves) ------
+      window.__setStream = function (idx, videoId, videoUrl, audioUrl) {
+        var slot = (SLOT_A.index === idx) ? SLOT_A : (SLOT_B.index === idx ? SLOT_B : null);
+        if (!slot || slot.videoId !== videoId || !videoUrl) return;
+        var token = slot.token;
+        if (slot.streamSet) return;               // already attached
+        slot.streamSet = true;
+        buildMedia(slot, videoUrl, audioUrl || '');
+        stopWatchdog(slot);
+        stopSync(slot);
+        hideThumb(slot);
+        spinnerOff(slot);
+        if (slot === activeSlot) emit('buffering');
+        playPair(slot);
+        // Accept our own generation after buildMedia bumped nothing - watchdog
+        // still valid.
+        if (slot.token !== token) return;
+        startBehaviorWatch(slot);
+        startSync(slot);
+      };
 
       // ---- warm the off-screen layer with a neighbor ------------------------
       function preloadAt(idx, videoId, thumbUrl) {
@@ -370,7 +416,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       function activateAt(idx, videoId, thumbUrl) {
         var target = (SLOT_A.index === idx) ? SLOT_A : (SLOT_B.index === idx ? SLOT_B : null);
         if (!target) {
-          // Missed warm (fast reverse scroll / buffer error) -> load here with qs spinner.
+          // Missed warm (fast reverse scroll / buffer error) -> load here fresh.
           target = (activeSlot === SLOT_A) ? SLOT_B : SLOT_A;
           target.index = idx;
           loadIntoSlot(target, videoId, thumbUrl);
@@ -380,38 +426,38 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         activeSlot = target;
         applyPositions();
 
-        var p = activeSlot.player;
+        var v = target.videoEl;
         var st = -1;
-        if (p) {
-          try { if (!wantedMuted) { p.unMute(); p.setVolume(100); } else { p.mute(); } } catch (e) {}
-          try { p.playVideo(); } catch (e) {}
-          // Once we know media is coming (not merely CUED), drop the thumbnail so
-          // a real frame/spinner replaces the static poster during slow loads.
-          try { st = p.getPlayerState(); } catch (e) {}
+        if (v) {
+          try { st = v.readyState; } catch (e) { st = -1; }
+          playPair(target);
+          applyVolume(target);
+          hideThumb(target);
         }
-        if (st === 1) {           // already buffered/playing -> report instantly
-          hideThumb(activeSlot);
-          spinnerOff(activeSlot);
-          stopWatchdog(activeSlot);
+        if (st >= 3 && !v.paused && isFinite(v.currentTime) && v.currentTime > 0) {
+          // Already buffered/playing -> report instantly.
+          spinnerOff(target);
+          stopWatchdog(target);
+          startSync(target);
           emit('playing');
-        } else if (st === 3) {
-          hideThumb(activeSlot);
-          spinnerOn(activeSlot);
-          startWatchdog(activeSlot);
+        } else if (target.streamSet) {
+          spinnerOn(target);
+          startBehaviorWatch(target);
           emit('buffering');
         } else {
-          // Not started yet: retry a few times so a slow first load still plays.
-          if (p && st !== 5) hideThumb(activeSlot);   // st -1/0/2: media coming
+          // No stream yet (format still resolving): retry until it lands.
+          hideThumb(target);
           var attempts = 0;
           var timer = setInterval(function () {
             attempts++;
-            if (activeSlot !== target || attempts >= 8) { clearInterval(timer); return; }
-            try {
-              var s = target.player.getPlayerState();
-              if (s === 1) { clearInterval(timer); return; }
-              target.player.mute();
-              target.player.playVideo();
-            } catch (e) { clearInterval(timer); }
+            if (activeSlot !== target || attempts >= 12) { clearInterval(timer); return; }
+            var el = target.videoEl;
+            if (el && !el.paused && el.currentTime > 0) {
+              clearInterval(timer);
+              onPlaying(target);
+              return;
+            }
+            playPair(target);
           }, 600);
         }
       }
@@ -420,14 +466,12 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       window.__prime = function (id0, thumb0, id1, thumb1) {
         gen++;                       // cancel in-flight targets
         activeIndex = 0;
-        SLOT_A.token = ++gen; SLOT_A.videoId = id0; SLOT_A.index = 0;
-        SLOT_B.token = ++gen; SLOT_B.videoId = id1; SLOT_B.index = 1;
+        SLOT_A.token = ++gen; SLOT_A.genRef = gen; SLOT_A.videoId = id0; SLOT_A.index = 0;
+        SLOT_B.token = ++gen; SLOT_B.genRef = gen; SLOT_B.videoId = id1; SLOT_B.index = 1;
         activeSlot = SLOT_A;
         loadIntoSlot(SLOT_A, id0, thumb0);
         loadIntoSlot(SLOT_B, id1, thumb1);
         applyPositions();
-        var p = SLOT_A.player;
-        if (p) { try { p.playVideo(); } catch (e) {} }
       };
 
       window.__activate = function (idx, videoId, thumbUrl) {
@@ -439,43 +483,48 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       };
 
       window.__retryPlay = function () {
-        if (activeSlot && activeSlot.player) {
-          try {
-            if (wantedMuted) { activeSlot.player.mute(); } else { activeSlot.player.unMute(); }
-            activeSlot.player.playVideo();
-          } catch (e) {}
+        if (activeSlot) {
+          playPair(activeSlot);
+          applyVolume(activeSlot);
         }
       };
 
       window.__play = function () {
-        if (activeSlot && activeSlot.player) {
-          try {
-            if (wantedMuted) { activeSlot.player.mute(); } else { activeSlot.player.unMute(); }
-            activeSlot.player.playVideo();
-          } catch (e) {}
+        if (activeSlot) {
+          playPair(activeSlot);
+          applyVolume(activeSlot);
         }
       };
 
       window.__pause = function () {
-        [SLOT_A, SLOT_B].forEach(function (slot) {
-          if (slot && slot.player) { try { slot.player.pauseVideo(); } catch (e) {} }
-        });
+        [SLOT_A, SLOT_B].forEach(function (slot) { pausePair(slot); });
+      };
+
+      window.__setMuted = function (m) {
+        wantedMuted = !!m;
+        [SLOT_A, SLOT_B].forEach(function (slot) { applyVolume(slot); });
       };
 
       window.__destroy = function () {
         gen++;
         [SLOT_A, SLOT_B].forEach(function (slot) {
           stopWatchdog(slot);
-          try { if (slot.player && slot.player.destroy) slot.player.destroy(); } catch (e) {}
-          slot.player = null;
+          stopSync(slot);
+          slot.videoEl = null;
+          slot.audioEl = null;
+          slot.hostEl.innerHTML = '';
           slot.index = -1;
           slot.videoId = null;
+          slot.streamSet = false;
           slot.token = ++gen;
+          slot.genRef = slot.token;
           spinnerOff(slot);
         });
         activeSlot = SLOT_A;
         activeIndex = -1;
       };
+
+      emit('ready');
     })();
   </script>
 </body>

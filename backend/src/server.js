@@ -618,6 +618,25 @@ app.get('/api/reels/categories', authMiddleware, async (req, res) => {
   }
 });
 
+// Reels direct-stream endpoint: resolves signed video+audio URLs via yt-dlp so
+// the client plays the reel directly instead of a YouTube embed. Embeds get gated
+// when several devices share one IP ("second device just loads"); direct streams
+// let every device play at once. Cached + single-flight in ytFormat.
+app.get('/api/reels/format/:videoId', authMiddleware, async (req, res) => {
+  const videoId = String(req.params.videoId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+    return res.status(400).json({ error: 'Invalid video id' });
+  }
+  try {
+    const { getFormat } = require('./ytFormat');
+    const f = await getFormat(videoId);
+    res.json(f);
+  } catch (e) {
+    console.error('reels:format error', videoId, e.message);
+    res.status(502).json({ error: 'format unavailable' });
+  }
+});
+
 // Reels YouTube quota status endpoint
 app.get('/api/reels/quota-status', authMiddleware, async (req, res) => {
   try {
