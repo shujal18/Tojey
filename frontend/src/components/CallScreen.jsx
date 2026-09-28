@@ -20,6 +20,9 @@ export default function CallScreen() {
   const localRef = useRef(null);
   const [elapsed, setElapsed] = useState(0);
   const [soundUnlocked, setSoundUnlocked] = useState(false);
+  const [mainIsLocal, setMainIsLocal] = useState(false);
+  const [pipPos, setPipPos] = useState({ x: Math.max(8, (typeof window !== 'undefined' ? window.innerWidth : 320) - 104), y: 100 });
+  const dragRef = useRef({ sx: 0, sy: 0, ox: 0, oy: 0, moved: false });
 
   // Browsers block unmuted autoplay until the user has interacted with the page.
   // Start the remote video muted, then unlock sound on the first pointer/focus
@@ -63,9 +66,57 @@ export default function CallScreen() {
 
   useEffect(() => {
     if (state === 'idle' || state === 'ended') setMinimized(false);
+    if (state !== 'active' && state !== 'connecting') setMainIsLocal(false);
   }, [state, setMinimized]);
 
   if (state === 'idle') return null;
+
+  // Callback refs re-attach the stream whenever a video element (re)mounts, so
+  // swapping main<->pip (which moves the <video> to a new DOM node) keeps the
+  // feed playing without restart delays.
+  const setRemote = (el) => {
+    remoteRef.current = el;
+    if (el) {
+      if (el.srcObject !== remoteStream) el.srcObject = remoteStream;
+      if (remoteStream) el.play().catch(() => {});
+    }
+  };
+  const setLocal = (el) => {
+    localRef.current = el;
+    if (el) {
+      if (el.srcObject !== localStream) el.srcObject = localStream;
+      if (localStream) el.play().catch(() => {});
+    }
+  };
+
+  const swapViews = () => setMainIsLocal((v) => !v);
+  const localMain = mainIsLocal;
+  const pipIsLocal = !localMain;
+  const showPip = pipIsLocal ? true : !!remoteStream;
+
+  const pipStyle = {
+    position: 'absolute', left: pipPos.x, top: pipPos.y, zIndex: 5,
+    width: 92, height: 128, borderRadius: 12, overflow: 'hidden',
+    boxShadow: '0 6px 24px rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.25)',
+    background: '#000', touchAction: 'none', cursor: 'grab',
+  };
+  const onPipDown = (e) => {
+    if (e.currentTarget.setPointerCapture) e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pipPos.x, oy: pipPos.y, moved: false };
+  };
+  const onPipMove = (e) => {
+    const d = dragRef.current;
+    const dx = e.clientX - d.sx;
+    const dy = e.clientY - d.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 5) d.moved = true;
+    if (!d.moved) return;
+    const nx = Math.min(Math.max(0, d.ox + dx), (window.innerWidth || 320) - 96);
+    const ny = Math.min(Math.max(0, d.oy + dy), (window.innerHeight || 480) - 132);
+    setPipPos({ x: nx, y: ny });
+  };
+  const onPipUp = () => {
+    if (!dragRef.current.moved) swapViews();
+  };
 
   const fmtTime = () => {
     const m = Math.floor(elapsed / 60);
@@ -111,14 +162,22 @@ export default function CallScreen() {
         animation: 'msgSlideUp 0.25s ease',
       }}>
         <div style={{ position: 'relative', width: '100%', height: 150, background: '#000' }}>
-          {remoteStream ? (
-            <video ref={remoteRef} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          {mainIsLocal ? (
+            localStream && videoEnabled ? (
+              <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: sharing ? 'none' : 'scaleX(-1)' }} />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
+                <Avatar size={56} />
+              </div>
+            )
+          ) : remoteStream ? (
+            <video ref={setRemote} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
               <Avatar size={56} />
             </div>
           )}
-          {remoteStream && !soundUnlocked && (
+          {!mainIsLocal && remoteStream && !soundUnlocked && (
             <button onClick={unlockSound} style={{
               position: 'absolute', bottom: 8, right: 8, zIndex: 3,
               background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
@@ -207,7 +266,6 @@ export default function CallScreen() {
   }
 
   // connecting / active
-  const showLocalPlaceholder = !remoteStream;
   return (
     <CallLayer backdrop full>
       <div style={{ position: 'absolute', top: 44, left: 0, right: 0, textAlign: 'center', zIndex: 5, pointerEvents: 'none' }}>
@@ -217,23 +275,50 @@ export default function CallScreen() {
         </div>
       </div>
 
-      {remoteStream ? (
-        <video ref={remoteRef} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111',
-        }} />
-      ) : (
-        <div style={{
-          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: '#141221',
-        }}>
-          <div style={{ textAlign: 'center' }}>
-            <Avatar size={110} />
-            <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 14, marginTop: 16 }}>
-              {state === 'connecting' ? 'Connecting…' : 'Waiting for video…'}
+      {/* Main stage */}
+      <div
+        onClick={localMain && !remoteStream ? swapViews : undefined}
+        title={localMain && !remoteStream ? 'Tap to switch to remote view' : undefined}
+        style={{
+          position: 'absolute', inset: 0, zIndex: 2, background: '#141221', overflow: 'hidden',
+          cursor: localMain && !remoteStream ? 'pointer' : 'default',
+        }}
+      >
+        {localMain ? (
+          localStream && videoEnabled ? (
+            <>
+              <video ref={setLocal} autoPlay playsInline muted style={{
+                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+                background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
+              }} />
+              {sharing && (
+                <div style={{ position: 'absolute', top: 14, left: 14, zIndex: 2, display: 'flex', alignItems: 'center', gap: 5, background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, fontWeight: 700, borderRadius: 10, padding: '4px 8px' }}>
+                  <ScreenShare size={14} /> Screen
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Avatar size={110} />
             </div>
-          </div>
-        </div>
-      )}
+          )
+        ) : (
+          remoteStream ? (
+            <video ref={setRemote} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{
+              position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111', transform: 'scaleX(-1)',
+            }} />
+          ) : (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ textAlign: 'center' }}>
+                <Avatar size={110} />
+                <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 14, marginTop: 16 }}>
+                  {state === 'connecting' ? 'Connecting…' : 'Waiting for video…'}
+                </div>
+              </div>
+            </div>
+          )
+        )}
+      </div>
 
       {remoteStream && !soundUnlocked && (
         <button onClick={unlockSound} style={{
@@ -246,37 +331,42 @@ export default function CallScreen() {
         </button>
       )}
 
-      {/* Local PIP */}
-      <div style={{
-        position: 'absolute', right: 12, top: 100, zIndex: 5,
-        width: 92, height: 128, borderRadius: 12, overflow: 'hidden',
-        boxShadow: '0 6px 24px rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.25)',
-        background: '#000',
-      }}>
-        {localStream ? (
-          <>
-            <video
-              ref={localRef}
-              autoPlay
-              playsInline
-              muted
-              style={{
-                width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)',
-                display: videoEnabled ? 'block' : 'none',
-              }}
-            />
-            {!videoEnabled && (
+      {/* Draggable pip: the smaller view. Tap to swap with the main stage, drag to move. */}
+      {showPip && (
+        <div
+          onPointerDown={onPipDown}
+          onPointerMove={onPipMove}
+          onPointerUp={onPipUp}
+          onPointerCancel={onPipUp}
+          style={pipStyle}
+          title="Drag to move · tap to switch"
+        >
+          {pipIsLocal ? (
+            localStream ? (
+              videoEnabled ? (
+                <video ref={setLocal} autoPlay playsInline muted style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  transform: sharing ? 'none' : 'scaleX(-1)',
+                }} />
+              ) : (
+                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
+                  <Avatar size={40} />
+                </div>
+              )
+            ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
                 <Avatar size={40} />
               </div>
-            )}
-          </>
-        ) : (
-          <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
-            <Avatar size={40} />
-          </div>
-        )}
-      </div>
+            )
+          ) : (
+            remoteStream && (
+              <video ref={setRemote} autoPlay playsInline muted={soundMuted} onPointerDown={unlockSound} style={{
+                width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', background: '#111',
+              }} />
+            )
+          )}
+        </div>
+      )}
 
       {/* Controls */}
       <div style={{

@@ -205,6 +205,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // --- video call state (camera-only, media flows P2P, server relays signaling) ---
   const [callStatus, setCallStatus] = useState('none'); // none|outgoing|incoming|active
   const [callLayout, setCallLayout] = useState('full'); // full|compact (chat visible while calling)
+  const [mainIsLocal, setMainIsLocal] = useState(false); // swapped pip: local camera becomes the fullscreen main stage
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [incomingCaller, setIncomingCaller] = useState(null);
@@ -812,6 +813,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     callRingingRef.current = null;
     screenSharingRef.current = false;
     setCallLayout('full');
+    setMainIsLocal(false);
     setCameraOn(true);
     setMicOn(true);
     setRemoteAudioOn(true);
@@ -2158,6 +2160,9 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
               onToggleRemoteAudio={toggleRemoteAudio}
               onToggleScreenShare={toggleScreenShare}
               onExpand={() => setCallLayout('full')}
+              mainIsLocal={mainIsLocal}
+              onSwapPip={() => setMainIsLocal((v) => !v)}
+              onTapMain={() => setMainIsLocal((v) => !v)}
               theme={theme}
             />
           </View>
@@ -2204,6 +2209,9 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
               onToggleRemoteAudio={toggleRemoteAudio}
               onToggleScreenShare={toggleScreenShare}
               onMinimize={() => setCallLayout('compact')}
+              mainIsLocal={mainIsLocal}
+              onSwapPip={() => setMainIsLocal((v) => !v)}
+              onTapMain={() => setMainIsLocal((v) => !v)}
               theme={theme}
             />
           </View>

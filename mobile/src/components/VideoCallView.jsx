@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, Image, StyleSheet } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, Image, StyleSheet, PanResponder, Dimensions } from 'react-native';
 import { RTCView } from 'react-native-webrtc';
 import { Icon } from './AppIcon';
 import { fs } from '../utils/size';
@@ -7,21 +7,121 @@ import { absUrl } from '../config';
 
 // In-call video surface for Tojey. Rendered between the chat header and the
 // existing Tojey text composer (which stays fully functional during a call).
-// Audio is enabled. The local camera preview is MIRRORED like a selfie view so
-// it matches the web client (screen share stays unmirrored), kept behind a small
-// non-rounded surface (SurfaceView cannot be rounded/clipped reliably on some
-// Android versions) with an explicit zIndex/elevation so it always stacks above
-// the remote stream. Controls: flip camera, camera on/off, my-mic mute, local
-// mute of the REMOTE audio (this device stops playing the other user - the peer
-// is never muted), screen share, end.
-function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing }) {
+// Audio is enabled. Mirroring is applied per STREAM: the local camera is shown
+// mirrored like a selfie (screen share stays unmirrored) and the remote video is
+// also mirrored, whether it sits in the fullscreen stage or the floating pip.
+// The small preview is draggable anywhere on the stage and tapping it swaps the
+// two: the pip stream expands to fullscreen and the main stream shrinks into the
+// floater (WhatsApp-style). If the other stream is absent (peer not connected,
+// or no remote yet) tapping the main surface swaps back so the state is never
+// trapped. The remote stream keeps a non-rounded surface (SurfaceView cannot be
+// rounded/clipped reliably on some Android versions) with an explicit
+// zIndex/elevation so it always stacks above the main stream. Controls: flip
+// camera, camera on/off, my-mic mute, local mute of the REMOTE audio (this device
+// stops playing the other user - the peer is never muted), screen share, end.
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const PIP_W = 96;
+const PIP_H = 132;
+const PIP_MARGIN = 12;
+
+function DraggablePip({ streamUrl, mirror, off, scrTag, onSwap, onDrag, bounds, children }) {
+  const [pos, setPos] = useState({ x: SCREEN_W - PIP_W - PIP_MARGIN, y: 14 });
+  const baseRef = useRef({ x: 0, y: 0 });
+  const movedRef = useRef(false);
+
+  const maxX = Math.max(PIP_W + 8, (bounds ? bounds.width : SCREEN_W) - PIP_W - 4);
+  const maxY = Math.max(PIP_H + 4, (bounds ? bounds.height : SCREEN_H) - PIP_H - 4);
+  const clampX = (x) => Math.min(Math.max(0, x), maxX);
+  const clampY = (y) => Math.min(Math.max(0, y), maxY);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) + Math.abs(g.dy) > 4,
+      onPanResponderGrant: () => {
+        baseRef.current = pos;
+        movedRef.current = false;
+      },
+      onPanResponderMove: (_, g) => {
+        if (Math.abs(g.dx) + Math.abs(g.dy) > 4) movedRef.current = true;
+        const next = { x: clampX(baseRef.current.x + g.dx), y: clampY(baseRef.current.y + g.dy) };
+        setPos(next);
+        if (onDrag) onDrag(next);
+      },
+      onPanResponderRelease: (_, g) => {
+        if (!movedRef.current && Math.abs(g.dx) + Math.abs(g.dy) <= 6) {
+          if (onSwap) onSwap();
+        }
+      },
+      onPanResponderTerminate: () => {},
+    })
+  ).current;
+
+  if (!streamUrl && !off) return null;
+
+  return (
+    <View
+      {...panResponder.panHandlers}
+      style={[styles.localPip, { left: pos.x, top: pos.y }]}
+      accessibilityLabel={off ? 'Camera is off' : 'Video preview (tap to switch)'}
+    >
+      {scrTag && (
+        <View style={styles.scrTag}>
+          <Icon name="laptop-outline" size={13} color="#fff" />
+          <Text style={styles.scrTagText}>Screen</Text>
+        </View>
+      )}
+      {off ? (
+        <View style={styles.offPip}>
+          <Icon name="videocam-off-outline" size={26} color="#fff" />
+        </View>
+      ) : (
+        <RTCView streamURL={streamUrl} objectFit="cover" style={StyleSheet.absoluteFill} mirror={mirror} zOrder={1} />
+      )}
+      {children}
+    </View>
+  );
+}
+
+function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing, mainIsLocal, onSwapPip, onTapMain }) {
+  const [stageSize, setStageSize] = useState(null);
   const localUrl = localStream ? localStream.toURL() : null;
   const remoteUrl = remoteStream ? remoteStream.toURL() : null;
-  const showOffPip = !screenSharing && !cameraOn;
+  const localOff = !screenSharing && !cameraOn;
+
+  const mainIsLocalSurface = mainIsLocal && !!localUrl;
+  const mainUrl = mainIsLocalSurface ? localUrl : remoteUrl;
+  const mainMirror = mainIsLocalSurface ? !screenSharing : true;
+  const showMainOff = mainIsLocalSurface && localOff;
+
+  const pipUrl = mainIsLocalSurface ? remoteUrl : localUrl;
+  const pipMirror = mainIsLocalSurface ? true : !screenSharing;
+  const showPipOff = !mainIsLocalSurface && localOff;
+  const pipScrTag = !mainIsLocalSurface && screenSharing;
+
   return (
-    <View style={styles.stage}>
-      {remoteUrl ? (
-        <RTCView streamURL={remoteUrl} objectFit="cover" style={StyleSheet.absoluteFill} mirror={false} zOrder={0} />
+    <View
+      style={styles.stage}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setStageSize({ width, height });
+      }}
+    >
+      {mainUrl ? (
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={!pipUrl && !showPipOff ? onTapMain : undefined}
+          style={StyleSheet.absoluteFill}
+          accessibilityLabel="Switch video"
+        >
+          <RTCView streamURL={mainUrl} objectFit="cover" style={StyleSheet.absoluteFill} mirror={mainMirror} zOrder={0} />
+          {screenSharing && mainIsLocalSurface && (
+            <View style={styles.scrTagBig}>
+              <Icon name="laptop-outline" size={14} color="#fff" />
+              <Text style={styles.scrTagBigText}>Screen</Text>
+            </View>
+          )}
+        </TouchableOpacity>
       ) : (
         <View style={[styles.waiting, { backgroundColor: '#101418' }]}>
           {peerAvatar ? (
@@ -35,30 +135,19 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
           <Text style={styles.waitingHint}>{screenSharing ? 'Sharing your screen…' : 'Connecting…'}</Text>
         </View>
       )}
-      {localUrl && !showOffPip && (
-        <View style={styles.localPip} pointerEvents="none">
-          {screenSharing && (
-            <View style={styles.scrTag}>
-              <Icon name="laptop-outline" size={13} color="#fff" />
-              <Text style={styles.scrTagText}>Screen</Text>
-            </View>
-          )}
-          <RTCView
-            streamURL={localUrl}
-            objectFit="cover"
-            style={StyleSheet.absoluteFill}
-            mirror={!screenSharing}
-            zOrder={1}
-          />
+      {showMainOff && (
+        <View style={styles.mainOff}>
+          <Icon name="videocam-off-outline" size={52} color="#fff" />
         </View>
       )}
-      {showOffPip && (
-        <View style={styles.localPip} pointerEvents="none">
-          <View style={styles.offPip}>
-            <Icon name="videocam-off-outline" size={26} color="#fff" />
-          </View>
-        </View>
-      )}
+      <DraggablePip
+        streamUrl={pipUrl}
+        mirror={pipMirror}
+        off={showPipOff}
+        scrTag={pipScrTag}
+        onSwap={onSwapPip}
+        bounds={stageSize}
+      />
     </View>
   );
 }
@@ -87,6 +176,9 @@ export default function VideoCallView({
   micOn,
   remoteAudioOn,
   compact,
+  mainIsLocal = false,
+  onSwapPip,
+  onTapMain,
   onAccept,
   onDecline,
   onEnd,
@@ -141,6 +233,9 @@ export default function VideoCallView({
         theme={theme}
         cameraOn={cameraOn}
         screenSharing={screenSharing}
+        mainIsLocal={mainIsLocal}
+        onSwapPip={onSwapPip}
+        onTapMain={onTapMain}
       />
       <View style={styles.topBar} pointerEvents="box-none">
         <View style={styles.statusChip}>
@@ -227,10 +322,8 @@ const styles = StyleSheet.create({
   waitingHint: { color: 'rgba(255,255,255,0.55)', fontSize: 13, marginTop: 6 },
   localPip: {
     position: 'absolute',
-    top: 14,
-    right: 14,
-    width: 96,
-    height: 132,
+    width: PIP_W,
+    height: PIP_H,
     borderRadius: 12,
     overflow: 'hidden',
     borderWidth: 1,
@@ -252,11 +345,32 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   scrTagText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  scrTagBig: {
+    position: 'absolute',
+    top: 14,
+    left: 14,
+    zIndex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    gap: 4,
+  },
+  scrTagBigText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   offPip: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(20,22,26,0.92)',
+  },
+  mainOff: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(16,20,24,0.94)',
+    zIndex: 2,
   },
   topBar: {
     position: 'absolute',
