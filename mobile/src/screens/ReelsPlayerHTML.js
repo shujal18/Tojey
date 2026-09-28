@@ -126,6 +126,8 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       var SLOT_B = createSlot('B', document.getElementById('slotB'));
       var activeSlot = SLOT_A;
       var activeIndex = -1;
+      var wantedMuted = false;   // user choice; warm-start is always muted, sound
+                                 // is restored after the first frame unless toggled
 
       // ---- bridge ----------------------------------------------------------
       function post(type, payload) {
@@ -239,9 +241,23 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       // autoplay), but Chrome/YouTube allow unmuting once playback has begun.
       function unmuteIfAutoplayed(slot) {
         if (!slot.player) return;
+        if (wantedMuted) {
+          try { slot.player.mute(); } catch (e) {}
+          return;
+        }
         try { slot.player.unMute(); } catch (e) {}
         try { slot.player.setVolume(100); } catch (e) {}
       }
+
+      window.__setMuted = function (m) {
+        wantedMuted = !!m;
+        [SLOT_A, SLOT_B].forEach(function (slot) {
+          if (!slot.player) return;
+          try {
+            if (wantedMuted) { slot.player.mute(); } else { slot.player.unMute(); slot.player.setVolume(100); }
+          } catch (e) {}
+        });
+      };
 
       function forcePlay(slot) {
         if (!slot.player) return;
@@ -367,7 +383,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         var p = activeSlot.player;
         var st = -1;
         if (p) {
-          try { p.unMute(); p.setVolume(100); } catch (e) {}
+          try { if (!wantedMuted) { p.unMute(); p.setVolume(100); } else { p.mute(); } } catch (e) {}
           try { p.playVideo(); } catch (e) {}
           // Once we know media is coming (not merely CUED), drop the thumbnail so
           // a real frame/spinner replaces the static poster during slow loads.
@@ -424,13 +440,19 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
 
       window.__retryPlay = function () {
         if (activeSlot && activeSlot.player) {
-          try { activeSlot.player.unMute(); activeSlot.player.playVideo(); } catch (e) {}
+          try {
+            if (wantedMuted) { activeSlot.player.mute(); } else { activeSlot.player.unMute(); }
+            activeSlot.player.playVideo();
+          } catch (e) {}
         }
       };
 
       window.__play = function () {
         if (activeSlot && activeSlot.player) {
-          try { activeSlot.player.unMute(); activeSlot.player.playVideo(); } catch (e) {}
+          try {
+            if (wantedMuted) { activeSlot.player.mute(); } else { activeSlot.player.unMute(); }
+            activeSlot.player.playVideo();
+          } catch (e) {}
         }
       };
 

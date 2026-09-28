@@ -246,29 +246,53 @@ function Shell() {
   }, [socket, activeChat]);
 
   // Manual "Send Notification" pushes (socket delivery when online, FCM push when
-  // the app is closed/backgrounded) -> a real device system notification. Foreground
-  // FCM data pushes (type tojey_notification) are also rendered here.
+  // the app is closed/backgrounded) -> while the app is open they pop as an IN-APP
+  // heads-up banner (same as a chat message) instead of only landing in the status
+  // bar; when the app is backgrounded they fall back to a real system notification.
+  // Socket + FCM copies of the same push are deduped by notification id.
+  const lastPushHandledRef = useRef({ id: null, at: 0 });
   useEffect(() => {
     if (!socket) return undefined;
+
+    const showPush = async (payload) => {
+      const prefs = await getNotifPrefs().catch(() => null);
+      if (prefs && prefs.enabled === false) return;
+      const id = (payload && payload.notificationId) || '';
+      if (id && lastPushHandledRef.current.id === id && Date.now() - lastPushHandledRef.current.at < 4000) return;
+      if (id) lastPushHandledRef.current = { id, at: Date.now() };
+      if (AppState.currentState === 'active') {
+        setIncomingBanner({
+          key: `notif-${id || Date.now()}`,
+          senderId: payload.senderId,
+          senderName: payload.senderName || 'Tojey',
+          senderPic: payload.senderPic || '',
+          conversationId: payload.conversationId,
+          preview: payload.message || 'You have a new notification',
+        });
+      } else {
+        showSystemNotification(payload);
+      }
+    };
+
     const onNotif = (d) => {
       if (!d || !d.sender) return;
-      const payload = {
+      showPush({
         senderId: d.sender.userId,
         senderUsername: d.sender.username,
         senderName: d.sender.displayName,
+        senderPic: d.sender.profilePic || '',
         receiverId: session && session.user ? session.user.id : null,
         conversationId: d.conversationId,
         message: (d.notification && d.notification.message) || '',
         title: d.sender.displayName || 'Tojey',
         notificationId: d.notification && d.notification.id,
-      };
-      showSystemNotification(payload);
+      });
     };
     socket.on('notification:receive', onNotif);
     const unsubFg = onForegroundMessage((p) => {
       if (!session) return;
       if (p && p.data && p.data.type && p.data.type !== 'tojey_notification') return;
-      showSystemNotification(p);
+      showPush(p);
     });
     return () => {
       socket.off('notification:receive', onNotif);

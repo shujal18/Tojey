@@ -10,7 +10,8 @@ import {
   Image,
   Animated,
   AppState,
-  ScrollView,
+  Alert,
+  Share as RNShare,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -31,14 +32,7 @@ const STORAGE_KEY_CURSOR = '@tojey_reels_cursor_v1';
 const SEEN_MAX_IDS = 500;
 const AUTO_ADVANCE_MAX_PAGES = 4;
 const MIN_FRESH_BATCH = 8;
-
-const CATEGORY_FALLBACK = [
-  { id: 'trending', label: 'For You' },
-  { id: 'memes', label: 'Memes' },
-  { id: 'hindi', label: 'Hindi' },
-  { id: 'hindi_songs', label: 'Hindi Songs' },
-  { id: 'love', label: 'Love & Romantic' },
-];
+const LIKES_STORAGE_KEY = '@tojey_reels_likes';
 
 const ITEM_HEIGHT = SCREEN_H;
 
@@ -167,8 +161,7 @@ async function saveFeedCache(category, videos) {
 
 export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState('trending');
-  const [categories, setCategories] = useState(CATEGORY_FALLBACK);
+  const [category] = useState('trending');
   const [activeIdx, setActiveIdx] = useState(0);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -176,6 +169,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [error, setError] = useState(null);
   const [toast, setToast] = useState('');
   const [webviewFailed, setWebviewFailed] = useState(false);
+  const [likedIds, setLikedIds] = useState(() => new Set());
+  const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(false);
 
   const flatListRef = useRef(null);
   const webViewRef = useRef(null);
@@ -232,6 +228,68 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token || ''}`,
   }), [token]);
+
+  // ---- YT-style action rail (like / share / sound / more) ---------------------
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(LIKES_STORAGE_KEY);
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) setLikedIds(new Set(arr.filter((x) => typeof x === 'string')));
+        }
+      } catch (e) {}
+    })();
+  }, []);
+
+  const toggleLike = useCallback((id) => {
+    setLikedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        AsyncStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(Array.from(next)));
+      } catch (e) {}
+      return next;
+    });
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    if (webViewRef.current && readyRef.current) {
+      webViewRef.current.injectJavaScript(`window.__setMuted(${next ? 'true' : 'false'}); true;`);
+    }
+  }, []);
+
+  const shareVideo = useCallback((item) => {
+    if (!item || !item.videoId) return;
+    const url = `https://youtube.com/shorts/${item.videoId}`;
+    RNShare.share({ message: `${item.title || 'Check this out'}\n${url}` }).catch(() => {});
+  }, []);
+
+  const reportVideo = useCallback((item) => {
+    if (!item || !item.videoId) return;
+    Alert.alert('Report video', 'Report this reel as unavailable or inappropriate?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Report',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await fetch(`${SERVER_URL}/api/reels/report`, {
+              method: 'POST',
+              headers: authHeaders,
+              body: JSON.stringify({ videoIds: [item.videoId] }),
+            });
+            setToast('Reported');
+          } catch (e) {}
+        },
+      },
+    ]);
+  }, [authHeaders]);
 
   const webViewSource = useMemo(() => ({
     html: REELS_PLAYER_HTML,
@@ -815,7 +873,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     const deltaX = Math.abs(touchEndX - touchStartXRef.current);
     const deltaTime = Date.now() - touchStartTimeRef.current;
 
-    if (deltaX < 15 && deltaY < 15 && deltaTime < 250 && readyRef.current) {
+    if (deltaX < 15 && deltaY < 15 && deltaTime < 250 && readyRef.current && touchStartXRef.current < SCREEN_W - 96) {
       if (webViewRef.current) {
         if (playerStateRef.current === 'playing' || playerStateRef.current === 'buffering') {
           webViewRef.current.injectJavaScript('window.__pause(); true;');
@@ -832,16 +890,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   useEffect(() => {
     isMountedRef.current = true;
-
-    (async () => {
-      try {
-        const res = await fetch(`${SERVER_URL}/api/reels/categories`, { headers: authHeaders });
-        const data = await res.json();
-        if (data.categories && data.categories.length && isMountedRef.current) {
-          setCategories(data.categories);
-        }
-      } catch (e) { /* keep fallback list */ }
-    })();
 
     const subscription = AppState.addEventListener('change', (nextState) => {
       const wasActive = appVisibleRef.current;
@@ -909,6 +957,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     if (item && primeFeedRef.current) {
       primeFeedRef.current(videosRef.current);
     }
+    try {
+      webViewRef.current.injectJavaScript(`window.__setMuted(${mutedRef.current ? 'true' : 'false'}); true;`);
+    } catch (e) {}
     // Arm the play-watchdog for the first reel (activates it and starts
     // detecting dead/invisible embeds) instead of waiting for a user swipe.
     if (settleToIndexRef.current) settleToIndexRef.current(activeIndexRef.current);
@@ -1048,6 +1099,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           originWhitelist={['*']}
           mixedContentMode="always"
           hardwareAccelerationEnabled={true}
+          androidLayerType="hardware"
+          overScrollMode="never"
         />
       </Animated.View>
 
@@ -1076,37 +1129,59 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         <Icon name="chevron-back" size={26} color="#fff" />
       </TouchableOpacity>
 
-      {/* Category chips */}
-      <View style={styles.chipRowWrap} pointerEvents="box-none">
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipRow}
-        >
-          {categories.map((c) => {
-            const active = c.id === category;
-            return (
-              <TouchableOpacity
-                key={c.id}
-                onPress={() => setCategory(c.id)}
-                style={[styles.chip, active && { backgroundColor: theme.primary }]}
-              >
-                <Text style={[styles.chipText, active && { color: '#fff' }]}>
-                  {c.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
+      {/* YT-style right action rail (non-blocking: touches pass through) */}
+      {activeItem && sanitizeVideoId(activeItem.videoId) ? (
+        <View style={styles.railWrap} pointerEvents="box-none">
+          <View style={styles.railAvatar} pointerEvents="none">
+            <Icon name="person" size={24} color="#fff" />
+          </View>
+          <TouchableOpacity
+            style={styles.railBtn}
+            onPress={() => toggleLike(activeItem.videoId)}
+            accessibilityLabel={likedIds.has(activeItem.videoId) ? 'Unlike' : 'Like'}
+          >
+            <Icon
+              name={likedIds.has(activeItem.videoId) ? 'heart' : 'heart-outline'}
+              size={30}
+              color={likedIds.has(activeItem.videoId) ? '#FF2C55' : '#fff'}
+            />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.railBtn}
+            onPress={() => shareVideo(activeItem)}
+            accessibilityLabel="Share reel"
+          >
+            <Icon name="share-social" size={27} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.railBtn}
+            onPress={toggleMute}
+            accessibilityLabel={muted ? 'Unmute' : 'Mute'}
+          >
+            <Icon name={muted ? 'volume-mute' : 'volume-high'} size={27} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.railBtn}
+            onPress={() => reportVideo(activeItem)}
+            accessibilityLabel="More options"
+          >
+            <Icon name="ellipsis-horizontal" size={25} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
-      {/* Caption overlay: title + channel over the player (non-interactive) */}
+      {/* Caption overlay (YT-style): channel row + title over the player */}
       {activeItem ? (
         <View style={styles.caption} pointerEvents="none">
+          <View style={styles.captionChannelRow}>
+            <View style={styles.captionAvatar} pointerEvents="none">
+              <Icon name="person" size={13} color="#fff" />
+            </View>
+            <Text numberOfLines={1} style={styles.captionChannel}>{activeItem.channelTitle || 'Tojey'}</Text>
+          </View>
           <Text numberOfLines={2} style={styles.captionTitle}>{activeItem.title || ''}</Text>
           <Text numberOfLines={1} style={styles.captionMeta}>
-            {activeItem.channelTitle || ''}
-            {activeItem.durationSeconds ? `  •  ${Math.round(activeItem.durationSeconds)}s` : ''}
+            {activeItem.durationSeconds ? `${Math.round(activeItem.durationSeconds)}s` : ''}
           </Text>
         </View>
       ) : null}
@@ -1143,30 +1218,32 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  chipRowWrap: {
+  railWrap: {
     position: 'absolute',
-    top: 74,
-    left: 0,
-    right: 0,
-    zIndex: 46,
+    right: 10,
+    top: '42%',
+    zIndex: 48,
+    alignItems: 'center',
+    gap: 18,
   },
-  chipRow: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    gap: 8,
+  railAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(15,15,15,0.55)',
+    borderWidth: 1.5,
+    borderColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
-  chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    borderRadius: 18,
-    backgroundColor: 'rgba(15,15,15,0.6)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-  },
-  chipText: {
-    color: 'rgba(255,255,255,0.92)',
-    fontSize: fs(13),
-    fontWeight: '600',
+  railBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(15,15,15,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   empty: {
     flex: 1,
@@ -1216,21 +1293,42 @@ const styles = StyleSheet.create({
   caption: {
     position: 'absolute',
     left: 14,
-    right: 74,
-    bottom: 16,
+    right: 92,
+    bottom: 20,
     zIndex: 45,
+  },
+  captionChannelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  captionAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 7,
+  },
+  captionChannel: {
+    color: '#fff',
+    fontSize: fs(14),
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowRadius: 6,
   },
   captionTitle: {
     color: '#fff',
-    fontSize: fs(15),
-    fontWeight: '700',
+    fontSize: fs(14),
+    fontWeight: '600',
     textShadowColor: 'rgba(0,0,0,0.7)',
     textShadowRadius: 6,
   },
   captionMeta: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: fs(13),
-    marginTop: 3,
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: fs(12),
+    marginTop: 4,
     textShadowColor: 'rgba(0,0,0,0.7)',
     textShadowRadius: 6,
   },
