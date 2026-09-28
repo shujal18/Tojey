@@ -178,6 +178,16 @@ async function ensureNotifeeChannel() {
     try {
       existing = await notifee.getChannel(NOTIFICATION_CHANNEL_ID);
     } catch (e) {}
+    if (existing && existing.importance < AndroidImportance.HIGH) {
+      // Android cannot raise an existing channel's importance in place - an old
+      // build that created it as LOW silently kills heads-up popups forever.
+      // Recreate it as HIGH (drops any current notifications on that channel).
+      try {
+        await notifee.deleteChannel(NOTIFICATION_CHANNEL_ID);
+      } catch (e) {}
+      console.log(`[FCM] channel '${NOTIFICATION_CHANNEL_ID}' was importance=${existing.importance}, recreating as HIGH`);
+      existing = null;
+    }
     if (!existing) {
       await notifee.createChannel({
         id: NOTIFICATION_CHANNEL_ID,

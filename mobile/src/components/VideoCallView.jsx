@@ -21,7 +21,7 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
   return (
     <View style={styles.stage}>
       {remoteUrl ? (
-        <RTCView streamURL={remoteUrl} objectFit="cover" style={StyleSheet.absoluteFill} zOrder={0} />
+        <RTCView streamURL={remoteUrl} objectFit="cover" style={StyleSheet.absoluteFill} mirror={false} zOrder={0} />
       ) : (
         <View style={[styles.waiting, { backgroundColor: '#101418' }]}>
           {peerAvatar ? (

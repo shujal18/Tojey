@@ -272,6 +272,21 @@ function markVideoFailed(category, videoId, reason) {
   console.log(`[Reels] Marked video ${videoId} as failed in category ${category}: ${reason}`);
 }
 
+// Cached feeds can accumulate reels that fail to embed (region/age-restricted
+// content deceives search-time embeddable flags). Exclude known-failed videos
+// when serving cached lists so users aren't shown endless dead thumbnails.
+// Never returns empty: if everything is failed it falls back to the raw list so
+// a slow-refreshing feed still surfaces some content.
+function filterFailedVideos(category, videos) {
+  if (!videos || !videos.length) return videos;
+  const kept = [];
+  for (const v of videos) {
+    if (v && v.videoId && isVideoFailed(category, v.videoId)) continue;
+    kept.push(v);
+  }
+  return kept.length ? kept : videos;
+}
+
 async function fetchCategoryVideos(category, pageToken = null) {
   const query = CATEGORY_QUERIES[category] || CATEGORY_QUERIES.trending;
   const allVideos = [];
@@ -367,7 +382,7 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
     if (pageCached) {
       console.log(`[Reels] Serving page cache for ${category} (pageToken: ${pageToken}, ${pageCached.videos.length} videos)`);
       return {
-        videos: pageCached.videos,
+        videos: filterFailedVideos(category, pageCached.videos),
         cached: true,
         nextPageToken: pageCached.nextPageToken,
         hasMore: pageCached.hasMore,
@@ -384,7 +399,7 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
       if (age < CACHE_TTL_MS) {
         console.log(`[Reels] Serving fresh cache for ${category} (age: ${Math.round(age/60000)}min, ${cached.items.length} videos)`);
         return { 
-          videos: cached.items, 
+          videos: filterFailedVideos(category, cached.items), 
           cached: true, 
           nextPageToken: cached.nextPageToken || null, 
           hasMore: !!cached.nextPageToken,
@@ -396,7 +411,7 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
         console.log(`[Reels] Serving stale cache for ${category} (age: ${Math.round(age/60000)}min), triggering background refresh`);
         refreshCategoryInBackground(category);
         return { 
-          videos: cached.items, 
+          videos: filterFailedVideos(category, cached.items), 
           cached: true, 
           nextPageToken: cached.nextPageToken || null, 
           hasMore: !!cached.nextPageToken,
@@ -413,7 +428,7 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
     const cached = getCacheEntry(category);
     if (cached) {
       return { 
-        videos: cached.items, 
+        videos: filterFailedVideos(category, cached.items), 
         cached: true, 
         nextPageToken: cached.nextPageToken || null, 
         hasMore: !!cached.nextPageToken,
@@ -454,7 +469,7 @@ async function getFeed(category, forceRefresh = false, pageToken = null) {
         const cached = getCacheEntry(category);
         if (cached) {
           return { 
-            videos: cached.items, 
+            videos: filterFailedVideos(category, cached.items), 
             cached: true, 
             nextPageToken: null, 
             hasMore: false,
@@ -537,6 +552,7 @@ module.exports = {
   fetchCategoryVideos,
   getQuotaStatus,
   markVideoFailed,
+  filterFailedVideos,
   isVideoFailed,
   CATEGORY_QUERIES,
   CACHE_TTL_MS,

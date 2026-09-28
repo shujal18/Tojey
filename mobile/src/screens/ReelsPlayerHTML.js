@@ -118,6 +118,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
           index: -1,
           videoId: null,
           token: 0,
+          watchdog: null,
         };
       }
 
@@ -153,6 +154,33 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       function spinnerOn(slot) { slot.spinnerEl.classList.add('show'); }
       function spinnerOff(slot) { slot.spinnerEl.classList.remove('show'); }
 
+      // ---- dead-load watchdog ----------------------------------------------
+      // If a slot never reaches PLAYING within the timeout it is almost always an
+      // embed that buffers forever (region/age-restricted, or a broken URL).
+      // Report it so RN jumps PAST it instead of leaving a static thumbnail up.
+      var WATCH_TICK = 1500;   // ms
+      var WATCH_MAX = 6;       // ticks -> ~9s worst case
+      function stopWatchdog(slot) {
+        if (slot.watchdog) { clearInterval(slot.watchdog); slot.watchdog = null; }
+      }
+      function startWatchdog(slot) {
+        if (slot.watchdog) return;
+        var ticks = 0;
+        slot.watchdog = setInterval(function () {
+          ticks++;
+          var s = -1;
+          if (slot.player) { try { s = slot.player.getPlayerState(); } catch (e) {} }
+          if (s === 1 || s === 2 || s === 0) { stopWatchdog(slot); return; } // fine
+          if (ticks < WATCH_MAX) return;
+          stopWatchdog(slot);
+          if (slot === activeSlot) {
+            post('ytPlayerError', { errorCode: 'BUFFER_TIMEOUT', videoId: slot.videoId });
+          } else {
+            post('ytBufferError', { errorCode: 'BUFFER_TIMEOUT', videoId: slot.videoId });
+          }
+        }, WATCH_TICK);
+      }
+
       // ---- layer positioning ------------------------------------------------
       // Layer holding index k maps onto physical cell k: offset (k - activeIndex)*100vh.
       function offsetVh(slot) {
@@ -167,30 +195,39 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       // ---- player wiring ----------------------------------------------------
       function onStateChange(slot, st) {
         if (slot !== activeSlot) {
-          // Buffer: just keep it buffering; hide its own thumbnail when it plays
-          // (no events to RN — RN tracks only the active layer).
-          if (st === 1) hideThumb(slot);
+          // Buffer: just keep it buffering; hide its own thumbnail as soon as
+          // media starts arriving (no events to RN — RN tracks only the active
+          // layer). A buffer stuck forever is reported via the watchdog.
+          if (st === 1) { hideThumb(slot); spinnerOff(slot); stopWatchdog(slot); }
+          else if (st === 3) { hideThumb(slot); spinnerOn(slot); startWatchdog(slot); }
+          else if (st === 5) { startWatchdog(slot); }
           return;
         }
         if (st === 1) {                 // PLAYING
           hideThumb(slot);
           spinnerOff(slot);
+          stopWatchdog(slot);
           unmuteIfAutoplayed(slot);
           emit('playing');
         } else if (st === 2) {          // PAUSED
+          stopWatchdog(slot);
           emit('paused');
         } else if (st === 3) {          // BUFFERING
+          hideThumb(slot);
           spinnerOn(slot);
+          startWatchdog(slot);
           emit('buffering');
         } else if (st === 0) {          // ENDED -> loop
           if (slot.player) { try { slot.player.seekTo(0); slot.player.playVideo(); } catch (e) {} }
         } else if (st === 5) {          // CUED
+          startWatchdog(slot);
           emit('cued');
         }
       }
 
       function onError(slot, code) {
         spinnerOff(slot);
+        stopWatchdog(slot);
         if (slot === activeSlot) {
           post('ytPlayerError', { errorCode: code, videoId: slot.videoId });
         } else {
@@ -216,6 +253,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         slot.hostEl.innerHTML = '';
         var host = document.createElement('div');
         slot.hostEl.appendChild(host);
+        var myToken = slot.token;
         slot.player = new YT.Player(host, {
           host: 'https://www.youtube-nocookie.com',
           width: window.innerWidth,
@@ -234,7 +272,9 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
             widget_referrer: 'https://tojey.app/'
           },
           events: {
-            onReady: function () { forcePlay(slot); },
+            onReady: function () {
+              if (slot.token === myToken) { forcePlay(slot); startWatchdog(slot); }
+            },
             onStateChange: function (e) { onStateChange(slot, e && e.data); },
             onError: function (e) { onError(slot, e && e.data); }
           }
@@ -274,6 +314,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         var token = (slot.token = ++gen);
         slot.videoId = videoId;
         spinnerOff(slot);
+        stopWatchdog(slot);
         showThumb(slot, thumbUrl);
 
         ensureAPI(function (err) {
@@ -291,10 +332,11 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
               slot.player.loadVideoById({ videoId: videoId, startSeconds: 0 });
               slot.player.mute();
               slot.player.playVideo();        // warm: fetch + buffer media now
+              startWatchdog(slot);
             } catch (e) {}
             return;
           }
-          buildPlayer(slot);                  // onReady -> forcePlay (muted)
+          buildPlayer(slot);                  // onReady -> forcePlay (muted); watchdog started there
         });
       }
 
@@ -327,17 +369,23 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
         if (p) {
           try { p.unMute(); p.setVolume(100); } catch (e) {}
           try { p.playVideo(); } catch (e) {}
+          // Once we know media is coming (not merely CUED), drop the thumbnail so
+          // a real frame/spinner replaces the static poster during slow loads.
           try { st = p.getPlayerState(); } catch (e) {}
         }
         if (st === 1) {           // already buffered/playing -> report instantly
           hideThumb(activeSlot);
           spinnerOff(activeSlot);
+          stopWatchdog(activeSlot);
           emit('playing');
         } else if (st === 3) {
+          hideThumb(activeSlot);
           spinnerOn(activeSlot);
+          startWatchdog(activeSlot);
           emit('buffering');
         } else {
           // Not started yet: retry a few times so a slow first load still plays.
+          if (p && st !== 5) hideThumb(activeSlot);   // st -1/0/2: media coming
           var attempts = 0;
           var timer = setInterval(function () {
             attempts++;
@@ -395,6 +443,7 @@ export const REELS_PLAYER_HTML = `<!DOCTYPE html>
       window.__destroy = function () {
         gen++;
         [SLOT_A, SLOT_B].forEach(function (slot) {
+          stopWatchdog(slot);
           try { if (slot.player && slot.player.destroy) slot.player.destroy(); } catch (e) {}
           slot.player = null;
           slot.index = -1;

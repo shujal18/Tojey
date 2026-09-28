@@ -497,6 +497,49 @@ app.get('/api/version', (req, res) => {
   });
 });
 
+// Reels: clients report reels that fail to embed (region/age-restricted) so
+// cached feeds stop re-serving them to every user. Bounded, per-user rate limit.
+const reelsReportRate = new Map();
+app.post('/api/reels/report', authMiddleware, (req, res) => {
+  try {
+    const { category, videoIds } = req.body || {};
+    if (!Array.isArray(videoIds) || !videoIds.length) {
+      return res.status(400).json({ error: 'videoIds required' });
+    }
+    const { markVideoFailed } = require('./youtube');
+    const validCategories = ['trending', 'memes', 'hindi', 'hindi_songs', 'love'];
+    const c = typeof category === 'string' && validCategories.includes(category) ? category : 'trending';
+    const valid = videoIds
+      .filter((id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id))
+      .slice(0, 20);
+    if (!valid.length) {
+      return res.status(400).json({ error: 'no valid video ids' });
+    }
+
+    // Rate-limit: ~30 reports/minute/user is far above any client's normal load.
+    const uid = String((req.user && (req.user.id || req.user._id || req.user.username)) || req.ip || 'anon');
+    const now = Date.now();
+    const r = reelsReportRate.get(uid);
+    if (r) {
+      if (now - r.start > 60000) {
+        reelsReportRate.set(uid, { start: now, count: 1 });
+      } else if (r.count >= 30) {
+        return res.status(429).json({ error: 'Too many reel reports' });
+      } else {
+        r.count += 1;
+      }
+    } else {
+      reelsReportRate.set(uid, { start: now, count: 1 });
+    }
+
+    valid.forEach((id) => markVideoFailed(c, id, 'client_report'));
+    res.json({ ok: true, marked: valid.length });
+  } catch (e) {
+    console.error('reels:report error', e.message);
+    res.status(500).json({ error: 'Failed to process reel report' });
+  }
+});
+
 // Reels feed endpoint - returns short video metadata from YouTube via backend proxy
 app.get('/api/reels/feed', authMiddleware, async (req, res) => {
   try {

@@ -175,6 +175,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState('');
+  const [webviewFailed, setWebviewFailed] = useState(false);
 
   const flatListRef = useRef(null);
   const webViewRef = useRef(null);
@@ -184,6 +185,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const currentVideoIdRef = useRef(null);
   const playerStateRef = useRef('idle'); // idle, loading, ready, playing, paused, buffering, error
   const readyRef = useRef(false);
+  const webviewReloadsRef = useRef(0);
+  const deadRunRef = useRef(0);
+  const staleReportRef = useRef(new Set());
   const lastPlayingVideoIdRef = useRef(null);
   const playWatchRef = useRef(null);
   const isMountedRef = useRef(true);
@@ -299,6 +303,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           // force-advance past it.
           console.log('[Reels] No play after retries, advancing:', target);
           noPlayCountRef.current = 0;
+          deadRunRef.current += 1;
+          if (target) staleReportRef.current.add(target);
           if (skipToIndexRef.current) skipToIndexRef.current(activeIndexRef.current);
         } else {
           console.log('[Reels] No PLAYING yet, nudging:', target);
@@ -386,10 +392,15 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       preloadAt(target); // warm the skip destination while it scrolls into view
       setTimeout(() => {
         try {
-          flatListRef.current.scrollToIndex({ index: target, animated: true });
+          // Unanimated jump + forced settle: a dead reel must never be left
+          // parked on screen if an animated scroll gets interrupted/reverted.
+          flatListRef.current.scrollToOffset({ offset: target * ITEM_HEIGHT, animated: false });
         } catch (e) {
-          flatListRef.current.scrollToOffset({ offset: target * ITEM_HEIGHT, animated: true });
+          try {
+            flatListRef.current.scrollToIndex({ index: target, animated: false });
+          } catch (e2) {}
         }
+        if (settleToIndexRef.current) settleToIndexRef.current(target);
       }, 250);
     } else if (list.length === 0) {
       setToast('No more videos available');
@@ -610,6 +621,44 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   useEffect(() => { onActivateRef.current = onActivate; }, [onActivate]);
   useEffect(() => { skipToIndexRef.current = skipToIndex; }, [skipToIndex]);
   useEffect(() => { markSeenRef.current = markSeen; }, [markSeen]);
+  useEffect(() => { settleToIndexRef.current = settleToIndex; }, [settleToIndex]);
+
+  // Queue broken-reel ids and report them to the server in batches so cached
+  // feeds everywhere stop re-serving content that can't embed on this region.
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      if (!staleReportRef.current.size) return;
+      const ids = Array.from(staleReportRef.current);
+      staleReportRef.current.clear();
+      try {
+        await fetch(`${SERVER_URL}/api/reels/report`, {
+          method: 'POST',
+          headers: authHeaders,
+          body: JSON.stringify({ videoIds: ids }),
+        });
+      } catch (e) {}
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [authHeaders]);
+
+  // If the WebView host page never becomes ready (flaky load), nudge it once
+  // and surface a retry UI if it still will not come up - never leave the user
+  // staring at thumbnails-only because the overlay silently failed to boot.
+  useEffect(() => {
+    if (!videos.length) return;
+    const iv = setInterval(() => {
+      if (readyRef.current) { clearInterval(iv); return; }
+      if (webviewReloadsRef.current < 2) {
+        webviewReloadsRef.current += 1;
+        console.log('[Reels] WebView not ready, reloading attempt', webviewReloadsRef.current);
+        try { webViewRef.current?.reload(); } catch (e) {}
+      } else {
+        clearInterval(iv);
+        setWebviewFailed(true);
+      }
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [videos]);
 
   // ---- webview messages --------------------------------------------------------
 
@@ -624,6 +673,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         if (vid) {
           failedVideoIdsRef.current.add(vid);
           markSeenIds([vid]);
+          staleReportRef.current.add(vid);
           console.log('[Reels] Buffer error, excluding:', vid, data.errorCode);
           // If that was the reel we were warming, preload the next valid one so
           // the upcoming swipe stays instant.
@@ -644,6 +694,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         } else if (evt === 'playing') {
           playerStateRef.current = 'playing';
           noPlayCountRef.current = 0;
+          deadRunRef.current = 0;
           console.log('[Reels] playing:', data.videoId);
           lastPlayingVideoIdRef.current = currentVideoIdRef.current;
           if (playWatchRef.current) {
@@ -668,11 +719,22 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
         if (currentIndex < videosRef.current.length && isMountedRef.current) {
           console.log('[Reels] YouTube player error (skip?):', errorCode, 'videoId:', currentVideoIdRef.current);
-          const shouldSkip = isPlayableError(errorCode) || errorCode === 'API_LOAD_FAILED';
+          const shouldSkip = isPlayableError(errorCode) || errorCode === 'API_LOAD_FAILED' || data.errorCode === 'BUFFER_TIMEOUT';
           const item = videosRef.current[currentIndex];
           if (shouldSkip && item && item.videoId) {
             failedVideoIdsRef.current.add(item.videoId);
             markSeenIds([item.videoId]);
+            staleReportRef.current.add(item.videoId);
+            deadRunRef.current += 1;
+            // When the whole visible feed is broken (region/consent lock), stop
+            // skip-looping and pull a fresh batch instead of advancing forever.
+            if (deadRunRef.current >= 4) {
+              deadRunRef.current = 0;
+              console.log('[Reels] Too many broken reels in a row, refreshing feed');
+              setToast('Too many broken reels - refreshing…');
+              if (fetchFeedRef.current) fetchFeedRef.current(categoryRef.current, { refresh: true });
+              return;
+            }
             if (skipToIndexRef.current) skipToIndexRef.current(currentIndex);
           } else {
             playerStateRef.current = 'error';
@@ -840,15 +902,30 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   const onWebViewLoadEnd = useCallback(() => {
     readyRef.current = true;
+    webviewReloadsRef.current = 0;
+    setWebviewFailed(false);
     console.log('[Reels] webview ready');
     const item = videosRef.current[activeIndexRef.current];
     if (item && primeFeedRef.current) {
       primeFeedRef.current(videosRef.current);
     }
+    // Arm the play-watchdog for the first reel (activates it and starts
+    // detecting dead/invisible embeds) instead of waiting for a user swipe.
+    if (settleToIndexRef.current) settleToIndexRef.current(activeIndexRef.current);
   }, []);
 
   const onWebViewError = useCallback(() => {
     playerStateRef.current = 'error';
+    // A flaky overlay load should self-heal; after 2 failed reloads show a
+    // manual retry state instead of a silent thumbnails-only screen.
+    if (webviewReloadsRef.current < 2) {
+      webviewReloadsRef.current += 1;
+      setTimeout(() => {
+        try { webViewRef.current?.reload(); } catch (e) {}
+      }, 500);
+    } else {
+      setWebviewFailed(true);
+    }
   }, []);
 
   // ---- render ------------------------------------------------------------------
@@ -954,12 +1031,43 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           onLoadEnd={onWebViewLoadEnd}
           onError={onWebViewError}
           onHttpError={onWebViewError}
+          onRenderProcessGone={() => {
+            console.log('[Reels] WebView renderer gone, recovering');
+            playerStateRef.current = 'idle';
+            readyRef.current = false;
+            if (webviewReloadsRef.current < 2) {
+              webviewReloadsRef.current += 1;
+              setTimeout(() => {
+                try { webViewRef.current?.reload(); } catch (e) {}
+              }, 400);
+            } else {
+              setWebviewFailed(true);
+            }
+          }}
           scrollEnabled={false}
           originWhitelist={['*']}
           mixedContentMode="always"
           hardwareAccelerationEnabled={true}
         />
       </Animated.View>
+
+      {webviewFailed && (
+        <View style={[styles.errorContainer, styles.retryOverlay]}>
+          <Icon name="alert-circle-outline" size={52} color={theme.primaryLight} />
+          <Text style={[styles.errorText, { color: theme.text }]}>Reels failed to load</Text>
+          <TouchableOpacity
+            onPress={() => {
+              setWebviewFailed(false);
+              webviewReloadsRef.current = 0;
+              playerStateRef.current = 'idle';
+              try { webViewRef.current?.reload(); } catch (e) {}
+            }}
+            style={[styles.retryBtn, { backgroundColor: theme.primary }]}
+          >
+            <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {toast && <Toast message={toast} onDismiss={() => setToast('')} />}
 
@@ -1076,6 +1184,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 24,
     gap: 16,
+  },
+  retryOverlay: {
+    position: 'absolute',
+    top: 44,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 40,
   },
   errorText: {
     fontSize: fs(15),
