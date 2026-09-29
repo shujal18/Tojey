@@ -20,8 +20,18 @@ const { execFile, exec } = require('child_process');
 
 const YTDLP_BIN = process.env.YT_DLP_BIN || path.join(os.tmpdir(), 'yt-dlp-tojey');
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;   // signed URLs live ~6h
-const EXTRACT_TIMEOUT_MS = 30000;
+const EXTRACT_TIMEOUT_MS = 25000;
 const MAX_CONCURRENT = 2;
+
+// Render's datacenter IP is flagged by YouTube, so the default (web-embedded)
+// client answers "Sign in to confirm you're not a bot". Try progressively less
+// bot-gated clients; each is a fresh yt-dlp process. JS runtime (node) lets
+// yt-dlp solve YouTube's proof-of-origin token when the client needs it.
+const CLIENT_LADDER = [
+  'youtube:player_client=android_vr,ios,web_safari',
+  'youtube:player_client=tv,web_safari',
+  'youtube:player_client=default',
+];
 
 const formatCache = new Map();   // videoId -> { title, video, audio, fetchedAt }
 const inflight = new Map();      // videoId -> Promise
@@ -55,11 +65,15 @@ async function ensureBinary() {
   return YTDLP_BIN;
 }
 
-function runExtract(videoId, bin) {
+function runExtract(videoId, bin, clientArgs) {
   return new Promise((resolve, reject) => {
+    const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
+    if (clientArgs) args.push('--extractor-args', clientArgs);
+    args.push('--js-runtimes', 'node');
+    args.push(`https://www.youtube.com/shorts/${videoId}`);
     execFile(
       bin,
-      ['-J', '--no-playlist', '--skip-download', '--no-warnings', `https://www.youtube.com/shorts/${videoId}`],
+      args,
       { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {
@@ -77,6 +91,22 @@ function runExtract(videoId, bin) {
       }
     );
   });
+}
+
+async function extractWithLadder(videoId, bin) {
+  let lastErr = null;
+  for (const clientArgs of CLIENT_LADDER) {
+    try {
+      return await runExtract(videoId, bin, clientArgs);
+    } catch (e) {
+      lastErr = e;
+      if (String(e.message).toLowerCase().includes('not a bot') && clientArgs.includes('default')) {
+        // default never recovers once flagged; ladder already covered better clients
+      }
+    }
+  }
+  lastErr.code = lastErr.code || 'EXTRACT_FAIL';
+  throw lastErr;
 }
 
 const VIDEO_PREFERRED_IDS = ['298', '135', '134', '299', '302', '303', '243', '242'];
@@ -112,7 +142,7 @@ function pickAudio(formats) {
 
 async function resolveOnce(videoId) {
   const bin = await ensureBinary();
-  const json = await runExtract(videoId, bin);
+  const json = await extractWithLadder(videoId, bin);
   const video = pickVideo(json.formats);
   const audio = pickAudio(json.formats);
   if (!video || !video.url) {
