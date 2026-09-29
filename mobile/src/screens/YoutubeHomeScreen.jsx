@@ -1,13 +1,22 @@
+// YouTube surface container: Home feed (categories + shorts strip + continue
+// watching + subscriptions), in-surface Search / Channel / Playlist / Library
+// sub-screens and the full player modal.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, Image, StyleSheet, Modal, ActivityIndicator, Dimensions,
+  View, Text, TouchableOpacity, FlatList, Image, StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { SERVER_URL } from '../config';
 import { fs } from '../utils/size';
-import { enqueue, subscribe, thumbUrl, fmtSize } from '../services/downloadsStore';
+import { enqueue, subscribe, thumbUrl } from '../services/downloadsStore';
+import { VideoCard } from '../components/YouTubeCards';
+import { initLibrary, subscribeLibrary, storeSnapshot } from '../services/library';
+import YoutubePlayerModal from './YoutubePlayerModal';
+import YoutubeSearchScreen from './YoutubeSearchScreen';
+import YoutubeChannelScreen from './YoutubeChannelScreen';
+import YoutubePlaylistScreen from './YoutubePlaylistScreen';
+import YoutubeLibraryScreen from './YoutubeLibraryScreen';
 
 const FALLBACK_CATEGORIES = [
   { id: 'trending', label: 'Trending' },
@@ -18,14 +27,6 @@ const FALLBACK_CATEGORIES = [
   { id: 'news', label: 'News' },
 ];
 
-function fmtDuration(sec) {
-  if (!sec) return '';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
-}
-
 export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
@@ -35,24 +36,40 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [hasMore, setHasMore] = useState(false);
   const nextPageTokenRef = useRef(null);
   const [error, setError] = useState('');
-  const [watch, setWatch] = useState(null);
   const [shortsStrip, setShortsStrip] = useState([]);
   const [dlMap, setDlMap] = useState({});
+  const [snap, setSnap] = useState(null);
   const requestIdRef = useRef(0);
   const [categories] = useState(FALLBACK_CATEGORIES);
 
+  // Sub-view routing: search | channel | playlist | library | home
+  const [view, setView] = useState('home');
+  const [channelRoute, setChannelRoute] = useState(null);
+  const [playlistRoute, setPlaylistRoute] = useState(null);
+  const [watch, setWatch] = useState(null);
+
   const authHeaders = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token]);
 
-  useEffect(() => {
-    return subscribe((list) => {
-      const m = {};
-      list.forEach((e) => {
-        if (e.status === 'done' || e.status === 'downloading' || e.status === 'resolving' || e.status === 'error') {
-          m[e.videoId] = e;
-        }
-      });
-      setDlMap(m);
+  useEffect(() => subscribe((list) => {
+    const m = {};
+    list.forEach((e) => {
+      if (e.status === 'done' || e.status === 'downloading' || e.status === 'resolving' || e.status === 'error') {
+        m[e.videoId] = e;
+      }
     });
+    setDlMap(m);
+  }), []);
+
+  useEffect(() => {
+    let active = true;
+    initLibrary().then(() => {
+      if (active) setSnap(storeSnapshot());
+    });
+    const unsub = subscribeLibrary(() => setSnap(storeSnapshot()));
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
   const fetchPage = useCallback(
@@ -69,8 +86,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
         const data = await res.json();
         if (reqId !== requestIdRef.current) return;
         setVideos((prev) => (opts.replace ? data.videos || [] : [...prev, ...(data.videos || [])]));
-        if (opts.replace) nextPageTokenRef.current = data.nextPageToken;
-        else nextPageTokenRef.current = data.nextPageToken;
+        nextPageTokenRef.current = data.nextPageToken;
         setHasMore(!!data.hasMore);
         if (data.videos && data.videos.length === 0 && !opts.replace) setHasMore(false);
         if (data.warning) setError(data.warning);
@@ -86,7 +102,6 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     [authHeaders]
   );
 
-  // Fast "Shorts" strip under the categories (lightweight, reused reels feed).
   useEffect(() => {
     let mounted = true;
     fetch(`${SERVER_URL}/api/reels/feed?category=trending`, { headers: authHeaders })
@@ -114,62 +129,98 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   };
 
   const startDownload = (v) => {
+    console.log('[Download] enqueue', v.videoId);
     enqueue(v).catch(() => {});
   };
 
+  const openChannel = (item) => {
+    setChannelRoute(item && (item.channelId || item.channelTitle) ? {
+      channelId: item.channelId || '',
+      channelTitle: item.channelTitle || item.title || '',
+      avatar: item.avatar || item.thumbnailUrl || '',
+    } : item);
+    setView('channel');
+  };
+
+  const openPlaylist = (pl) => {
+    const route = typeof pl === 'string' ? { playlistId: pl } : pl;
+    setPlaylistRoute(route);
+    setView('playlist');
+  };
+
+  // --- sub-screens ---------------------------------------------------------
+  const sub =
+    view === 'search' ? (
+      <YoutubeSearchScreen
+        token={token}
+        onBack={() => setView('home')}
+        onPlay={setWatch}
+        onOpenChannel={openChannel}
+        onOpenPlaylist={(id) => openPlaylist(id)}
+        dlMap={dlMap}
+        onDownload={startDownload}
+      />
+    ) : view === 'channel' && channelRoute ? (
+      <YoutubeChannelScreen
+        token={token}
+        channelId={channelRoute.channelId}
+        onBack={() => setView('home')}
+        onPlay={setWatch}
+        onOpenPlaylist={(id) => openPlaylist(id)}
+        dlMap={dlMap}
+        onDownload={startDownload}
+      />
+    ) : view === 'playlist' && playlistRoute ? (
+      <YoutubePlaylistScreen
+        token={token}
+        playlist={playlistRoute}
+        onBack={() => setView('home')}
+        onPlay={setWatch}
+        onOpenChannel={openChannel}
+        dlMap={dlMap}
+        onDownload={startDownload}
+      />
+    ) : view === 'library' ? (
+      <YoutubeLibraryScreen
+        token={token}
+        onBack={() => setView('home')}
+        onPlay={setWatch}
+        onOpenChannel={openChannel}
+        onOpenPlaylist={openPlaylist}
+        dlMap={dlMap}
+        onDownload={startDownload}
+      />
+    ) : null;
+
   const width = Dimensions.get('window').width;
   const cardW = (width - 20 - 16 * 2) / 2;
-
-  const renderCard = ({ item }) => {
-    const dl = dlMap[item.videoId];
-    return (
-      <TouchableOpacity
-        style={[styles.card, { width: cardW }]}
-        activeOpacity={0.82}
-        onPress={() => setWatch(item)}
-      >
-        <View style={styles.thumbWrap}>
-          <Image source={{ uri: thumbUrl(item) }} style={styles.thumb} resizeMode="cover" />
-          <View style={styles.thumbBadge}>
-            <Text style={styles.thumbBadgeText}>{fmtDuration(item.durationSeconds)}</Text>
-          </View>
-          <TouchableOpacity
-            style={styles.dlBtn}
-            onPress={() => (dl && dl.status === 'done' ? null : startDownload(item))}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            {dl ? (
-              <Icon name={dl.status === 'done' ? 'checkmark-circle' : 'time-outline'} size={16} color="#fff" />
-            ) : (
-              <Icon name="download-outline" size={16} color="#fff" />
-            )}
-          </TouchableOpacity>
-          {dl && (dl.status === 'downloading' || dl.status === 'resolving') && (
-            <View style={styles.dlBar}>
-              <View style={[styles.dlBarFill, { width: `${Math.max(3, dl.progress)}%` }]} />
-            </View>
-          )}
-        </View>
-        <Text style={[styles.cardTitle, { color: theme.text }]} numberOfLines={2}>{item.title}</Text>
-        <Text style={[styles.cardChannel, { color: theme.textSecondary }]} numberOfLines={1}>{item.channelTitle}</Text>
-      </TouchableOpacity>
-    );
-  };
+  const historyArr = snap?.history || [];
+  const subsArr = snap?.subs || [];
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
-      <View style={[styles.header, { backgroundColor: theme.background }]}>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.brand, { color: theme.primary }]}>Tojey</Text>
-          <Text style={[styles.tagline, { color: theme.textSecondary }]}>YouTube inside</Text>
-        </View>
-        <TouchableOpacity onPress={onOpenChats} style={styles.headerBtn}>
-          <Icon name="chatbubbles-outline" size={23} color={theme.primary} />
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 12 }]}>
-          <Icon name="settings-outline" size={22} color={theme.primary} />
-        </TouchableOpacity>
-      </View>
+      {sub ? (
+        sub
+      ) : (
+        <>
+          <View style={[styles.header, { backgroundColor: theme.background }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.brand, { color: theme.primary }]}>Tojey</Text>
+              <Text style={[styles.tagline, { color: theme.textSecondary }]}>YouTube inside</Text>
+            </View>
+            <TouchableOpacity onPress={() => setView('search')} style={styles.headerBtn}>
+              <Icon name="search" size={22} color={theme.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setView('library')} style={[styles.headerBtn, { marginLeft: 12 }]}>
+              <Icon name="library-outline" size={22} color={theme.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onOpenChats} style={[styles.headerBtn, { marginLeft: 12 }]}>
+              <Icon name="chatbubbles-outline" size={23} color={theme.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 12 }]}>
+              <Icon name="settings-outline" size={22} color={theme.primary} />
+            </TouchableOpacity>
+          </View>
 
       {loading && videos.length === 0 ? (
         <View style={styles.center}>
@@ -188,7 +239,9 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           keyExtractor={(v) => v.videoId}
           numColumns={2}
           columnWrapperStyle={styles.row}
-          renderItem={renderCard}
+          renderItem={({ item }) => (
+            <VideoCard item={item} width={cardW} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} />
+          )}
           onEndReached={loadMore}
           onEndReachedThreshold={0.5}
           ListHeaderComponent={
@@ -209,6 +262,53 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
                   );
                 })}
               </View>
+
+              {historyArr.length > 0 && (
+                <View style={styles.strip}>
+                  <Text style={[styles.stripTitle, { color: theme.text }]}>Continue watching</Text>
+                  <FlatList
+                    data={historyArr.slice(0, 10)}
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(h) => h.videoId}
+                    contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity style={{ width: 140 }} activeOpacity={0.85} onPress={() => setWatch(item)}>
+                        <Image source={{ uri: thumbUrl(item) }} style={styles.continueThumb} resizeMode="cover" />
+                        <Text style={{ color: theme.text, fontSize: fs(12), fontWeight: '600', marginTop: 4 }} numberOfLines={2}>{item.title}</Text>
+                      </TouchableOpacity>
+                    )}
+                  />
+                </View>
+              )}
+
+              {subsArr.length > 0 && (
+                <View style={styles.strip}>
+                  <Text style={[styles.stripTitle, { color: theme.text }]}>Subscriptions</Text>
+                  <FlatList
+                    data={subsArr}
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(s) => s.channelId}
+                    contentContainerStyle={{ paddingHorizontal: 16, gap: 14 }}
+                    renderItem={({ item }) => (
+                      <TouchableOpacity style={{ width: 64, alignItems: 'center' }} activeOpacity={0.85} onPress={() => openChannel(item)}>
+                        {item.avatar ? (
+                          <Image source={{ uri: item.avatar }} style={styles.subAvatar} resizeMode="cover" />
+                        ) : (
+                          <View style={[styles.subAvatar, { backgroundColor: theme.inputBg, alignItems: 'center', justifyContent: 'center' }]}>
+                            <Icon name="person" size={22} color={theme.textSecondary} />
+                          </View>
+                        )}
+                        <Text style={{ color: theme.textSecondary, fontSize: fs(10), marginTop: 4, textAlign: 'center' }} numberOfLines={2}>
+                          {item.channelTitle || item.title}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  />
+                </View>
+              )}
+
               {shortsStrip.length > 0 && (
                 <TouchableOpacity onPress={onChangeToShorts} activeOpacity={0.85}>
                   <View style={[styles.shortsHeaderRow, { marginTop: 6 }]}>
@@ -241,52 +341,22 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           showsVerticalScrollIndicator={false}
         />
       )}
+      </>
+      )}
 
       {!!watch && (
-        <WatchModal item={watch} authHeaders={authHeaders} onClose={() => setWatch(null)} dlMap={dlMap} onDownload={startDownload} />
+        <YoutubePlayerModal
+          item={watch}
+          authHeaders={authHeaders}
+          token={token}
+          onClose={() => setWatch(null)}
+          onOpenChannel={openChannel}
+          onOpenPlaylist={openPlaylist}
+          dlMap={dlMap}
+          onDownload={startDownload}
+        />
       )}
     </View>
-  );
-}
-
-function WatchModal({ item, authHeaders, onClose, dlMap, onDownload }) {
-  const { theme } = useTheme();
-  const dl = dlMap[item.videoId];
-  return (
-    <Modal visible transparent={false} animationType="fade" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: theme.background }}>
-        <View style={[styles.watchHeader, { backgroundColor: theme.background }]}>
-          <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
-            <Icon name="arrow-back" size={22} color={theme.text} />
-          </TouchableOpacity>
-          <View style={{ flex: 1, marginHorizontal: 10 }}>
-            <Text style={{ color: theme.text, fontSize: fs(14), fontWeight: '700' }} numberOfLines={2}>{item.title}</Text>
-            <Text style={{ color: theme.textSecondary, fontSize: fs(12) }} numberOfLines={1}>{item.channelTitle}</Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.watchDl, { backgroundColor: dl && dl.status === 'done' ? theme.primaryLight : theme.primary }]}
-            onPress={() => (dl && dl.status === 'done' ? null : onDownload(item))}
-          >
-            {dl && (dl.status === 'downloading' || dl.status === 'resolving') ? (
-              <Text style={{ color: theme.primary, fontWeight: '800', fontSize: fs(12) }}>{Math.max(0, Math.round(dl.progress))}%</Text>
-            ) : (
-              <Icon name={dl && dl.status === 'done' ? 'checkmark' : 'download-outline'} size={18} color={dl && dl.status === 'done' ? theme.primary : '#fff'} />
-            )}
-          </TouchableOpacity>
-        </View>
-        <View style={{ flex: 1, backgroundColor: '#000' }}>
-          <WebView
-            source={{ uri: `https://www.youtube-nocookie.com/embed/${item.videoId}?autoplay=1&playsinline=1&rel=0&modestbranding=1` }}
-            style={{ flex: 1 }}
-            javaScriptEnabled
-            domStorageEnabled
-            allowsInlineMediaPlayback
-            mediaPlaybackRequiresUserAction={false}
-            androidLayerType="hardware"
-          />
-        </View>
-      </View>
-    </Modal>
   );
 }
 
@@ -307,41 +377,14 @@ const styles = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 16, gap: 8 },
   chip: { paddingHorizontal: 13, paddingVertical: 6, borderRadius: 16 },
   chipText: { fontSize: fs(12), fontWeight: '600' },
+  strip: { marginTop: 18 },
+  stripTitle: { fontSize: fs(15), fontWeight: '800', marginBottom: 10, paddingHorizontal: 16 },
+  continueThumb: { width: 140, height: 79, borderRadius: 10, backgroundColor: '#000' },
+  subAvatar: { width: 58, height: 58, borderRadius: 29, backgroundColor: '#000' },
   sectionTitle: { fontSize: fs(15), fontWeight: '800', marginHorizontal: 16, marginTop: 16, marginBottom: 8 },
   row: { paddingHorizontal: 8, gap: 8, marginBottom: 12 },
-  card: { marginBottom: 12 },
-  thumbWrap: {
-    width: '100%',
-    aspectRatio: 16 / 9,
-    borderRadius: 12,
-    overflow: 'hidden',
-    backgroundColor: '#000',
-  },
-  thumb: { width: '100%', height: '100%' },
-  thumbBadge: {
-    position: 'absolute', right: 6, bottom: 6,
-    backgroundColor: 'rgba(16,11,26,0.85)',
-    borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
-  },
-  thumbBadgeText: { color: '#fff', fontSize: fs(10), fontWeight: '700' },
-  dlBtn: {
-    position: 'absolute', left: 6, top: 6, width: 24, height: 24, borderRadius: 12,
-    backgroundColor: 'rgba(16,11,26,0.7)', alignItems: 'center', justifyContent: 'center',
-  },
-  dlBar: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, backgroundColor: 'rgba(255,255,255,0.25)' },
-  dlBarFill: { height: 3, backgroundColor: '#8B5CF6' },
-  cardTitle: { fontSize: fs(13), fontWeight: '600', marginTop: 6, paddingHorizontal: 2, lineHeight: 17 },
-  cardChannel: { fontSize: fs(11), marginTop: 2, paddingHorizontal: 2 },
   shortsHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16 },
   shortsHeader: { fontSize: fs(16), fontWeight: '800' },
   shortsRow: { flexDirection: 'row', paddingHorizontal: 16, marginTop: 10, gap: 8 },
   shortsThumb: { width: 92, height: 126, borderRadius: 10, backgroundColor: '#000' },
-  watchHeader: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 12, paddingVertical: 10,
-  },
-  watchDl: {
-    width: 38, height: 38, borderRadius: 20,
-    alignItems: 'center', justifyContent: 'center',
-  },
 });

@@ -700,6 +700,130 @@ app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
   }
 });
 
+// --- LibreTube-style innertube API (no Data API quota) ----------------------
+// Search, channels, playlists, watch pages and related videos run through the
+// direct innertube scraper in ytInner.js. Stream URLs stay client-side (signed
+// googlevideo URLs are IP-bound, so the backend cannot resolve playable links
+// for the device - the mobile client resolves its own streams via getStreams).
+const yt = require('./ytInner');
+const YTID = /^[a-zA-Z0-9_-]{11}$/;
+const ID = /^[a-zA-Z0-9_-]+$/;
+
+app.get('/api/yt/search', authMiddleware, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 200);
+    if (!q) return res.status(400).json({ error: 'q is required' });
+    const filter = String(req.query.filter || 'all').slice(0, 20);
+    const token = String(req.query.token || '').slice(0, 4000) || null;
+    const result = await yt.search(q, token, filter);
+    res.json(result);
+  } catch (e) {
+    console.error('yt:search error', e.message);
+    res.status(502).json({ error: 'search unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/suggestions', authMiddleware, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    if (!q) return res.json({ suggestions: [] });
+    const suggestions = await yt.suggestions(q);
+    res.json({ suggestions });
+  } catch (e) {
+    console.error('yt:suggestions error', e.message);
+    res.json({ suggestions: [] });
+  }
+});
+
+app.get('/api/yt/channel/:channelId', authMiddleware, async (req, res) => {
+  try {
+    const channelId = String(req.params.channelId || '');
+    if (!/^UC[a-zA-Z0-9_-]{22}$/.test(channelId)) return res.status(400).json({ error: 'Invalid channel id' });
+    const tab = String(req.query.tab || 'videos').slice(0, 20);
+    const token = String(req.query.token || '').slice(0, 4000) || null;
+    const skipCache = req.query.refresh === 'true';
+    const result = await yt.channel(channelId, tab, token, skipCache);
+    res.json(result);
+  } catch (e) {
+    console.error('yt:channel error', e.message);
+    res.status(502).json({ error: 'channel unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/playlist/:playlistId', authMiddleware, async (req, res) => {
+  try {
+    const playlistId = String(req.params.playlistId || '');
+    if (!ID.test(playlistId) || playlistId.startsWith('VL')) {
+      return res.status(400).json({ error: 'Invalid playlist id' });
+    }
+    const token = String(req.query.token || '').slice(0, 4000) || null;
+    const skipCache = req.query.refresh === 'true';
+    const result = await yt.playlist(playlistId, token, skipCache);
+    res.json(result);
+  } catch (e) {
+    console.error('yt:playlist error', e.message);
+    res.status(502).json({ error: 'playlist unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/video/:videoId', authMiddleware, async (req, res) => {
+  try {
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    const skipCache = req.query.refresh === 'true';
+    const info = await yt.videoInfo(videoId, null, skipCache);
+    const [sponsor, ryd, dearrow] = await Promise.all([
+      yt.sponsorSegments(videoId),
+      yt.dislikes(videoId).catch(() => null),
+      yt.dearrow(videoId).catch(() => null),
+    ]);
+    info.sponsorSegments = sponsor;
+    info.ryd = ryd;
+    info.dearrow = dearrow;
+    res.json(info);
+  } catch (e) {
+    console.error('yt:video error', e.message);
+    res.status(502).json({ error: 'video unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/related/:videoId', authMiddleware, async (req, res) => {
+  try {
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    const token = String(req.query.token || '').slice(0, 4000) || null;
+    if (!token) return res.status(400).json({ error: 'token is required' });
+    res.json(await yt.videoInfo(videoId, token, true));
+  } catch (e) {
+    console.error('yt:related error', e.message);
+    res.status(502).json({ error: 'related unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/sponsorblock/:videoId', authMiddleware, async (req, res) => {
+  try {
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    res.json({ segments: await yt.sponsorSegments(videoId) });
+  } catch (e) {
+    console.error('yt:sponsorblock error', e.message);
+    res.json({ segments: [] });
+  }
+});
+
+app.get('/api/yt/dislikes/:videoId', authMiddleware, async (req, res) => {
+  try {
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    const data = await yt.dislikes(videoId);
+    if (!data) return res.json({ dislikes: null });
+    res.json(data);
+  } catch (e) {
+    console.error('yt:dislikes error', e.message);
+    res.json({ dislikes: null });
+  }
+});
+
 // Reels YouTube quota status endpoint
 app.get('/api/reels/quota-status', authMiddleware, async (req, res) => {
   try {

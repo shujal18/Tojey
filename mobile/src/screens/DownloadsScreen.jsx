@@ -132,7 +132,7 @@ function OfflinePlayer({ item, theme, onClose }) {
         <View style={{ flex: 1, backgroundColor: '#000' }}>
           <WebView
             ref={webRef}
-            source={{ html: OFFLINE_PLAYER_HTML }}
+            source={{ html: OFFLINE_PLAYER_HTML, baseUrl: 'file:///' }}
             style={{ flex: 1 }}
             javaScriptEnabled
             domStorageEnabled
@@ -140,6 +140,11 @@ function OfflinePlayer({ item, theme, onClose }) {
             allowFileAccessFromFileURLs
             allowUniversalAccessFromFileURLs
             onLoadEnd={load}
+            onMessage={(e) => {
+              try {
+                console.log('[OfflinePlayer]', e.nativeEvent.data);
+              } catch (err) {}
+            }}
             androidLayerType="hardware"
           />
         </View>

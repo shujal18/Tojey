@@ -76,8 +76,11 @@ export const OFFLINE_PLAYER_HTML = `<!DOCTYPE html>
       }
       function playPair() {
         if (stopped) return;
-        if (video && video.paused) video.play().catch(function () {});
-        if (audio && audio.paused) audio.play().catch(function () {});
+        var vp = video && video.paused ? video.play() : Promise.resolve();
+        var ap = audio && audio.paused ? audio.play() : Promise.resolve();
+        Promise.all([vp, ap]).catch(function () {
+          bigplay.classList.add('show');
+        });
       }
       function onPlaying() {
         spinner.classList.remove('show');

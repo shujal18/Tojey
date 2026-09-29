@@ -54,28 +54,35 @@ export async function getStreams(videoId, opts = {}) {
     racyCheckOk: true,
     playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
   };
-  const res = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': UA },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`youtube player status ${res.status}`);
-  const j = await res.json();
-  if (j.error) throw new Error(j.error.message || 'youtube player error');
-  if (!j.streamingData) throw new Error('no streaming data for video');
-  const af = j.streamingData.adaptiveFormats || [];
-  const video = bestVideo(af, maxHeight);
-  const audio = bestAudio(af);
-  if (!video || !video.url) throw new Error('no playable video stream');
-  const details = j.videoDetails || {};
-  return {
-    videoId,
-    title: String(details.title || ''),
-    channel: String(details.author || ''),
-    videoUrl: video.url,
-    audioUrl: audio ? audio.url : null,
-    height: video.height || 0,
-    fps: video.fps || 0,
-    itag: video.itag || 0,
-  };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 30000);
+  try {
+    const res = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': UA },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+    if (!res.ok) throw new Error(`youtube player status ${res.status}`);
+    const j = await res.json();
+    if (j.error) throw new Error(j.error.message || 'youtube player error');
+    if (!j.streamingData) throw new Error('no streaming data for video');
+    const af = j.streamingData.adaptiveFormats || [];
+    const video = bestVideo(af, maxHeight);
+    const audio = bestAudio(af);
+    if (!video || !video.url) throw new Error('no playable video stream');
+    const details = j.videoDetails || {};
+    return {
+      videoId,
+      title: String(details.title || ''),
+      channel: String(details.author || ''),
+      videoUrl: video.url,
+      audioUrl: audio ? audio.url : null,
+      height: video.height || 0,
+      fps: video.fps || 0,
+      itag: video.itag || 0,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
