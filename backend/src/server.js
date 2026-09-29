@@ -632,8 +632,8 @@ app.get('/api/reels/format/:videoId', authMiddleware, async (req, res) => {
     const f = await getFormat(videoId);
     res.json(f);
   } catch (e) {
-    console.error('reels:format error', videoId, e.message);
-    res.status(502).json({ error: 'format unavailable' });
+    console.error('reels:format error', videoId, e.code, e.message);
+    res.status(502).json({ error: 'format unavailable', code: e.code, detail: String(e.message).slice(0, 300) });
   }
 });
 

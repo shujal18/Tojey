@@ -62,11 +62,17 @@ function runExtract(videoId, bin) {
       ['-J', '--no-playlist', '--skip-download', '--no-warnings', `https://www.youtube.com/shorts/${videoId}`],
       { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout) => {
-        if (err) return reject(err);
+        if (err) {
+          const e = new Error(String((err.stderr || '').split('\n').filter(Boolean).slice(0, 4).join(' | ') || err.message).slice(0, 300));
+          e.code = 'EXTRACT_FAIL';
+          return reject(e);
+        }
         try {
           resolve(JSON.parse(stdout));
         } catch (e) {
-          reject(new Error('bad extract json'));
+          const er = new Error('bad extract json');
+          er.code = 'BAD_JSON';
+          reject(er);
         }
       }
     );
@@ -110,7 +116,9 @@ async function resolveOnce(videoId) {
   const video = pickVideo(json.formats);
   const audio = pickAudio(json.formats);
   if (!video || !video.url) {
-    const e = new Error('no playable video format');
+    const e = new Error(
+      `no playable video format (formats=${(json.formats || []).length}, ids=${(json.formats || []).slice(0, 12).map((f) => f.format_id).join(',')})`
+    );
     e.code = 'NO_VIDEO_FORMAT';
     throw e;
   }
