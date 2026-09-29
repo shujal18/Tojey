@@ -13,11 +13,15 @@ import { getNudgeVibrationEnabled } from '../services/chatHead';
 import { absUrl, SERVER_URL } from '../config';
 import { fs } from '../utils/size';
 import ReelsScreen from './ReelsScreen';
+import YoutubeHomeScreen from './YoutubeHomeScreen';
+import DownloadsScreen from './DownloadsScreen';
+import BottomTabBar from '../components/BottomTabBar';
 
 export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
+  const [homeRefreshTick, setHomeRefreshTick] = useState(0);
   const [users, setUsers] = useState([]);
   const [presence, setPresence] = useState({});
   const [onCall, setOnCall] = useState({});
@@ -271,7 +275,10 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
           <View style={[styles.header, { backgroundColor: theme.background }]}>
             <Text style={[styles.title, { color: theme.primaryDeep }]}>Tojey</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity onPress={onOpenSettings} style={styles.headerBtn}>
+              <TouchableOpacity onPress={() => setTab('home')} style={styles.headerBtn}>
+                <Icon name="play-circle-outline" size={24} color={theme.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 4 }]}>
                 <Icon name="settings-outline" size={22} color={theme.primary} />
               </TouchableOpacity>
               <TouchableOpacity onPress={onLogout} style={[styles.headerBtn, { marginLeft: 4 }]}>
@@ -368,8 +375,22 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         </View>
       )}
 
-      {tab === 'reels' && (
-        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => setTab('chats')} />
+      {tab === 'home' && (
+        <YoutubeHomeScreen
+          token={token}
+          refreshTick={homeRefreshTick}
+          onOpenChats={() => setTab('chats')}
+          onOpenSettings={onOpenSettings}
+          onChangeToShorts={() => setTab('shorts')}
+        />
+      )}
+
+      {tab === 'shorts' && (
+        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => setTab('home')} />
+      )}
+
+      {tab === 'downloads' && (
+        <DownloadsScreen onBack={() => setTab('home')} />
       )}
 
       {/* Long-press actions: send notification / clear messages */}
@@ -470,12 +491,19 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
         </View>
       </Modal>
 
-      {tab !== 'reels' && (
-        <View style={[styles.nav, { backgroundColor: theme.navBg, borderTopColor: theme.border }]}>
-          <TabBtn label="Chats" active={tab === 'chats'} onPress={() => setTab('chats')} icon="chatbubbles-outline" theme={theme} activeIcon="chatbubbles" />
-          <TabBtn label="Reels" active={tab === 'reels'} onPress={() => { setTab('reels'); if (tab === 'reels') setReelsRefreshTick((t) => t + 1); }} icon="videocam-outline" theme={theme} activeIcon="videocam" />
-          <TabBtn label="Settings" active={tab === 'settings'} onPress={() => { onOpenSettings(); }} icon="settings-outline" theme={theme} activeIcon="settings" />
-        </View>
+      {tab !== 'chats' && (
+        <BottomTabBar
+          active={tab}
+          onChange={(k) => {
+            if (k === tab) {
+              if (k === 'home') setHomeRefreshTick((t) => t + 1);
+              else if (k === 'shorts') setReelsRefreshTick((t) => t + 1);
+            } else {
+              setTab(k);
+            }
+          }}
+          theme={theme}
+        />
       )}
 
       <Toast message={nudgeToast} bottom={92} />

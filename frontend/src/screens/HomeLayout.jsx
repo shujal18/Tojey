@@ -6,12 +6,13 @@ import CallScreen from '../components/CallScreen';
 import { createSocket, emitAppVisibility } from '../services/socket';
 import { subscribeWebPush, stopWebPush } from '../services/webPush';
 import ChatListScreen from './ChatListScreen';
-import SettingsScreen from './SettingsScreen';
 import ChatRoomScreen from './ChatRoomScreen';
 import ReelsScreen from './ReelsScreen';
+import YoutubeHomeScreen from './YoutubeHomeScreen';
+import DownloadsScreen from './DownloadsScreen';
 import HeadsUpBanner from '../components/HeadsUpBanner';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, Clapperboard } from 'lucide-react';
+import { Home, PlaySquare, Download } from 'lucide-react';
 
 // Opens the ?chat=<userId> conversation a web-push notification click requested. Waits
 // for the users list (loaded by ChatProvider) so the full contact object is available,
@@ -34,18 +35,20 @@ function DeepLinkOpener({ targetId, onDone, onOpenChat }) {
 }
 
 export default function HomeLayout() {
-  const { user, token, logout } = useAuth();
+  const { user, token } = useAuth();
   const { theme } = useTheme();
   const [activeTab, setActiveTab] = useState('chats');
   const [openChat, setOpenChat] = useState(null);
   const [socket, setSocket] = useState(null);
-  const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
+  const [shortsRefreshTick, setShortsRefreshTick] = useState(0);
+  const [homeRefreshTick, setHomeRefreshTick] = useState(0);
   const [pendingChatId, setPendingChatId] = useState(null);
 
   const prevTabRef = React.useRef(activeTab);
   const handleTabPress = (key) => {
-    if (key === 'reels' && prevTabRef.current === 'reels') {
-      setReelsRefreshTick(t => t + 1);
+    if (prevTabRef.current === key) {
+      if (key === 'home') setHomeRefreshTick((t) => t + 1);
+      else if (key === 'shorts') setShortsRefreshTick((t) => t + 1);
     }
     setActiveTab(key);
     prevTabRef.current = key;
@@ -99,9 +102,9 @@ export default function HomeLayout() {
   }), [user]);
 
   const tabs = [
-    { key: 'chats', label: 'Chats', icon: <MessageCircle size={22} /> },
-    { key: 'reels', label: 'Reels', icon: <Clapperboard size={22} /> },
-    { key: 'settings', label: 'Settings', icon: <Settings size={22} /> },
+    { key: 'home', label: 'Home', icon: <Home size={22} /> },
+    { key: 'shorts', label: 'Shorts', icon: <PlaySquare size={22} /> },
+    { key: 'downloads', label: 'Downloads', icon: <Download size={22} /> },
   ];
 
   const handleOpenChat = (otherUser) => {
@@ -145,11 +148,33 @@ export default function HomeLayout() {
           flexDirection: 'column',
         }}>
           {activeTab === 'chats' && <ChatListScreen onOpenChat={handleOpenChat} />}
-          {activeTab === 'reels' && <ReelsScreen token={token} user={currentUser} refreshTick={reelsRefreshTick} onBack={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }} />}
-          {activeTab === 'settings' && <SettingsScreen onLogout={logout} />}
+          {activeTab === 'home' && (
+            <YoutubeHomeScreen
+              token={token}
+              refreshTick={homeRefreshTick}
+              onOpenChats={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }}
+              onOpenSettings={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }}
+              onChangeToShorts={() => { setActiveTab('shorts'); prevTabRef.current = 'shorts'; }}
+            />
+          )}
+          {activeTab === 'shorts' && (
+            <ReelsScreen
+              token={token}
+              user={currentUser}
+              refreshTick={shortsRefreshTick}
+              onBack={() => { setActiveTab('home'); prevTabRef.current = 'home'; }}
+            />
+          )}
+          {activeTab === 'downloads' && (
+            <DownloadsScreen
+              token={token}
+              onBack={() => { setActiveTab('home'); prevTabRef.current = 'home'; }}
+              onOpenChats={() => { setActiveTab('chats'); prevTabRef.current = 'chats'; }}
+            />
+          )}
         </div>
 
-        {activeTab !== 'reels' && (
+        {activeTab !== 'chats' && (
           <div style={{
             display: 'flex',
             background: theme.navBg,
@@ -168,6 +193,9 @@ export default function HomeLayout() {
                 color: activeTab === t.key ? theme.primary : theme.textSecondary,
                 fontSize: 11,
                 fontWeight: activeTab === t.key ? 600 : 500,
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
                 transition: 'color 0.2s',
               }}>
                 {t.icon}
