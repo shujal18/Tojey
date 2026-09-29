@@ -637,6 +637,69 @@ app.get('/api/reels/format/:videoId', authMiddleware, async (req, res) => {
   }
 });
 
+// YouTube (Home video grid) feed — regular-length videos, not Shorts.
+app.get('/api/youtube/feed', authMiddleware, async (req, res) => {
+  try {
+    const { category = 'trending', refresh = 'false', pageToken } = req.query;
+    const forceRefresh = refresh === 'true';
+    const { getVideosFeed, getVideoCategories, getQuotaStatus } = require('./youtube');
+    const valid = getVideoCategories().map((c) => c.id);
+    if (!valid.includes(category)) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+    const result = await getVideosFeed(category, forceRefresh, pageToken);
+    res.json({
+      videos: result.videos.map((v) => ({
+        videoId: v.videoId,
+        title: v.title,
+        thumbnailUrl: v.thumbnailUrl,
+        durationSeconds: v.durationSeconds,
+        category: v.category,
+        channelTitle: v.channelTitle,
+        publishedAt: v.publishedAt,
+        source: v.source,
+      })),
+      cached: result.cached,
+      category,
+      nextPageToken: result.nextPageToken || null,
+      hasMore: !!result.hasMore,
+      source: result.source,
+      warning: result.warning,
+      quota: getQuotaStatus(),
+    });
+  } catch (e) {
+    console.error('youtube:feed error', e.message);
+    if (e.message.includes('YOUTUBE_API_KEY')) {
+      return res.status(503).json({ error: 'YouTube service unavailable - API key not configured' });
+    }
+    if (e.message.startsWith('QUOTA_')) {
+      return res.status(200).json({
+        videos: [],
+        cached: false,
+        category,
+        nextPageToken: null,
+        hasMore: false,
+        source: 'empty',
+        warning: 'YouTube quota exceeded - no cached content available',
+        quota: require('./youtube').getQuotaStatus(),
+      });
+    }
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// YouTube (Home video grid) categories list.
+app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
+  try {
+    const { getVideoCategories } = require('./youtube');
+    const categories = getVideoCategories().map((c) => ({ id: c.id, label: c.label }));
+    res.json({ categories });
+  } catch (e) {
+    console.error('youtube:categories error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Reels YouTube quota status endpoint
 app.get('/api/reels/quota-status', authMiddleware, async (req, res) => {
   try {

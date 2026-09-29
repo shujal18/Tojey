@@ -547,6 +547,141 @@ function clearMemoryCache() {
   console.log('[Reels] Memory cache cleared');
 }
 
+// ---------------------------------------------------------------------------
+// Regular-length "YouTube" feed (Home grid). Same Data-API plumbing, different
+// duration band so Shorts don't leak into the video grid. Kept separate from the
+// shorts feed to avoid touching its heavily tuned cache/failed-video machinery.
+// ---------------------------------------------------------------------------
+const VIDEO_CATEGORIES = {
+  trending: { query: 'trending now', label: 'Trending' },
+  music: { query: 'popular music videos', label: 'Music' },
+  comedy: { query: 'funny comedy clips', label: 'Comedy' },
+  gaming: { query: 'gaming videos', label: 'Gaming' },
+  tech: { query: 'tech reviews', label: 'Tech' },
+  news: { query: 'tech news', label: 'News' },
+};
+
+const VIDEO_MIN_SECONDS = 120; // exclude Shorts-style clips from the grid
+const VIDEO_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+
+const videoMemoryCache = new Map();
+
+function getVideoCacheEntry(category) {
+  const entry = videoMemoryCache.get(category);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    videoMemoryCache.delete(category);
+    return null;
+  }
+  return entry;
+}
+
+function setVideoCacheEntry(category, videos, nextPageToken) {
+  videoMemoryCache.set(category, {
+    items: videos,
+    nextPageToken: nextPageToken || null,
+    expiresAt: Date.now() + VIDEO_CACHE_TTL_MS,
+  });
+  if (videoMemoryCache.size > 50) {
+    videoMemoryCache.delete(videoMemoryCache.keys().next().value);
+  }
+}
+
+function getVideoCategories() {
+  return Object.keys(VIDEO_CATEGORIES).map((id) => ({
+    id,
+    label: VIDEO_CATEGORIES[id].label,
+    query: VIDEO_CATEGORIES[id].query,
+  }));
+}
+
+async function getVideosFeed(category, forceRefresh = false, pageToken = null) {
+  const conf = VIDEO_CATEGORIES[category];
+  if (!conf) throw new Error(`Invalid category: ${category}`);
+
+  if (!forceRefresh) {
+    const cached = getVideoCacheEntry(category);
+    if (cached) {
+      return {
+        videos: cached.items,
+        cached: true,
+        nextPageToken: cached.nextPageToken,
+        hasMore: !!cached.nextPageToken,
+        source: 'cache',
+      };
+    }
+  }
+
+  if (checkQuotaCircuitBreaker()) {
+    const cached = getVideoCacheEntry(category);
+    if (cached) {
+      return {
+        videos: cached.items,
+        cached: true,
+        nextPageToken: null,
+        hasMore: false,
+        source: 'cache_quota_fallback',
+        warning: 'YouTube quota exceeded - showing cached results',
+      };
+    }
+    return {
+      videos: [],
+      cached: false,
+      nextPageToken: null,
+      hasMore: false,
+      source: 'empty',
+      warning: 'No videos available - YouTube quota exceeded and no cached content',
+    };
+  }
+
+  const data = await searchYouTube(conf.query, {
+    maxResults: 50,
+    pageToken,
+    videoDuration: 'any',
+    order: 'relevance',
+  });
+
+  if (!data.items?.length) {
+    return { videos: [], cached: false, nextPageToken: null, hasMore: false, source: 'youtube' };
+  }
+
+  const videoIds = data.items.map((i) => i.id?.videoId).filter(Boolean);
+  const details = videoIds.length ? await getVideoDetails(videoIds) : [];
+
+  const seen = new Set();
+  const videos = [];
+  for (const video of details) {
+    const duration = parseISO8601Duration(video.contentDetails?.duration || 'PT0S');
+    const status = video.status || {};
+    const embeddable = status.embeddable === true;
+    const isPublic = status.privacyStatus === 'public';
+    const isProcessed = status.uploadStatus === 'processed';
+    if (duration < VIDEO_MIN_SECONDS || !embeddable || !isPublic || !isProcessed) continue;
+    if (seen.has(video.id)) continue;
+    seen.add(video.id);
+    videos.push({
+      videoId: video.id,
+      title: video.snippet?.title || '',
+      thumbnailUrl:
+        video.snippet?.thumbnails?.maxres?.url ||
+        video.snippet?.thumbnails?.high?.url ||
+        video.snippet?.thumbnails?.medium?.url ||
+        video.snippet?.thumbnails?.default?.url ||
+        '',
+      durationSeconds: duration,
+      category,
+      channelTitle: video.snippet?.channelTitle || '',
+      publishedAt: video.snippet?.publishedAt || null,
+      source: 'youtube',
+    });
+  }
+
+  const result = videos.slice(0, BATCH_SIZE);
+  const token = videos.length >= BATCH_SIZE && data.nextPageToken ? data.nextPageToken : null;
+  if (!pageToken) setVideoCacheEntry(category, result, token);
+  return { videos: result, cached: false, nextPageToken: token, hasMore: !!token, source: 'youtube' };
+}
+
 module.exports = {
   getFeed,
   fetchCategoryVideos,
@@ -561,4 +696,7 @@ module.exports = {
   DEFAULT_DURATION_MAX,
   BATCH_SIZE,
   clearMemoryCache,
+  getVideosFeed,
+  getVideoCategories,
+  VIDEO_CATEGORIES,
 };

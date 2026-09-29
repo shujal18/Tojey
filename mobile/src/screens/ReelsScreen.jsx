@@ -229,61 +229,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     Authorization: `Bearer ${token || ''}`,
   }), [token]);
 
-  // ---- direct-stream resolution (yt-dlp via /api/reels/format) ----------------
-  // YouTube gated embeds another device behind the same IP stalls on ("second
-  // device just loads"). Playing signed direct URLs from our resolver instead of
-  // an anonymous <embed> session is what lets MULTIPLE devices all stream at once.
-  const streamCacheRef = useRef(new Map());      // videoId -> {videoUrl,audioUrl}|null
-  const streamInflightRef = useRef(new Map());   // videoId -> Promise
-
-  const fetchStreamFormat = useCallback((id) => {
-    if (streamCacheRef.current.has(id)) return Promise.resolve(streamCacheRef.current.get(id));
-    if (streamInflightRef.current.has(id)) return streamInflightRef.current.get(id);
-    const p = (async () => {
-      try {
-        const res = await fetch(`${SERVER_URL}/api/reels/format/${encodeURIComponent(id)}`, { headers: authHeaders });
-        if (!res.ok) throw new Error(`format ${res.status}`);
-        const j = await res.json();
-        if (!j || !j.video || !j.video.url) throw new Error('no url');
-        const entry = { videoUrl: j.video.url, audioUrl: (j.audio && j.audio.url) || '' };
-        streamCacheRef.current.set(id, entry);
-        return entry;
-      } catch (e) {
-        streamCacheRef.current.set(id, null);
-        return null;
-      } finally {
-        streamInflightRef.current.delete(id);
-      }
-    })();
-    streamInflightRef.current.set(id, p);
-    return p;
-  }, [authHeaders]);
-
-  const ensureStream = useCallback((item, idx) => {
-    const id = sanitizeVideoId(item && item.videoId);
-    if (!id) return;
-    const wv = webViewRef.current;
-    if (!wv || !readyRef.current) return;
-    fetchStreamFormat(id).then((entry) => {
-      if (!isMountedRef.current) return;
-      if (!entry) {
-        // Unresolvable on this deployment (yt-dlp failed) -> treat like a broken
-        // reel; if it is the one on screen, leave skating to the next Rx.
-        failedVideoIdsRef.current.add(id);
-        markSeenIds([id]);
-        staleReportRef.current.add(id);
-        console.log('[Reels] stream resolve failed, excluding:', id);
-        if (currentVideoIdRef.current === id && skipToIndexRef.current) {
-          skipToIndexRef.current(activeIndexRef.current);
-        }
-        return;
-      }
-      wv.injectJavaScript(
-        `window.__setStream(${idx},'${id}','${esc(entry.videoUrl)}','${esc(entry.audioUrl)}'); true;`
-      );
-    }).catch(() => {});
-  }, [fetchStreamFormat, markSeenIds]);
-
   // ---- YT-style action rail (like / share / sound / more) ---------------------
 
   useEffect(() => {
@@ -379,8 +324,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   // ---- playback wiring (double-buffered HTML engine) -------------------------
 
-  const ensureStreamRef = useRef(null);
-
   const primeFeed = useCallback((list) => {
     const wv = webViewRef.current;
     if (!wv || !readyRef.current) return;
@@ -399,8 +342,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     wv.injectJavaScript(
       `window.__prime('${id0}','${t0}','${id1 || 'null'}','${t1}'); true;`
     );
-    if (ensureStreamRef.current) ensureStreamRef.current(v0, 0);
-    if (v1 && ensureStreamRef.current) ensureStreamRef.current(v1, 1);
   }, []);
 
   const schedulePlayWatch = useCallback(() => {
@@ -442,7 +383,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     wv.injectJavaScript(
       `window.__preload(${preIdx},'${nid}','${esc(thumbnailUrlFor(list[preIdx]))}'); true;`
     );
-    if (ensureStreamRef.current) ensureStreamRef.current(list[preIdx], preIdx);
   }, []);
 
   const preloadNeighbor = useCallback((index) => {
@@ -480,7 +420,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     wv.injectJavaScript(
       `window.__activate(${index},'${id}','${esc(thumbnailUrlFor(item))}'); true;`
     );
-    if (ensureStreamRef.current) ensureStreamRef.current(item, index);
 
     // Warm the next valid reel so the NEXT swipe plays instantly (back-swipes
     // reuse the demoted layer, which still holds the previous video -> instant).
@@ -736,7 +675,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   useEffect(() => { fetchFeedRef.current = fetchFeed; }, [fetchFeed]);
   useEffect(() => { loadMoreRef.current = loadMore; }, [loadMore]);
-  useEffect(() => { ensureStreamRef.current = ensureStream; }, [ensureStream]);
   useEffect(() => { primeFeedRef.current = primeFeed; }, [primeFeed]);
   useEffect(() => { onActivateRef.current = onActivate; }, [onActivate]);
   useEffect(() => { skipToIndexRef.current = skipToIndex; }, [skipToIndex]);
