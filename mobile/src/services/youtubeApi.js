@@ -6,17 +6,23 @@ export default function makeYoutubeApi(token) {
   const headers = { Authorization: `Bearer ${token}` };
 
   async function get(path) {
-    const res = await fetch(`${SERVER_URL}${path}`, { headers });
-    if (!res.ok) throw new Error(`api ${res.status}`);
-    return res.json();
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 25000);
+    try {
+      const res = await fetch(`${SERVER_URL}${path}`, { headers, signal: ac.signal });
+      if (!res.ok) throw new Error(`api ${res.status}`);
+      return res.json();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function search(query, filter, nextToken) {
-    const q = new URLSearchParams();
-    if (query) q.set('q', query);
-    if (filter && filter !== 'all') q.set('filter', filter);
-    if (nextToken) q.set('token', nextToken);
-    return get(`/api/yt/search?${q.toString()}`);
+    const q = [];
+    if (query) q.push(`q=${encodeURIComponent(query)}`);
+    if (filter && filter !== 'all') q.push(`filter=${encodeURIComponent(filter)}`);
+    if (nextToken) q.push(`token=${encodeURIComponent(nextToken)}`);
+    return get(`/api/yt/search${q.length ? `?${q.join('&')}` : ''}`);
   }
 
   async function suggestions(query) {
@@ -25,10 +31,10 @@ export default function makeYoutubeApi(token) {
   }
 
   function channel(channelId, tab, nextToken) {
-    const q = new URLSearchParams();
-    if (tab && tab !== 'videos') q.set('tab', tab);
-    if (nextToken) q.set('token', nextToken);
-    return get(`/api/yt/channel/${channelId}${q.toString() ? `?${q.toString()}` : ''}`);
+    const q = [];
+    if (tab && tab !== 'videos') q.push(`tab=${encodeURIComponent(tab)}`);
+    if (nextToken) q.push(`token=${encodeURIComponent(nextToken)}`);
+    return get(`/api/yt/channel/${encodeURIComponent(channelId)}${q.length ? `?${q.join('&')}` : ''}`);
   }
 
   function playlist(playlistId, nextToken) {

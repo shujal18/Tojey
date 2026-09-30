@@ -209,11 +209,14 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           <View style={styles.titleBlock}>
             <Text style={[styles.title, { color: theme.text }]}>{info?.title || cur.title}</Text>
             <TouchableOpacity
-              onPress={() => onOpenChannel && onOpenChannel({
-                channelId: cur.channelId || info?.channelId,
-                channelTitle: cur.channelTitle || info?.channel,
-                avatar: cur.thumbnailUrl || '',
-              })}
+              onPress={() => {
+                onClose && onClose();
+                onOpenChannel && onOpenChannel({
+                  channelId: cur.channelId || info?.channelId,
+                  channelTitle: cur.channelTitle || info?.channel,
+                  avatar: cur.thumbnailUrl || '',
+                });
+              }}
             >
               <Text style={[styles.channel, { color: theme.primary }]}>{cur.channelTitle || info?.channel}</Text>
             </TouchableOpacity>
@@ -334,7 +337,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                 renderItem={({ item: r }) => {
                   if (r.type === 'playlist') {
                     return (
-                      <TouchableOpacity style={styles.relRow} onPress={() => onOpenPlaylist && onOpenPlaylist(r.playlistId)}>
+                      <TouchableOpacity style={styles.relRow} onPress={() => { onClose && onClose(); onOpenPlaylist && onOpenPlaylist(r.playlistId); }}>
                         <View style={styles.relThumbWrap}>
                           <Image source={{ uri: thumbUrl(r) }} style={styles.relThumb} resizeMode="cover" />
                           <View style={styles.relPlayBadge}>
@@ -351,7 +354,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                   }
                   if (r.type === 'channel') {
                     return (
-                      <TouchableOpacity style={styles.relRow} onPress={() => onOpenChannel && onOpenChannel(r)}>
+                      <TouchableOpacity style={styles.relRow} onPress={() => { onClose && onClose(); onOpenChannel && onOpenChannel(r); }}>
                         <Image source={{ uri: thumbUrl(r) }} style={styles.relAvatar} resizeMode="cover" />
                         <View style={{ flex: 1 }}>
                           <Text style={[styles.relText, { color: theme.text }]} numberOfLines={1}>{r.channelTitle}</Text>

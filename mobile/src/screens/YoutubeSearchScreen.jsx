@@ -1,6 +1,6 @@
 // YouTube search: query box with Google suggestions, filter chips, paginated
 // mixed results (videos / channels / playlists / shorts).
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, Image, TextInput, TouchableOpacity, FlatList, StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native';
@@ -20,7 +20,7 @@ const FILTERS = [
 
 export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChannel, onOpenPlaylist, dlMap, onDownload }) {
   const { theme } = useTheme();
-  const api = makeYoutubeApi(token);
+  const api = useMemo(() => makeYoutubeApi(token), [token]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
   const [suggestions, setSuggestions] = useState([]);
@@ -31,14 +31,13 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
   const [error, setError] = useState('');
   const nextTokenRef = useRef(null);
   const reqIdRef = useRef(0);
-  const inputRef = useRef(null);
   const width = Dimensions.get('window').width;
   const cardW = (width - 20 - 16 * 2) / 2;
 
   // Debounced suggestions.
   useEffect(() => {
     if (!query.trim()) {
-      setSuggestions([]);
+      setSuggestions((s) => (s.length === 0 ? s : []));
       return;
     }
     const t = setTimeout(() => {
@@ -78,7 +77,6 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
   );
 
   const submit = () => {
-    inputRef.current && inputRef.current.blur();
     setSuggestions([]);
     if (query.trim()) runSearch(query, filter, null, true);
   };
@@ -146,16 +144,11 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
         <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
           <Icon name="search" size={16} color={theme.textSecondary} />
           <TextInput
-            ref={inputRef}
             style={[styles.input, { color: theme.text }]}
             placeholder="Search YouTube"
             placeholderTextColor={theme.textSecondary}
             value={query}
             onChangeText={setQuery}
-            onSubmitEditing={submit}
-            returnKeyType="search"
-            autoCorrect={false}
-            autoFocus
           />
           {query.length > 0 && (
             <TouchableOpacity onPress={() => setQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
