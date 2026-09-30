@@ -17,3 +17,7 @@ services:
         value: 10000
       - key: MAX_FILE_SIZE
         value: 52428800
+      # Piped API instance(s) for the Reels/Shorts feed, comma-separated.
+      # Leave unset to use the built-in public instance list with failover.
+      - key: PIPED_API_URL
+        value: ""

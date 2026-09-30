@@ -124,7 +124,16 @@ function pickVideo(formats) {
   const h264 = portrait.filter((f) => String(f.vcodec).startsWith('avc1')).sort((a, b) => b.height - a.height);
   if (h264.length) return h264.find((f) => f.height <= 720) || h264[0];
   const vp9 = portrait.sort((a, b) => b.height - a.height);
-  return vp9.find((f) => f.height <= 1080) || vp9[0];
+  if (vp9.length) return vp9.find((f) => f.height <= 1080) || vp9[0];
+
+  // Shorts often only expose a muxed (progressive) mp4 alongside storyboard
+  // formats, so fall back to the best muxed h264 source when there is no
+  // video-only/audio-only pair to combine.
+  const muxed = (formats || []).filter(
+    (f) => f && f.url && f.protocol === 'https' && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
+  );
+  const muxedH264 = muxed.filter((f) => String(f.vcodec).startsWith('avc1')).sort((a, b) => b.height - a.height);
+  return muxedH264.find((f) => f.height && f.height <= 720) || muxedH264[0] || null;
 }
 
 function pickAudio(formats) {

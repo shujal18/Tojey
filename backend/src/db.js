@@ -1,8 +1,10 @@
 const { Pool } = require('pg');
 
+// Local dev (and Render) friendly: PGSSLMODE=disable allows non-SSL connections
+// for local Postgres; production keeps SSL with the short-lived Neon cert.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
   max: 10,
 });
 

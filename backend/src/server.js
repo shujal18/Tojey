@@ -766,6 +766,56 @@ app.get('/api/yt/playlist/:playlistId', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/api/yt/subfeed', authMiddleware, async (req, res) => {
+  try {
+    const ids = String(req.query.channels || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => /^UC[a-zA-Z0-9_-]{22}$/.test(s))
+      .slice(0, 15);
+    if (!ids.length) return res.json({ items: [], hasMore: false });
+    const per = Math.max(1, Math.min(6, Number(req.query.per) || 4));
+    const cap = Math.max(1, Math.min(40, Number(req.query.cap) || 24));
+    const out = [];
+    for (let i = 0; i < ids.length; i += 4) {
+      await Promise.all(ids.slice(i, i + 4).map(async (cid) => {
+        try {
+          const c = await yt.channel(cid, 'videos', null, true);
+          const items = (c.items || []).filter((x) => x.type === 'video').slice(0, per);
+          if (c.channelTitle || c.avatar) {
+            items.forEach((x) => {
+              x.channelId = cid;
+              if (c.channelTitle) x.channel = x.channelTitle || c.channelTitle;
+              if (c.avatar && !x.avatar) x.avatar = c.avatar;
+            });
+          }
+          out.push(...items);
+        } catch (e) {
+          console.error(`yt:subfeed channel ${cid} error`, e.message);
+        }
+      }));
+    }
+    out.sort((a, b) => {
+      const ta = Date.parse(a.publishedAt || '');
+      const tb = Date.parse(b.publishedAt || '');
+      if (Number.isFinite(ta) && Number.isFinite(tb)) return tb - ta;
+      return 0;
+    });
+    const seen = new Set();
+    const items = [];
+    for (const it of out) {
+      if (!it.videoId || seen.has(it.videoId)) continue;
+      seen.add(it.videoId);
+      items.push(it);
+      if (items.length >= cap) break;
+    }
+    res.json({ items, hasMore: false });
+  } catch (e) {
+    console.error('yt:subfeed error', e.message);
+    res.status(502).json({ error: 'subfeed unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
 app.get('/api/yt/video/:videoId', authMiddleware, async (req, res) => {
   try {
     const videoId = String(req.params.videoId || '');
@@ -821,6 +871,63 @@ app.get('/api/yt/dislikes/:videoId', authMiddleware, async (req, res) => {
   } catch (e) {
     console.error('yt:dislikes error', e.message);
     res.json({ dislikes: null });
+  }
+});
+
+// ---- Piped-backed Reels (Shorts) feed ---------------------------------------
+// The Android Reels screen talks only to this backend; this service resolves
+// metadata + stream URLs from a configurable Piped instance (see piped.js).
+// No video bytes and no thumbnails are stored in Neon - streams are played
+// directly from Piped/CDN via Media3/ExoPlayer on the device.
+
+const piped = require('./piped');
+
+app.get('/api/piped/categories', authMiddleware, (req, res) => {
+  try {
+    res.json({ categories: piped.categories() });
+  } catch (e) {
+    console.error('piped:categories error', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/piped/feed', authMiddleware, async (req, res) => {
+  try {
+    const category = String(req.query.category || 'trending').slice(0, 30);
+    const nextpage = String(req.query.nextpage || '').slice(0, 4000) || null;
+    const refresh = String(req.query.refresh || '');
+    const result = await piped.feed(category, nextpage, refresh);
+    res.json({
+      videos: result.items,
+      category: result.category,
+      nextpage: result.nextpage,
+      hasMore: result.hasMore,
+    });
+  } catch (e) {
+    console.error('piped:feed error', e.code || '', e.message);
+    res.status(502).json({
+      error: 'feed unavailable',
+      code: e.code || null,
+      detail: String(e.message || '').slice(0, 200),
+    });
+  }
+});
+
+app.get('/api/piped/streams/:videoId', authMiddleware, async (req, res) => {
+  const videoId = String(req.params.videoId || '');
+  try {
+    if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+      return res.status(400).json({ error: 'Invalid video id' });
+    }
+    const result = await piped.streams(videoId);
+    res.json(result);
+  } catch (e) {
+    console.error('piped:streams error', videoId, e.code || '', e.message);
+    res.status(502).json({
+      error: 'streams unavailable',
+      code: e.code || null,
+      detail: String(e.message || '').slice(0, 200),
+    });
   }
 });
 
