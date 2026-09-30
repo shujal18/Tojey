@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, FlatList, Image, StyleSheet, Modal, ActivityIndicator } from 'react-native';
 import { WebView } from 'react-native-webview';
+import Video from 'react-native-video';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
@@ -80,24 +81,36 @@ function DownloadRow({ item, theme, onPlay, onDelete }) {
         )}
       </View>
       <View style={{ flex: 1, marginLeft: 12 }}>
-        <Text style={{ color: theme.text, fontSize: fs(14), fontWeight: '700' }} numberOfLines={2}>{item.title}</Text>
-        <Text style={{ color: theme.textSecondary, fontSize: fs(12), marginTop: 3 }} numberOfLines={1}>
-          {item.channel || 'YouTube'}
-        </Text>
-        <View style={{ marginTop: 6 }}>
-          {item.status === 'done' ? (
-            <Text style={{ color: theme.online, fontSize: fs(11), fontWeight: '700' }}>
-              ✓ Downloaded{fmtSize(item.size) ? `  ·  ${fmtSize(item.size)}` : ''}
-            </Text>
-          ) : item.status === 'error' ? (
-            <Text style={{ color: theme.danger, fontSize: fs(11) }} numberOfLines={1}>{item.error || 'Download failed'}</Text>
-          ) : (
-            <View style={styles.progWrap}>
-              <View style={[styles.progFill, { width: `${Math.max(3, item.progress)}%` }]} />
-            </View>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {item.kind === 'audio' && (
+              <Icon name="headset-outline" size={13} color={theme.primary} style={{ marginRight: 6 }} />
+            )}
+            <Text style={{ color: theme.text, fontSize: fs(14), fontWeight: '700', flex: 1 }} numberOfLines={2}>{item.title}</Text>
+          </View>
+          <Text style={{ color: theme.textSecondary, fontSize: fs(12), marginTop: 3 }} numberOfLines={1}>
+            {item.channel || 'YouTube'}
+          </Text>
+          <View style={{ marginTop: 6 }}>
+            {item.status === 'done' ? (
+              <Text style={{ color: theme.online, fontSize: fs(11), fontWeight: '700' }}>
+                ✓ Downloaded{fmtSize(item.size) ? `  ·  ${fmtSize(item.size)}` : ''}
+              </Text>
+            ) : item.status === 'error' ? (
+              <Text style={{ color: theme.danger, fontSize: fs(11) }} numberOfLines={1}>{item.error || 'Download failed'}</Text>
+            ) : (
+              <>
+                <View style={styles.progWrap}>
+                  <View style={[styles.progFill, { width: `${Math.max(3, item.progress)}%` }]} />
+                </View>
+                {item.bytesTotal > 0 && (
+                  <Text style={{ color: theme.textSecondary, fontSize: fs(10), marginTop: 3 }}>
+                    {fmtSize(item.bytesDone)} / {fmtSize(item.bytesTotal)}
+                  </Text>
+                )}
+              </>
+            )}
+          </View>
         </View>
-      </View>
       <TouchableOpacity onPress={onDelete} style={styles.rowDel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
         <Icon name="trash-outline" size={17} color={theme.textSecondary} />
       </TouchableOpacity>
@@ -108,6 +121,36 @@ function DownloadRow({ item, theme, onPlay, onDelete }) {
 function OfflinePlayer({ item, theme, onClose }) {
   const webRef = useRef(null);
   const loadedRef = useRef(false);
+
+  if (item.kind === 'audio' && item.audioPath) {
+    return (
+      <Modal visible transparent={false} animationType="fade" onRequestClose={onClose}>
+        <View style={{ flex: 1, backgroundColor: theme.background }}>
+          <View style={[styles.header, { backgroundColor: theme.background }]}>
+            <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
+              <Icon name="arrow-back" size={22} color={theme.text} />
+            </TouchableOpacity>
+            <Text style={[styles.title, { flex: 1, marginHorizontal: 8 }]} numberOfLines={1}>{item.title}</Text>
+            <Icon name="checkmark-circle" size={18} color="#fff" style={{ opacity: 0 }} />
+          </View>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' }}>
+            <Icon name="musical-notes" size={64} color={theme.primaryLight} />
+            <Text style={{ color: theme.textSecondary, fontSize: fs(13), marginTop: 12 }}>
+              Playing audio · {item.channel || 'YouTube'}
+            </Text>
+            <Video
+              source={{ uri: `file://${item.audioPath}` }}
+              style={{ width: 1, height: 1 }}
+              paused={false}
+              audioOnly
+              playInBackground
+              ignoreSilentSwitch="ignore"
+            />
+          </View>
+        </View>
+      </Modal>
+    );
+  }
 
   const load = () => {
     if (loadedRef.current || !webRef.current) return;

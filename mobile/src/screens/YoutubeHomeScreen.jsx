@@ -38,6 +38,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [error, setError] = useState('');
   const [shortsStrip, setShortsStrip] = useState([]);
   const [dlMap, setDlMap] = useState({});
+  const [subFeed, setSubFeed] = useState([]);
   const [snap, setSnap] = useState(null);
   const requestIdRef = useRef(0);
   const [categories] = useState(FALLBACK_CATEGORIES);
@@ -54,7 +55,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     const m = {};
     list.forEach((e) => {
       if (e.status === 'done' || e.status === 'downloading' || e.status === 'resolving' || e.status === 'error') {
-        m[e.videoId] = e;
+        m[`${e.videoId}:${e.kind || 'video'}`] = e;
       }
     });
     setDlMap(m);
@@ -123,14 +124,29 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     if (refreshTick > 0) fetchPage(category, null, { replace: true, refresh: true });
   }, [refreshTick]);
 
+  const subIdsKey = (snap?.subs || []).map((s) => s.channelId).filter(Boolean).sort().join(',');
+
+  useEffect(() => {
+    if (!subIdsKey) {
+      setSubFeed([]);
+      return;
+    }
+    let active = true;
+    fetch(`${SERVER_URL}/api/yt/subfeed?channels=${encodeURIComponent(subIdsKey)}&per=4&cap=20`, { headers: authHeaders })
+      .then((r) => (r.ok ? r.json() : { items: [] }))
+      .then((d) => { if (active) setSubFeed(d.items || []); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [subIdsKey, authHeaders, refreshTick]);
+
   const loadMore = () => {
     if (!hasMore || loadingMore || loading) return;
     fetchPage(category, nextPageTokenRef.current, {});
   };
 
-  const startDownload = (v) => {
+  const startDownload = (v, opts) => {
     console.log('[Download] enqueue', v.videoId);
-    enqueue(v).catch(() => {});
+    enqueue(v, opts).catch(() => {});
   };
 
   const openChannel = (item) => {
@@ -304,6 +320,22 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
                           {item.channelTitle || item.title}
                         </Text>
                       </TouchableOpacity>
+                    )}
+                  />
+                </View>
+              )}
+
+              {subFeed.length > 0 && (
+                <View style={styles.strip}>
+                  <Text style={[styles.stripTitle, { color: theme.text }]}>New from your subscriptions</Text>
+                  <FlatList
+                    data={subFeed}
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(v) => v.videoId}
+                    contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
+                    renderItem={({ item }) => (
+                      <VideoCard item={item} width={200} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} showChannel />
                     )}
                   />
                 </View>

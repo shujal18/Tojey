@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View, Text, Image, TextInput, TouchableOpacity, FlatList, StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
@@ -18,6 +19,9 @@ const FILTERS = [
   { id: 'shorts', label: 'Shorts' },
 ];
 
+const HISTORY_KEY = 'tojey_search_history_v1';
+const HISTORY_MAX = 12;
+
 export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChannel, onOpenPlaylist, dlMap, onDownload }) {
   const { theme } = useTheme();
   const api = useMemo(() => makeYoutubeApi(token), [token]);
@@ -29,10 +33,32 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState('');
+  const [history, setHistory] = useState([]);
   const nextTokenRef = useRef(null);
   const reqIdRef = useRef(0);
   const width = Dimensions.get('window').width;
   const cardW = (width - 20 - 16 * 2) / 2;
+
+  useEffect(() => {
+    AsyncStorage.getItem(HISTORY_KEY)
+      .then((r) => { if (r) setHistory(JSON.parse(r)); })
+      .catch(() => {});
+  }, []);
+
+  const addRecent = useCallback((q) => {
+    const t = q.trim();
+    if (!t) return;
+    setHistory((prev) => {
+      const next = [t, ...prev.filter((x) => x.toLowerCase() !== t.toLowerCase())].slice(0, HISTORY_MAX);
+      AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const clearHistory = () => {
+    setHistory([]);
+    AsyncStorage.removeItem(HISTORY_KEY).catch(() => {});
+  };
 
   // Debounced suggestions.
   useEffect(() => {
@@ -78,12 +104,16 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
 
   const submit = () => {
     setSuggestions([]);
-    if (query.trim()) runSearch(query, filter, null, true);
+    if (query.trim()) {
+      addRecent(query);
+      runSearch(query, filter, null, true);
+    }
   };
 
   const submitSuggestion = (s) => {
     setQuery(s);
     setSuggestions([]);
+    addRecent(s);
     runSearch(s, filter, null, true);
   };
 
@@ -192,9 +222,32 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
           <ActivityIndicator color={theme.primary} />
         </View>
       ) : !query.trim() && items.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={[styles.hint, { color: theme.textSecondary }]}>Search for videos, channels and playlists</Text>
-        </View>
+        history.length > 0 ? (
+          <View style={{ flex: 1 }}>
+            <View style={styles.histHeader}>
+              <Text style={[styles.histTitle, { color: theme.text }]}>Recent searches</Text>
+              <TouchableOpacity onPress={clearHistory} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={{ color: theme.primary, fontSize: fs(12), fontWeight: '700' }}>Clear</Text>
+              </TouchableOpacity>
+            </View>
+            <FlatList
+              data={history}
+              keyExtractor={(h, i) => `h${i}`}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item: h }) => (
+                <TouchableOpacity style={styles.suggestion} onPress={() => submitSuggestion(h)}>
+                  <Icon name="time-outline" size={15} color={theme.textSecondary} />
+                  <Text style={[styles.suggestionText, { color: theme.text }]} numberOfLines={1}>{h}</Text>
+                  <Icon name="arrow-up-outline" size={14} color={theme.textSecondary} />
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        ) : (
+          <View style={styles.center}>
+            <Text style={[styles.hint, { color: theme.textSecondary }]}>Search for videos, channels and playlists</Text>
+          </View>
+        )
       ) : error && items.length === 0 ? (
         <View style={styles.center}>
           <Text style={[styles.hint, { color: theme.textSecondary }]}>{error}</Text>
@@ -235,6 +288,8 @@ const styles = StyleSheet.create({
   retry: { marginTop: 14, paddingHorizontal: 20, paddingVertical: 8, borderRadius: 18 },
   suggestion: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingVertical: 10 },
   suggestionText: { fontSize: fs(13), flex: 1 },
+  histHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 6 },
+  histTitle: { fontSize: fs(13), fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4 },
   row: { gap: 10, marginBottom: 12 },
   shortsRow: { flexDirection: 'row', gap: 12, marginBottom: 14, alignItems: 'center' },
   shortThumb: { width: 92, height: 126, borderRadius: 10, backgroundColor: '#000' },

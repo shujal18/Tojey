@@ -20,7 +20,7 @@ export function thumbOf(item) {
 // Grid video card (2-up) with optional download button + progress bar.
 export function VideoCard({ item, width, dlMap = {}, onPress, onDownload, showChannel = true }) {
   const { theme } = useTheme();
-  const dl = dlMap[item.videoId];
+  const dl = dlMap[`${item.videoId}:video`];
   return (
     <TouchableOpacity style={[{ width }, styles.card]} activeOpacity={0.82} onPress={() => onPress && onPress(item)}>
       <View style={styles.thumbWrap}>
@@ -73,7 +73,7 @@ export function VideoCard({ item, width, dlMap = {}, onPress, onDownload, showCh
 // Horizontal row item (related, playlist, library, channel tabs).
 export function ItemRow({ item, dlMap = {}, onPress, onDownload, index, trailing }) {
   const { theme } = useTheme();
-  const dl = dlMap[item.videoId];
+  const dl = dlMap[`${item.videoId}:video`];
   return (
     <TouchableOpacity style={styles.row} activeOpacity={0.82} onPress={() => onPress && onPress(item)}>
       <View style={styles.rowThumbWrap}>

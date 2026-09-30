@@ -14,6 +14,7 @@ import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { thumbUrl } from '../services/downloadsStore';
 import { getStreams } from '../services/innertube';
+import { pipSupported, enterPip } from '../services/pip';
 import makeYoutubeApi from '../services/youtubeApi';
 import {
   addHistory, isBookmarked, toggleBookmark, isSubscribed, toggleSubscribe,
@@ -49,6 +50,21 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [audioOnly, setAudioOnly] = useState(false);
   const [descOpen, setDescOpen] = useState(false);
   const [showPlaylist, setShowPlaylist] = useState(false);
+  const [showDl, setShowDl] = useState(false);
+  const [pip, setPip] = useState(false);
+  const [pipOk, setPipOk] = useState(false);
+  const [nextVideo, setNextVideo] = useState(null);
+  const nextTimerRef = useRef(null);
+
+  useEffect(() => {
+    pipSupported().then(setPipOk).catch(() => {});
+  }, []);
+
+  const togglePip = async () => {
+    if (!pipOk) return;
+    const ok = await enterPip(16, 9);
+    if (ok) setPip(true);
+  };
   const [saved, setSaved] = useState(isBookmarked(initial.videoId));
   const [subbed, setSubbed] = useState(isSubscribed(initial.channelId));
   const [playlistsDirty, setPlaylistsDirty] = useState(0);
@@ -114,6 +130,27 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     }
   };
 
+  const cancelNext = () => {
+    if (nextTimerRef.current) clearTimeout(nextTimerRef.current);
+    nextTimerRef.current = null;
+    setNextVideo(null);
+  };
+
+  const handleEnd = () => {
+    setPlaying(false);
+    const rel = (info?.related || []).find((r) => r && r.videoId && r.type !== 'channel' && r.type !== 'playlist');
+    if (!useNative || !rel || !cur.videoId) return;
+    setNextVideo(rel);
+    if (nextTimerRef.current) clearTimeout(nextTimerRef.current);
+    nextTimerRef.current = setTimeout(() => {
+      nextTimerRef.current = null;
+      setNextVideo(null);
+      loadVideo(rel);
+    }, 4000);
+  };
+
+  useEffect(() => () => { if (nextTimerRef.current) clearTimeout(nextTimerRef.current); }, []);
+
   const toggleSaved = async () => {
     setSaved(await toggleBookmark({
       videoId: cur.videoId,
@@ -148,7 +185,11 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   };
 
   const dl = dlMap || {};
-  const dlState = dl[cur.videoId];
+  const dlState = dl[`${cur.videoId}:video`];
+  const dlAud = dl[`${cur.videoId}:audio`];
+
+  const dlIcon = (st) => (!st ? 'download-outline' : st.status === 'done' ? 'checkmark-circle' : st.status === 'error' ? 'close-circle' : 'time-outline');
+  const dlColor = (st) => (!st ? theme.text : st.status === 'done' ? theme.primary : st.status === 'error' ? theme.danger : theme.textSecondary);
 
   const streamSrc = (audioOnly ? stream?.audioUrl : stream?.videoUrl) || stream?.videoUrl;
 
@@ -162,7 +203,13 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           <Text style={[styles.headerTitle, { color: theme.textSecondary }]} numberOfLines={1}>
             Now playing
           </Text>
-          <View style={{ width: 30 }} />
+          <View style={{ width: 30, alignItems: 'flex-end' }}>
+            {pipOk && (
+              <TouchableOpacity onPress={togglePip} style={styles.pipBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Icon name="scan-outline" size={20} color={pip ? theme.primary : theme.text} />
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
         <View style={styles.videoWrap}>
@@ -180,10 +227,10 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               controls
               onLoad={(m) => { if (m.duration) setDur(m.duration); }}
               onProgress={onProgress}
-              onEnd={() => setPlaying(false)}
+              onEnd={handleEnd}
               onError={() => setUseNative(false)}
               rate={speed}
-              playInBackground={audioOnly}
+              playInBackground={audioOnly || pip}
               ignoreSilentSwitch="ignore"
               mixWithOthers="inherit"
             />
@@ -205,9 +252,30 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           )}
         </View>
 
+        {nextVideo && (
+          <TouchableOpacity style={styles.nextBanner} activeOpacity={0.9} onPress={cancelNext}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#fff', fontSize: fs(12), fontWeight: '700' }} numberOfLines={1}>
+                Up next: {nextVideo.title}
+              </Text>
+              <Text style={{ color: '#cbb6f5', fontSize: fs(11) }} numberOfLines={1}>
+                by {nextVideo.channelTitle} · playing in a moment
+              </Text>
+            </View>
+            <Text style={{ color: theme.primary, fontSize: fs(12), fontWeight: '800', marginLeft: 10 }}>Cancel</Text>
+          </TouchableOpacity>
+        )}
+
         <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
           <View style={styles.titleBlock}>
-            <Text style={[styles.title, { color: theme.text }]}>{info?.title || cur.title}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={[styles.title, { color: theme.text, flex: 1 }]} numberOfLines={2}>
+                {info?.dearrow?.title || info?.title || cur.title}
+              </Text>
+              {!!info?.dearrow?.title && info.title !== info.dearrow.title && (
+                <Text style={[styles.dearrowTag, { backgroundColor: theme.primaryLight, color: theme.primary }]}>DeArrow</Text>
+              )}
+            </View>
             <TouchableOpacity
               onPress={() => {
                 onClose && onClose();
@@ -228,7 +296,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             </View>
 
             <View style={styles.toolRow}>
-              <TouchableOpacity style={styles.toolBtn} onPress={() => onDownload && onDownload(cur)}>
+              <TouchableOpacity style={styles.toolBtn} onPress={() => setShowDl(!showDl)}>
                 <Icon name={dlState && dlState.status === 'done' ? 'checkmark-circle' : 'download-outline'} size={20} color={theme.text} />
                 <Text style={[styles.toolText, { color: theme.text }]}>Download</Text>
               </TouchableOpacity>
@@ -263,6 +331,20 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                     </TouchableOpacity>
                   ))
                 )}
+              </View>
+            )}
+
+            {showDl && (
+              <View style={[styles.playlistPanel, { backgroundColor: theme.inputBg }]}>
+                <Text style={[styles.playlistTitle, { color: theme.text }]}>Save to downloads</Text>
+                <TouchableOpacity style={styles.playlistRow} onPress={() => { onDownload && onDownload(cur, { mode: 'video' }); }}>
+                  <Icon name={dlIcon(dlState)} size={18} color={dlColor(dlState)} />
+                  <Text style={{ color: theme.text, fontSize: fs(13), fontWeight: '600', marginLeft: 8 }}>Video (480p)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.playlistRow} onPress={() => { onDownload && onDownload(cur, { mode: 'audio' }); }}>
+                  <Icon name={dlIcon(dlAud)} size={18} color={dlColor(dlAud)} />
+                  <Text style={{ color: theme.text, fontSize: fs(13), fontWeight: '600', marginLeft: 8 }}>Audio (m4a)</Text>
+                </TouchableOpacity>
               </View>
             )}
 
@@ -398,6 +480,18 @@ const styles = StyleSheet.create({
   video: { flex: 1 },
   videoLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   streamingBadge: { position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(16,11,26,0.7)', borderRadius: 14, padding: 8 },
+  nextBanner: {
+    position: 'absolute',
+    top: Dimensions.get('window').width * 9 / 16,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16,11,26,0.95)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  dearrowTag: { fontSize: fs(9), fontWeight: '900', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8, marginLeft: 8 },
   titleBlock: { paddingHorizontal: 16, paddingTop: 12 },
   title: { fontSize: fs(16), fontWeight: '800', lineHeight: 22 },
   channel: { fontSize: fs(14), fontWeight: '700', marginTop: 8 },

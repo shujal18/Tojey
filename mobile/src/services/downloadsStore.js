@@ -90,13 +90,15 @@ function update(entry, patch) {
   emit();
 }
 
-export async function enqueue(video) {
+export async function enqueue(video, opts = {}) {
   await ensureLoaded();
-  let existing = manifest.find((d) => d.videoId === video.videoId);
+  const kind = opts.mode === 'audio' ? 'audio' : 'video';
+  let existing = manifest.find((d) => d.videoId === video.videoId && d.kind === kind);
   if (existing && existing.status === 'done' && existing.videoPath) {
     const ok = await RNFetchBlob.fs.stat(existing.videoPath).then((s) => s.size > 0).catch(() => false);
+    if (ok && kind === 'audio') return { entry: existing, already: true };
     if (!ok) {
-      manifest = manifest.filter((d) => d.videoId !== video.videoId);
+      manifest = manifest.filter((d) => d !== existing);
       existing = null;
     }
   }
@@ -105,8 +107,9 @@ export async function enqueue(video) {
   }
 
   const entry = {
-    id: `${Date.now()}-${video.videoId}`,
+    id: `${Date.now()}-${video.videoId}-${kind}`,
     videoId: video.videoId,
+    kind,
     title: video.title || video.videoId,
     channel: video.channelTitle || '',
     thumb: thumbUrl(video),
@@ -132,12 +135,13 @@ export async function enqueue(video) {
       await RNFetchBlob.fs.mkdir(DIR).catch(() => {});
       update(entry, { status: 'resolving' });
       const streams = await getStreams(video.videoId, { maxHeight: 480 });
-      if (!streams.videoUrl) throw new Error('no stream url');
-      console.log('[Download] resolved', video.videoId, 'h', streams.height, 'audio', !!streams.audioUrl);
+      if (kind === 'audio' && !streams.audioUrl) throw new Error('no audio stream url');
+      if (kind === 'video' && !streams.videoUrl) throw new Error('no stream url');
+      console.log('[Download] resolved', video.videoId, kind, 'audio', !!streams.audioUrl);
       update(entry, { status: 'downloading', progress: 0, channel: streams.channel || entry.channel });
 
-      const videoPath = `${DIR}${video.videoId}_v.mp4`;
-      const audioPath = streams.audioUrl ? `${DIR}${video.videoId}_a.m4a` : null;
+      const videoPath = kind === 'video' ? `${DIR}${video.videoId}_v.mp4` : null;
+      const audioPath = kind === 'audio' ? `${DIR}${video.videoId}_a_audio.m4a` : (streams.audioUrl ? `${DIR}${video.videoId}_a.m4a` : null);
 
 // googlevideo rejects open-ended Range (bytes=0-) with a 403, and each
       // signed ticket serves only a limited number of bytes (here ~3MiB) before
@@ -205,17 +209,38 @@ export async function enqueue(video) {
         return start;
       };
 
-      console.log('[Download] video start ...');
-      const refreshVideo = async () => {
-        const s = await getStreams(video.videoId, { maxHeight: 480 });
-        if (!s.videoUrl) throw new Error('no stream url');
-        return s.videoUrl;
+      const bytesVel = { done: 0, total: 0 };
+      const bytesAud = { done: 0, total: 0 };
+      const vWeight = 0.85;
+      const audioShare = audioPath ? 0.15 : 0;
+      const pct = () => {
+        let p = 0;
+        if (kind === 'audio' && bytesAud.total > 0) p = (bytesAud.done / bytesAud.total) * 100;
+        else if (!audioPath && bytesVel.total > 0) p = (bytesVel.done / bytesVel.total) * 100;
+        else if (bytesVel.total > 0) p = (bytesVel.done / bytesVel.total) * vWeight;
+        if (audioPath && bytesAud.total > 0) p += (bytesAud.done / bytesAud.total) * audioShare;
+        return Math.min(100, Math.round(p * 10) / 10);
       };
-      await downloadOne(streams.videoUrl, videoPath, 'video', (done, total) => {
-        update(entry, { progress: total > 0 ? Math.round((done / total) * 1000) / 10 : 0 });
-      }, refreshVideo);
-      console.log('[Download] video written');
-      entry.progress0 = 85;
+      const report = () => {
+        const done = bytesVel.done + bytesAud.done;
+        const total = (bytesVel.total || bytesAud.total) + (audioPath ? bytesAud.total : 0);
+        update(entry, { progress: pct(), bytesDone: done, bytesTotal: total });
+      };
+
+      if (kind === 'video') {
+        console.log('[Download] video start ...');
+        const refreshVideo = async () => {
+          const s = await getStreams(video.videoId, { maxHeight: 480 });
+          if (!s.videoUrl) throw new Error('no stream url');
+          return s.videoUrl;
+        };
+        await downloadOne(streams.videoUrl, videoPath, 'video', (done, total) => {
+          bytesVel.done = done; bytesVel.total = total;
+          report();
+        }, refreshVideo);
+        console.log('[Download] video written');
+      }
+
       if (audioPath) {
         console.log('[Download] audio start ...');
         const refreshAudio = async () => {
@@ -223,26 +248,27 @@ export async function enqueue(video) {
           if (!s.audioUrl) throw new Error('no audio url');
           return s.audioUrl;
         };
-        await downloadOne(streams.audioUrl, audioPath, 'audio', null, refreshAudio);
+        await downloadOne(streams.audioUrl, audioPath, 'audio', (done, total) => {
+          bytesAud.done = done; bytesAud.total = total;
+          report();
+        }, refreshAudio);
         console.log('[Download] audio written');
       }
-      delete entry.progress0;
-      delete entry._lastPct;
 
-      const size = await RNFetchBlob.fs.stat(videoPath).then((s) => s.size).catch((e) => {
-        console.log('[Download] stat failed', videoPath, String((e && e.message) || e));
-        return 0;
-      });
+      const statSize = async (p) => (p ? RNFetchBlob.fs.stat(p).then((s) => s.size).catch(() => 0) : 0);
+      const size = (await statSize(videoPath)) + (await statSize(audioPath));
       console.log('[Download] stat size', size);
       update(entry, {
         status: 'done',
         progress: 100,
         size,
+        bytesDone: size,
+        bytesTotal: bytesVel.total + bytesAud.total || size,
         videoPath,
         audioPath,
         endTime: Date.now(),
       });
-      console.log('[Download] complete', video.videoId, size);
+      console.log('[Download] complete', video.videoId, kind, size);
     } catch (e) {
       console.log('[Download] FAILED', video.videoId, String((e && e.message) || e));
       update(entry, { status: 'error', error: String((e && e.message) || e).slice(0, 120) });
