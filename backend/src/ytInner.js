@@ -28,12 +28,32 @@ const CLIENTS = {
     hl: 'en',
     gl: 'US',
   },
+  IOS: {
+    clientName: 'IOS',
+    clientVersion: '20.10.4',
+    deviceModel: 'iPhone16,2',
+    osName: 'iPhone',
+    osVersion: '17.5',
+    hl: 'en',
+    gl: 'US',
+    utcOffsetMinutes: 0,
+  },
 };
 
 const UAS = {
   ANDROID: 'com.google.android.youtube/20.12.37 (Linux; U; Android 11; US)',
   WEB: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  IOS: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
 };
+
+// Client rotation for the streaming `player` call. YouTube flags datacenter
+// IPs with `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot") on a
+// per-client basis, so when one client is bot-checked we retry the next. Only
+// clients that return a direct `url` (not a signatureCipher) are listed; IOS
+// and ANDROID both do. `playbackContext` (html5Preference) materially reduces
+// bot-checks and is always sent.
+const PLAYBACK_CLIENTS = ['ANDROID', 'IOS'];
+const PLAYBACK_TTL = 30 * 60 * 1000;
 
 const CHANNEL_TAB_PARAMS = {
   videos: 'EgZ2aWRlb3PyBgQKAjoA',
@@ -723,12 +743,7 @@ async function videoInfo(videoId, token, skipCache = false) {
     return { related: items, nextToken, hasMore: !!nextToken };
   }
   const [pl, nx] = await Promise.all([
-    call('player', {
-      videoId,
-      contentCheckOk: true,
-      racyCheckOk: true,
-      playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-    }, { skipCache, cacheKey: `player:${videoId}`, ttl: 10 * 60 * 1000 }),
+    playerResponse(videoId, skipCache),
     call('next', {
       videoId,
       contentCheckOk: true,
@@ -781,21 +796,81 @@ function normalizeFormat(f) {
     audioSampleRate: f.audioSampleRate || '',
     audioChannels: f.audioChannels || 0,
     approxDurationMs: parseInt(f.approxDurationMs, 10) || 0,
+    // Byte-range offsets for adaptive (single-file ISO-BMFF) formats; needed to
+    // build a DASH MPD with SegmentBase (initialization + sidx index ranges).
+    indexRange: f.indexRange ? `${f.indexRange.start}-${f.indexRange.end}` : '',
+    initRange: f.initRange ? `${f.initRange.start}-${f.initRange.end}` : '',
     hasVideo,
     hasAudio,
   };
+}
+
+// Fetch the `player` response with client rotation + single-flight dedup.
+// `call` caches raw responses even when playabilityStatus is LOGIN_REQUIRED, so
+// a bot-check would otherwise be pinned for the whole TTL. Instead we probe each
+// playback client (skipCache), keep the first OK response that carries direct
+// stream URLs, and cache only that good result under one shared key. Concurrent
+// requests for the same video share one in-flight promise (the media proxy can
+// fire several at once; a burst is exactly what trips YouTube's bot check).
+const playerInflight = new Map();
+
+function hasDirectUrl(j) {
+  const sd = j.streamingData || {};
+  const any = [...(sd.formats || []), ...(sd.adaptiveFormats || [])];
+  return any.some((f) => !!f.url);
+}
+
+async function playerResponse(videoId, skipCache = false) {
+  const key = `playerResp:${videoId}`;
+  if (!skipCache) {
+    const hit = cacheGet(key);
+    if (hit) return hit;
+  }
+  if (playerInflight.has(key)) return playerInflight.get(key);
+
+  const p = (async () => {
+    let firstNonOk = null;
+    for (const client of PLAYBACK_CLIENTS) {
+      let j;
+      try {
+        j = await call('player', {
+          videoId,
+          contentCheckOk: true,
+          racyCheckOk: true,
+          playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
+        }, { client, skipCache: true });
+      } catch (e) {
+        if (!firstNonOk) firstNonOk = e;
+        continue;
+      }
+      const status = navTo(j, ['playabilityStatus', 'status']);
+      if (status === 'OK' && hasDirectUrl(j)) {
+        cacheSet(key, j, PLAYBACK_TTL);
+        return j;
+      }
+      if (!firstNonOk) firstNonOk = j;
+    }
+    // Every client was bot-checked/unplayable. Return whatever we saw so the
+    // caller can surface the playability reason to the UI instead of throwing a
+    // generic network error.
+    if (firstNonOk && typeof firstNonOk === 'object' && firstNonOk.playabilityStatus) return firstNonOk;
+    if (firstNonOk instanceof Error) throw firstNonOk;
+    throw new Error('no playable stream');
+  })();
+
+  playerInflight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    playerInflight.delete(key);
+  }
 }
 
 // Returns normalized stream metadata. `url` values are signed, IP-bound
 // googlevideo links and must stay server-side (the /api/yt/media proxy uses
 // them with the same egress IP that requested them).
 async function playerStreams(videoId, skipCache = false) {
-  const j = await call('player', {
-    videoId,
-    contentCheckOk: true,
-    racyCheckOk: true,
-    playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-  }, { skipCache, cacheKey: `playerStreams:${videoId}`, ttl: 30 * 60 * 1000 });
+  const j = await playerResponse(videoId, skipCache);
   const sd = j.streamingData || {};
   const progressive = (sd.formats || []).map(normalizeFormat).filter(Boolean);
   const adaptive = (sd.adaptiveFormats || []).map(normalizeFormat).filter(Boolean);
@@ -812,13 +887,125 @@ async function playerStreams(videoId, skipCache = false) {
 }
 
 async function playerInfo(videoId, skipCache = false) {
-  const j = await call('player', {
-    videoId,
-    contentCheckOk: true,
-    racyCheckOk: true,
-    playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-  }, { skipCache, cacheKey: `playerMeta:${videoId}`, ttl: 10 * 60 * 1000 });
+  const j = await playerResponse(videoId, skipCache);
   return parsePlayerMeta(j, videoId);
+}
+
+// --- DASH manifest (high-quality adaptive playback) -----------------------
+// YouTube never returns dashManifestUrl for VOD, and every client caps *muxed*
+// progressive streams at 360p. The only path to YouTube-like quality (>360p) is
+// the adaptive (video-only + audio-only) ISO-BMFF formats, which are single files
+// addressed by byte ranges. We therefore build an on-demand DASH MPD with
+// SegmentBase (initialization + sidx index ranges) whose BaseURLs point back at
+// our own /api/yt/media byte proxy. dash.js in the browser then does ABR
+// switching exactly like YouTube does.
+
+function xmlEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function isoDuration(totalSec) {
+  const s = Math.max(0, Number(totalSec) || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = (s % 60).toFixed(3);
+  let out = 'PT';
+  if (h) out += `${h}H`;
+  if (m) out += `${m}M`;
+  out += `${sec}S`;
+  return out;
+}
+
+function pickReps(fmts, preferCodec) {
+  // Only ISO-BMFF (mp4) representations are used: H.264 (avc1) + AAC (mp4a) are
+  // universally decodable by MSE, so prefer them and fall back to any mp4 if a
+  // video happens to lack them. Byte-range info is mandatory for SegmentBase.
+  const mp4 = fmts.filter((f) => /\/mp4/.test(f.mimeType || '') && f.indexRange && f.initRange);
+  const preferred = preferCodec ? mp4.filter((f) => String(f.codecs || '').startsWith(preferCodec)) : mp4;
+  const base = preferred.length ? preferred : mp4;
+  const seen = new Set();
+  return base.filter((f) => {
+    if (seen.has(f.itag)) return false;
+    seen.add(f.itag);
+    return true;
+  });
+}
+
+async function dashMpd(videoId, token) {
+  const s = await playerStreams(videoId, false);
+  if (s.status !== 'OK') {
+    const err = new Error(s.reason || 'unplayable');
+    err.playabilityStatus = s.status;
+    err.reason = s.reason;
+    throw err;
+  }
+  const videoReps = pickReps(s.adaptiveFormats, 'avc1');
+  const audioReps = pickReps(s.adaptiveFormats, 'mp4a');
+  if (!videoReps.length || !audioReps.length) {
+    const e = new Error('no adaptive representations');
+    e.playabilityStatus = s.status;
+    e.reason = 'no adaptive representations';
+    throw e;
+  }
+
+  const all = [...s.formats, ...s.adaptiveFormats];
+  const durationSec = Math.max(...all.map((f) => (f.approxDurationMs || 0) / 1000)) || 0;
+  const tok = encodeURIComponent(token || '');
+
+  const repLine = (f, isVideo) => {
+    const attrs = [
+      `id="${xmlEsc(String(f.itag))}"`,
+      `codecs="${xmlEsc(f.codecs)}"`,
+      `bandwidth="${Math.max(1, f.averageBitrate || f.bitrate || 1)}"`,
+    ];
+    if (isVideo) {
+      if (f.width) attrs.push(`width="${f.width}"`);
+      if (f.height) attrs.push(`height="${f.height}"`);
+      if (f.fps) attrs.push(`frameRate="${f.fps}"`);
+    } else if (f.audioSampleRate) {
+      attrs.push(`audioSamplingRate="${xmlEsc(f.audioSampleRate)}"`);
+    }
+    const url = `/api/yt/media/${videoId}?itag=${xmlEsc(String(f.itag))}&token=${tok}`;
+    return [
+      `      <Representation ${attrs.join(' ')}>`,
+      `        <BaseURL>${xmlEsc(url)}</BaseURL>`,
+      `        <SegmentBase indexRange="${xmlEsc(f.indexRange)}" timescale="1000">`,
+      `          <Initialization range="${xmlEsc(f.initRange)}"/>`,
+      `        </SegmentBase>`,
+      `      </Representation>`,
+    ].join('\n');
+  };
+
+  const videoSet = [
+    `    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1">`,
+    ...videoReps.map((f) => repLine(f, true)),
+    `    </AdaptationSet>`,
+  ].join('\n');
+  const audioSet = [
+    `    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" startWithSAP="1">`,
+    ...audioReps.map((f) => repLine(f, false)),
+    `    </AdaptationSet>`,
+  ].join('\n');
+
+  const mpd = [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" mediaPresentationDuration="${isoDuration(durationSec)}" minBufferTime="PT1.5S">`,
+    `  <Period>`,
+    videoSet,
+    audioSet,
+    `  </Period>`,
+    `</MPD>`,
+    ``,
+  ].join('\n');
+
+  return {
+    mpd,
+    durationSec,
+    videoRepresentations: videoReps.map((f) => ({ itag: f.itag, height: f.height, width: f.width, fps: f.fps, qualityLabel: f.qualityLabel, codecs: f.codecs, bitrate: f.bitrate || f.averageBitrate })),
+    audioRepresentations: audioReps.map((f) => ({ itag: f.itag, codecs: f.codecs, bitrate: f.bitrate || f.averageBitrate, audioQuality: f.audioQuality })),
+  };
 }
 
 async function sponsorSegments(videoId) {
@@ -892,6 +1079,7 @@ module.exports = {
   videoInfo,
   playerInfo,
   playerStreams,
+  dashMpd,
   sponsorSegments,
   dislikes,
   dearrow,

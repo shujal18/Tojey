@@ -879,7 +879,10 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
     const cr = upstream.headers.get('content-range');
     if (cl) res.set('Content-Length', cl);
     if (cr) res.set('Content-Range', cr);
-    res.set('Cache-Control', 'private, no-store');
+    // Segments for a given (videoId, itag) are immutable, so let the browser
+    // cache byte ranges: seeking/replaying then avoids re-hitting YouTube, which
+    // is the main cause of "laggy" scrub behaviour. Downloads stay uncached.
+    res.set('Cache-Control', download ? 'private, no-store' : 'private, max-age=1800');
     if (download) {
       const ext = /audio\//.test(fmt.mimeType || '') ? 'm4a' : 'mp4';
       res.set('Content-Disposition', `attachment; filename="tojey-${videoId}-${fmt.itag}.${ext}"`);
@@ -892,6 +895,30 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
     console.error('yt:media error', e.message);
     if (!res.headersSent) res.status(502).json({ error: 'media unavailable', detail: e.message.slice(0, 200) });
     else res.end();
+  }
+});
+
+// DASH manifest for high-quality (>360p) adaptive playback. Built server-side
+// from the innertube adaptive formats; BaseURLs point back at /api/yt/media so
+// the browser streams through the same-egress byte proxy (googlevideo URLs are
+// IP-bound). The client token is threaded through the query so dash.js can fetch
+// this manifest with a plain <video> element (no Authorization header).
+app.get('/api/yt/dash/:videoId', mediaAuth, async (req, res) => {
+  const videoId = String(req.params.videoId || '');
+  if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+  try {
+    const { mpd } = await yt.dashMpd(videoId, String(req.query.token || ''));
+    res.set('Content-Type', 'application/dash+xml');
+    res.set('Cache-Control', 'private, no-store');
+    res.send(mpd);
+  } catch (e) {
+    console.error('yt:dash error', e.message);
+    const unplayable = !!e.playabilityStatus && e.playabilityStatus !== 'OK';
+    res.status(unplayable ? 422 : 502).json({
+      error: 'dash unavailable',
+      status: e.playabilityStatus || null,
+      reason: String(e.reason || e.message || '').slice(0, 200),
+    });
   }
 });
 
