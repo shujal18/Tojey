@@ -43,6 +43,18 @@ export const lightTheme = {
   unreadText: colors.white,
   danger: colors.danger,
   online: colors.online,
+  // App shell (WhatsApp-Web-style frame): page backdrop behind the app, panel
+  // surfaces, and interaction states.
+  shellBg: '#DAD3EC',
+  sidebarBg: '#FFFFFF',
+  panelBg: '#F5F2FB',
+  panelHeader: '#F0ECFA',
+  railBg: '#FFFFFF',
+  rowHover: 'rgba(108,60,233,0.07)',
+  rowActive: 'rgba(108,60,233,0.13)',
+  chatPattern: `radial-gradient(circle at 20% 20%, rgba(108,60,233,0.06), transparent 60%), radial-gradient(circle, rgba(108,60,233,0.10) 1px, transparent 1px)`,
+  chatPatternSize: '28px 28px',
+  frameShadow: '0 12px 44px rgba(31,15,70,0.22)',
 };
 
 export const darkTheme = {
@@ -67,6 +79,16 @@ export const darkTheme = {
   unreadText: colors.white,
   danger: colors.danger,
   online: colors.online,
+  shellBg: '#0A0712',
+  sidebarBg: '#100B1A',
+  panelBg: '#0D0918',
+  panelHeader: '#1A1428',
+  railBg: '#120D20',
+  rowHover: 'rgba(139,92,246,0.10)',
+  rowActive: 'rgba(139,92,246,0.20)',
+  chatPattern: `radial-gradient(circle at 20% 20%, rgba(108,60,233,0.10), transparent 60%), radial-gradient(circle, rgba(139,92,246,0.12) 1px, transparent 1px)`,
+  chatPatternSize: '28px 28px',
+  frameShadow: '0 12px 44px rgba(0,0,0,0.6)',
 };
 
 export function getTheme(mode) {

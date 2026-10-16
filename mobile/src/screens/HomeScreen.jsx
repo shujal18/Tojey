@@ -17,7 +17,7 @@ import YoutubeHomeScreen from './YoutubeHomeScreen';
 import DownloadsScreen from './DownloadsScreen';
 import BottomTabBar from '../components/BottomTabBar';
 
-export default function HomeScreen({ socket, user, token, setUser, onLogout, onOpenChat, onOpenSettings, activeChatId }) {
+export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
@@ -281,9 +281,8 @@ export default function HomeScreen({ socket, user, token, setUser, onLogout, onO
               <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 4 }]}>
                 <Icon name="settings-outline" size={22} color={theme.primary} />
               </TouchableOpacity>
-              <TouchableOpacity onPress={onLogout} style={[styles.headerBtn, { marginLeft: 4 }]}>
-                <Icon name="log-out-outline" size={22} color={theme.danger} />
-              </TouchableOpacity>
+              {/* Logout was removed from the header: signing out by accident
+                  loses the session, and it already lives in Settings. */}
             </View>
           </View>
 

@@ -13,6 +13,7 @@ import Toast from '../components/Toast';
 import { playNudgeVibration } from '../services/nudge';
 import {
   getChatHeadEnabled, showChatHead, hideChatHead, canDrawOverlay, getNudgeVibrationEnabled,
+  getEnterToSend,
 } from '../services/chatHead';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -163,6 +164,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const cameraTimeoutRef = useRef(null);
   const [nudgeMenuVisible, setNudgeMenuVisible] = useState(false);
   const chatHeadOnRef = useRef(false);
+  // Enter-to-send is read into a ref, not state, so the input's props stay stable
+  // while typing (a state change here would re-render the whole room per tap).
+  const enterSendRef = useRef(false);
   const appVisibleRef = useRef(true);
   const headUnreadRef = useRef(0);
   const [recording, setRecording] = useState(false);
@@ -771,6 +775,9 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     let mounted = true;
     getChatHeadEnabled().then((enabled) => {
       if (mounted) chatHeadOnRef.current = enabled;
+    });
+    getEnterToSend().then((enabled) => {
+      if (mounted) enterSendRef.current = enabled;
     });
     return () => { mounted = false; };
   }, []);
@@ -1973,13 +1980,15 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
   // otherwise the newest message stays hidden behind the input bar after sending.
   const kbShrinkTaken = kbOpen ? Math.max(0, (msgAreaClosedH.current || msgAreaH || 0) - msgAreaH) : 0;
   const kbOverlap = kbOpen ? Math.max(0, kbHeight - kbShrinkTaken) : 0;
-  // The list already ends directly above the composer when the window resizes, so the
-  // keyboard adds NO padding here - bigger pads (stack + overlap) created a large empty
-  // gap between the newest message and the composer when the keyboard was open. Exact
-  // padding is used ONLY if the window failed to shrink (measured kbOverlap > 0).
-  // When keyboard is closed, account for all bars below the list: composer + reply + attach + emoji + rec + edit bars
-  const barsStack = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 54);
-  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 8 + barsStack;
+  // The list lives inside msgArea (flex: 1), and the reply/edit/record/attach/emoji
+  // bars and the composer are SIBLINGS below it in the same flex column. Flex
+  // already shrinks the list so it ends directly above whichever bars are showing,
+  // in both keyboard states. So the list needs a small constant pad only, and
+  // adding barsStack here double-counted those bars - which pushed the newest
+  // message up by a full composer height and left a large empty gap above it.
+  // Extra padding is still required in exactly one case: an OEM that ignores
+  // adjustResize, so the keyboard draws over a window that never shrank.
+  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 8;
   bottomInsetRef.current = bottomPad;
 
   return (
@@ -2379,6 +2388,17 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
                 placeholderTextColor={theme.textSecondary}
                 style={[styles.input, { color: theme.text }]}
                 multiline
+                blurOnSubmit={!enterSendRef.current}
+                onKeyPress={(e) => {
+                  // Enter-to-send ON: Enter sends, Shift+Enter inserts a newline.
+                  // Implemented via onKeyPress rather than onSubmitEditing because
+                  // a multiline TextInput on Android never fires onSubmitEditing.
+                  if (!enterSendRef.current) return;
+                  if (e.nativeEvent.key !== 'Enter') return;
+                  if (e.nativeEvent.shiftKey) return;
+                  e.preventDefault?.();
+                  pressSend();
+                }}
                 onPressIn={reopenKeyboard}
                 onFocus={ensureKeyboard}
               />

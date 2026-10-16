@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
+import { streamUrl } from '../components/YoutubePlayer';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -19,72 +20,31 @@ function thumbnailUrlFor(item, quality = 'hqdefault') {
   return vid ? `https://i.ytimg.com/vi/${vid}/${quality}.jpg` : '';
 }
 
-function embedUrl(videoId, paused) {
-  const qs = new URLSearchParams({
-    autoplay: paused ? '0' : '1',
-    mute: '0',
-    controls: '0',
-    playsinline: '1',
-    rel: '0',
-    loop: '1',
-    playlist: videoId,
-    disablekb: '1',
-    modestbranding: '1',
-  });
-  return `https://www.youtube.com/embed/${videoId}?${qs.toString()}`;
+function mediaSrc(videoId, token, nonce) {
+  // `itag=best` never matches a real itag, so the proxy's pickFormat falls
+  // through to the highest muxed (video+audio) format.
+  const base = streamUrl(videoId, 'best', token);
+  return nonce ? `${base}&_=${nonce}` : base;
 }
 
-function parseYTErrorCode(errorCode) {
-  if (typeof errorCode === 'number') return errorCode;
-  if (typeof errorCode === 'string') {
-    const parts = errorCode.trim().split(/[\s,-]+/);
-    const code = parseInt(parts[0], 10);
-    if (!isNaN(code)) return code;
-  }
-  return null;
-}
-
-function isPlayableError(errorCode) {
-  const code = parseYTErrorCode(errorCode);
-  if (code === null) return false;
-  return [2, 5, 100, 101, 102, 103, 104, 105, 150, 152, 153, 154, 155].includes(code);
-}
-
-const PLAYER_VARS = {
-  autoplay: 0,
-  controls: 0,
-  disablekb: 1,
-  fs: 0,
-  rel: 0,
-  iv_load_policy: 3,
-  modestbranding: 1,
-  playsinline: 1,
-  mute: 0,
-  enablejsapi: 1,
-};
-
-let ytApiPromise = null;
-function ensureYouTubeApi() {
-  if (typeof window !== 'undefined' && window.YT && window.YT.Player) return Promise.resolve();
-  if (ytApiPromise) return ytApiPromise;
-  ytApiPromise = new Promise((resolve, reject) => {
-    const prev = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      if (prev) prev();
-      resolve();
-    };
-    const s = document.createElement('script');
-    s.src = 'https://www.youtube.com/iframe_api';
-    s.async = true;
-    s.onerror = () => { ytApiPromise = null; reject(new Error('Failed to load YouTube player API')); };
-    document.head.appendChild(s);
-  });
-  return ytApiPromise;
-}
+// Mirrors backend/src/shortsFeed.js CATEGORIES so the chip row renders instantly
+// (and still renders if the categories request fails offline).
+const FALLBACK_CATEGORIES = [
+  { id: 'trending', label: 'For You' },
+  { id: 'romantic', label: 'Romantic/Love' },
+  { id: 'foreign', label: 'Foreign' },
+  { id: 'comedy', label: 'Comedy' },
+  { id: 'funny', label: 'Funny' },
+  { id: 'education', label: 'Education' },
+  { id: 'motivation', label: 'Motivation' },
+  { id: 'meme', label: 'Meme' },
+  { id: 'nepali', label: 'Nepali' },
+];
 
 export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
+  const [categories, setCategories] = useState(FALLBACK_CATEGORIES);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -93,7 +53,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const [paused, setPaused] = useState(false);
   const [viewH, setViewH] = useState(() => (typeof window !== 'undefined' ? window.innerHeight : 600));
   const [loadMoreSpinner, setLoadMoreSpinner] = useState(false);
-  const [apiState, setApiState] = useState('loading');
   const [activeSlot, setActiveSlot] = useState(0);
 
   const shellRef = useRef(null);
@@ -111,12 +70,15 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const hasMoreRef = useRef(true);
   const isMountedRef = useRef(true);
 
+  // Two native <video> slots, both fed by the backend byte proxy. Slot A is
+  // visible and playing; slot B is preloading the next clip so a swipe starts
+  // instantly.
   const playerElsRef = useRef([null, null]);
-  const playersRef = useRef([null, null]);
   const loadedVideoIdBySlotRef = useRef([null, null]);
   const activeSlotRef = useRef(0);
-  const playersReadyRef = useRef(false);
-  const playerHandlersRef = useRef({ onStateChange: null, onError: null });
+  // Flips true once both <video> slots are mounted. Refs alone can't wake the
+  // effects above (they don't re-render), so this state does it.
+  const [poolReady, setPoolReady] = useState(false);
 
   useEffect(() => { videosRef.current = videos; }, [videos]);
 
@@ -148,6 +110,28 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     toastTimerRef.current = setTimeout(() => setToast(''), 4000);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API}/api/shorts/categories`, { headers: authHeaders })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('categories'))))
+      .then((d) => {
+        if (cancelled) return;
+        const list = Array.isArray(d.categories) ? d.categories.filter((c) => c && c.id) : [];
+        if (list.length) setCategories(list);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [authHeaders]);
+
+  const selectCategory = useCallback((id) => {
+    if (id === category) return;
+    setCategory(id);
+    activeIdxRef.current = 0;
+    setActiveIdx(0);
+    const el = shellRef.current;
+    if (el) el.scrollTop = 0;
+  }, [category]);
+
   const fetchFeed = useCallback(async (cat, opts = {}) => {
     if (inflightRef.current) return;
     const { refresh = false, append = false, pageToken = null } = opts;
@@ -158,12 +142,18 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     setError(null);
 
     try {
+      // /api/shorts/* is our own innertube feed; the old /api/reels/feed was the
+      // YouTube Data API path and is gone. Its params and response field names
+      // differ: `nextToken` (not `pageToken`) and `items` (not `videos`).
       const queryParts = [`category=${encodeURIComponent(cat)}`, `refresh=${refresh ? 'true' : 'false'}`];
-      if (pageToken) queryParts.push(`pageToken=${encodeURIComponent(pageToken)}`);
+      if (pageToken) queryParts.push(`nextToken=${encodeURIComponent(pageToken)}`);
       const qs = queryParts.join('&');
 
       if (!append && !pageToken && !refresh) {
-        const cacheKey = `tojey_reels_cache_${cat}`;
+        // v2: the feed source changed from the YouTube Data API to our own
+        // innertube feed, so v1 entries (which could hold 3-to-130-minute
+        // uploads) must not be reused.
+        const cacheKey = `tojey_reels_cache_v2_${cat}`;
         try {
           const cachedRaw = localStorage.getItem(cacheKey);
           if (cachedRaw) {
@@ -189,13 +179,13 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
         } catch (e) {}
       }
 
-      const res = await fetch(`${API}/api/reels/feed?${qs}`, { headers: authHeaders });
+      const res = await fetch(`${API}/api/shorts/feed?${qs}`, { headers: authHeaders });
       const data = await res.json();
 
       if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
       if (!res.ok) throw new Error(data.error || 'Failed to load feed');
 
-      let validVideos = (data.videos || []).filter(v =>
+      let validVideos = (data.items || []).filter(v =>
         v.videoId && typeof v.videoId === 'string' && v.videoId.trim().length > 0 &&
         !failedVideoIdsRef.current.has(v.videoId)
       );
@@ -225,12 +215,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
         if (shellRef.current) shellRef.current.scrollTop = 0;
         if (!refresh && !pageToken && validVideos.length > 0) {
           try {
-            localStorage.setItem(`tojey_reels_cache_${cat}`, JSON.stringify({ videos: validVideos, timestamp: Date.now() }));
+            localStorage.setItem(`tojey_reels_cache_v2_${cat}`, JSON.stringify({ videos: validVideos, timestamp: Date.now() }));
           } catch (e) {}
         }
       }
 
-      nextPageTokenRef.current = data.nextPageToken || null;
+      nextPageTokenRef.current = data.nextToken || null;
       hasMoreRef.current = data.hasMore === true;
       if (data.warning) showToast(data.warning);
     } catch (e) {
@@ -292,7 +282,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [viewH]);
 
   const playAt = useCallback((idx) => {
-    if (apiState !== 'ok' || !playersReadyRef.current) return;
+    const el0 = playerElsRef.current[0];
+    const el1 = playerElsRef.current[1];
+    if (!el0 || !el1) return;
     const list = videosRef.current;
     const videoId = sanitizeVideoId(list[idx] && list[idx].videoId);
     if (!videoId) {
@@ -304,47 +296,43 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     const alreadyActive = loadedVideoIdBySlotRef.current[a] === videoId;
     const target = alreadyActive ? a : b;
 
-    if (target === a && alreadyActive) {
-      if (!pausedRef.current) {
-        try { playersRef.current[a].playVideo(); } catch (e) {}
-      }
-      setActiveSlot(a);
-      return;
-    }
-
-    const p = playersRef.current[target];
-    if (!p) return;
-
+    const el = target === 0 ? el0 : el1;
     if (loadedVideoIdBySlotRef.current[target] !== videoId) {
-      try {
-        p.loadVideoById(videoId);
-        loadedVideoIdBySlotRef.current[target] = videoId;
-      } catch (e) {}
+      loadedVideoIdBySlotRef.current[target] = videoId;
+      el.src = mediaSrc(videoId, token);
+      el.load();
     }
     if (!pausedRef.current) {
-      try { p.playVideo(); } catch (e) {}
+      const pr = el.play();
+      if (pr && pr.catch) pr.catch(() => {
+        // No user activation yet (autoplay policy): fall back to muted so the
+        // feed still moves, and unmute on the first tap in handleTap.
+        el.muted = true;
+        el.play().catch(() => {});
+      });
     }
 
     const old = 1 - target;
-    const oldPlayer = playersRef.current[old];
-    if (oldPlayer) {
-      try { oldPlayer.pauseVideo(); } catch (e) {}
-      const nextId = sanitizeVideoId(list[idx + 1] && list[idx + 1].videoId);
-      if (nextId && nextId !== videoId) {
-        try {
-          oldPlayer.cueVideoById(nextId);
-          loadedVideoIdBySlotRef.current[old] = nextId;
-        } catch (e) {}
-      } else {
-        try { oldPlayer.stopVideo(); } catch (e) {}
-        loadedVideoIdBySlotRef.current[old] = null;
+    const oldEl = old === 0 ? el0 : el1;
+    const nextId = sanitizeVideoId(list[idx + 1] && list[idx + 1].videoId);
+    if (nextId && nextId !== videoId) {
+      if (loadedVideoIdBySlotRef.current[old] !== nextId) {
+        loadedVideoIdBySlotRef.current[old] = nextId;
+        oldEl.src = mediaSrc(nextId, token);
+        oldEl.load();
       }
+      oldEl.pause();
+    } else if (loadedVideoIdBySlotRef.current[old]) {
+      oldEl.pause();
+      oldEl.removeAttribute('src');
+      oldEl.load();
+      loadedVideoIdBySlotRef.current[old] = null;
     }
 
     currentVideoIdRef.current = videoId;
     activeSlotRef.current = target;
     setActiveSlot(target);
-  }, [apiState]);
+  }, [token]);
 
   const skipOnError = useCallback((erroredVideoId) => {
     if (erroredVideoId) failedVideoIdsRef.current.add(erroredVideoId);
@@ -361,100 +349,84 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     }
   }, [switchToIndex, showToast, category, fetchFeed]);
 
-  const handlePlayerStateChange = useCallback((event) => {
-    if (event.target !== playersRef.current[activeSlotRef.current]) return;
-    if (!window.YT || event.data !== window.YT.PlayerState.ENDED) return;
+  const handleEnded = useCallback(() => {
     if (pausedRef.current) return;
     const cur = activeIdxRef.current;
     const nextItem = videosRef.current[cur + 1];
     if (nextItem) {
       switchToIndex(cur + 1);
     } else if (videosRef.current[cur]) {
-      const vid = sanitizeVideoId(videosRef.current[cur].videoId);
-      const slot = activeSlotRef.current;
-      const p = playersRef.current[slot];
-      if (vid && p) {
-        try { p.seekTo(0); p.playVideo(); } catch (e) {}
+      const el = playerElsRef.current[activeSlotRef.current];
+      if (el) {
+        try { el.currentTime = 0; el.play(); } catch (e) {}
       }
     }
   }, [switchToIndex]);
 
-  const handlePlayerError = useCallback((event) => {
-    if (event.target !== playersRef.current[activeSlotRef.current]) return;
-    if (!isPlayableError(event.data)) return;
-    skipOnError(currentVideoIdRef.current);
-  }, [skipOnError]);
-
-  playerHandlersRef.current.onStateChange = handlePlayerStateChange;
-  playerHandlersRef.current.onError = handlePlayerError;
-
-  useEffect(() => {
-    let cancelled = false;
-    const t = setTimeout(() => {
-      if (!cancelled && !(window.YT && window.YT.Player)) setApiState('failed');
-    }, 7000);
-    ensureYouTubeApi()
-      .then(() => { if (!cancelled) setApiState('ok'); })
-      .catch(() => { if (!cancelled) setApiState('failed'); });
-    return () => { cancelled = true; clearTimeout(t); };
-  }, []);
-
-  useEffect(() => {
-    if (apiState !== 'ok') return;
-    const el0 = playerElsRef.current[0];
-    const el1 = playerElsRef.current[1];
-    if (!el0 || !el1) return;
-    try {
-      const mk = (el) => new window.YT.Player(el, {
-        width: '100%',
-        height: '100%',
-        playerVars: PLAYER_VARS,
-        events: {
-          onStateChange: (e) => { if (playerHandlersRef.current.onStateChange) playerHandlersRef.current.onStateChange(e); },
-          onError: (e) => { if (playerHandlersRef.current.onError) playerHandlersRef.current.onError(e); },
-        },
-      });
-      playersRef.current[0] = mk(el0);
-      playersRef.current[1] = mk(el1);
-    } catch (e) {
-      setApiState('failed');
+  // Retry once with a cache-busting query (forces the proxy to re-resolve a
+  // possibly-expired upstream URL), then skip the clip like the old YT player did.
+  const errorRetriesRef = useRef(0);
+  const handleVideoError = useCallback(() => {
+    const slot = activeSlotRef.current;
+    const el = playerElsRef.current[slot];
+    const vid = loadedVideoIdBySlotRef.current[slot];
+    if (!el || !vid) return;
+    if (errorRetriesRef.current < 1) {
+      errorRetriesRef.current += 1;
+      const fresh = mediaSrc(vid, token, Date.now());
+      el.src = fresh;
+      el.load();
+      if (!pausedRef.current) el.play().catch(() => {});
       return;
     }
-    playersReadyRef.current = true;
-    playAt(activeIdxRef.current);
-    return () => {
-      playersReadyRef.current = false;
-      try { if (playersRef.current[0]) playersRef.current[0].destroy(); } catch (e) {}
-      try { if (playersRef.current[1]) playersRef.current[1].destroy(); } catch (e) {}
-      playersRef.current = [null, null];
-      loadedVideoIdBySlotRef.current = [null, null];
-      activeSlotRef.current = 0;
-    };
-  }, [apiState, playAt]);
+    errorRetriesRef.current = 0;
+    skipOnError(vid);
+  }, [token, skipOnError]);
+
+  const handleSlotEnded = useCallback((slot) => {
+    if (slot !== activeSlotRef.current) return;
+    handleEnded();
+  }, [handleEnded]);
+
+  const handleSlotError = useCallback((slot) => {
+    if (slot !== activeSlotRef.current) return;
+    handleVideoError();
+  }, [handleVideoError]);
 
   useEffect(() => {
-    if (apiState !== 'ok' || !playersReadyRef.current || videos.length === 0) return;
+    if (!poolReady || videos.length === 0) return;
     const idx = activeIdxRef.current;
     const vid = sanitizeVideoId(videos[idx] && videos[idx].videoId);
     if (vid && currentVideoIdRef.current === vid) return;
     playAt(idx);
-  }, [videos, apiState, playAt]);
+  }, [videos, playAt, poolReady]);
 
   useEffect(() => {
-    if (apiState !== 'ok' || !playersReadyRef.current || videos.length === 0) return;
+    if (!poolReady || videos.length === 0) return;
     playAt(activeIdx);
-  }, [activeIdx, apiState, playAt]);
+  }, [activeIdx, playAt, poolReady]);
+
+  useEffect(() => () => {
+    try { playerElsRef.current[0] && playerElsRef.current[0].pause(); } catch (e) {}
+    try { playerElsRef.current[1] && playerElsRef.current[1].pause(); } catch (e) {}
+    loadedVideoIdBySlotRef.current = [null, null];
+    activeSlotRef.current = 0;
+  }, []);
 
   useEffect(() => {
-    if (apiState !== 'ok' || !playersReadyRef.current) return;
-    const p = playersRef.current[activeSlotRef.current];
-    if (!p) return;
+    if (!poolReady) return;
+    const el = playerElsRef.current[activeSlotRef.current];
+    if (!el) return;
     if (paused) {
-      try { p.pauseVideo(); } catch (e) {}
+      try { el.pause(); } catch (e) {}
     } else if (currentVideoIdRef.current) {
-      try { p.playVideo(); } catch (e) {}
+      const pr = el.play();
+      if (pr && pr.catch) pr.catch(() => {
+        el.muted = true;
+        el.play().catch(() => {});
+      });
     }
-  }, [paused, apiState]);
+  }, [paused, poolReady]);
 
   useEffect(() => {
     const nextItem = videos[activeIdx + 1];
@@ -477,7 +449,14 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [viewH, loadMore]);
 
   const handleTap = useCallback(() => {
-    setPaused(p => !p);
+    const next = !pausedRef.current;
+    // Resuming is a user gesture, so it's where we restore sound after a
+    // muted-autoplay fallback.
+    if (!next) {
+      const el = playerElsRef.current[activeSlotRef.current];
+      if (el) el.muted = false;
+    }
+    setPaused(next);
   }, []);
 
   const activeItem = videos[activeIdx];
@@ -486,11 +465,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     ? activeVideoId
     : null;
 
-  useEffect(() => {
-    if (apiState !== 'ok' && overlayVideoId) currentVideoIdRef.current = overlayVideoId;
-  }, [overlayVideoId, apiState]);
-
-  const poolVisible = apiState === 'ok';
   const WINDOW = 3;
   const windowStart = Math.max(0, activeIdx - WINDOW);
   const windowEnd = Math.min(videos.length, activeIdx + WINDOW + 1);
@@ -607,60 +581,86 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               zIndex: 4,
             }}
           >
-            {poolVisible ? (
-              <>
-                <div
-                  ref={el => { playerElsRef.current[0] = el; }}
-                  style={{
-                    position: 'absolute', inset: 0, background: '#000',
-                    zIndex: 3,
-                    opacity: (overlayVideoId && activeSlot === 0) ? 1 : 0,
-                    pointerEvents: 'none',
-                  }}
-                />
-                <div
-                  ref={el => { playerElsRef.current[1] = el; }}
-                  style={{
-                    position: 'absolute', inset: 0, background: '#000',
-                    zIndex: 2,
-                    opacity: (overlayVideoId && activeSlot === 1) ? 1 : 0,
-                    pointerEvents: 'none',
-                  }}
-                />
-                {overlayVideoId && paused && (
-                  <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-                    <div style={{
-                      width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
-                    </div>
+            <>
+              <video
+                ref={el => {
+                  playerElsRef.current[0] = el;
+                  if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
+                }}
+                playsInline
+                preload="auto"
+                onEnded={() => handleSlotEnded(0)}
+                onError={() => handleSlotError(0)}
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  objectFit: 'contain', background: '#000',
+                  zIndex: 3,
+                  opacity: (overlayVideoId && activeSlot === 0) ? 1 : 0,
+                  pointerEvents: 'none',
+                }}
+              />
+              <video
+                ref={el => {
+                  playerElsRef.current[1] = el;
+                  if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
+                }}
+                playsInline
+                preload="auto"
+                onEnded={() => handleSlotEnded(1)}
+                onError={() => handleSlotError(1)}
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  objectFit: 'contain', background: '#000',
+                  zIndex: 2,
+                  opacity: (overlayVideoId && activeSlot === 1) ? 1 : 0,
+                  pointerEvents: 'none',
+                }}
+              />
+              {overlayVideoId && paused && (
+                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                  <div style={{
+                    width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
                   </div>
-                )}
-              </>
-            ) : overlayVideoId ? (
-              <>
-                <iframe
-                  title="reel-player"
-                  src={embedUrl(overlayVideoId, paused)}
-                  frameBorder="0"
-                  allow="autoplay; encrypted-media; picture-in-picture"
-                  allowFullScreen
-                  style={{ width: '100%', height: '100%', border: 'none', background: '#000' }}
-                />
-                {paused && (
-                  <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-                    <div style={{
-                      width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : null}
+                </div>
+              )}
+            </>
           </div>
+        </div>
+      )}
+
+      {videos.length > 0 && categories.length > 0 && (
+        <div
+          style={{
+            position: 'absolute', top: 10, left: onBack ? 58 : 12, right: 12,
+            zIndex: 46, display: 'flex', gap: 8, overflowX: 'auto',
+            scrollbarWidth: 'none', msOverflowStyle: 'none', padding: '4px 0',
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="reels-chip-row"
+        >
+          <style>{'.reels-chip-row::-webkit-scrollbar{display:none}'}</style>
+          {categories.map((c) => {
+            const active = c.id === category;
+            return (
+              <button
+                key={c.id}
+                onClick={() => selectCategory(c.id)}
+                style={{
+                  flexShrink: 0, border: 'none', cursor: 'pointer',
+                  padding: '6px 13px', borderRadius: 16, fontSize: 13, fontWeight: 700,
+                  color: active ? '#fff' : 'rgba(255,255,255,0.9)',
+                  background: active ? theme.primary : 'rgba(0,0,0,0.5)',
+                  boxShadow: active ? 'none' : '0 1px 6px rgba(0,0,0,0.45)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {c.label}
+              </button>
+            );
+          })}
         </div>
       )}
 

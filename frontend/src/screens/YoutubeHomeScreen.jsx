@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, X } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, X, Search, Bookmark } from 'lucide-react';
+import YoutubePlayer from '../components/YoutubePlayer';
+import YoutubeBrowse from '../components/YoutubeBrowse';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -58,6 +60,8 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState('');
   const [watch, setWatch] = useState(null);
+  const [mode, setMode] = useState('home');
+  const [browseView, setBrowseView] = useState('search');
   const [shortsStrip, setShortsStrip] = useState([]);
   const [saved, setSaved] = useState([]);
   const nextPageTokenRef = useRef(null);
@@ -91,9 +95,9 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   useEffect(() => {
     let mounted = true;
-    fetch(`${API}/api/reels/feed?category=trending`, { headers: authHeaders })
+    fetch(`${API}/api/shorts/feed?category=trending`, { headers: authHeaders })
       .then((r) => r.json())
-      .then((d) => { if (mounted && Array.isArray(d.videos)) setShortsStrip(d.videos.slice(0, 8)); })
+      .then((d) => { if (mounted && Array.isArray(d.items)) setShortsStrip(d.items.slice(0, 8)); })
       .catch(() => {});
     return () => { mounted = false; };
   }, [authHeaders]);
@@ -111,6 +115,24 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   const isSaved = (id) => saved.some((x) => x.videoId === id);
 
+  if (mode !== 'home') {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: theme.background, padding: '10px 14px' }}>
+        <YoutubeBrowse
+          token={token}
+          key={browseView}
+          initialView={browseView}
+          onPlay={(v) => setWatch(v)}
+          onDownload={toggleSave}
+          dlMap={Object.fromEntries(saved.map((s) => [s.videoId, true]))}
+        />
+        {!!watch && (
+          <WatchModal item={watch} token={token} onClose={() => setWatch(null)} saved={isSaved(watch.videoId)} onToggleSave={() => toggleSave(watch)} />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: theme.background }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', background: theme.background }}>
@@ -118,7 +140,13 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           <div style={{ fontSize: 21, fontWeight: 900, color: theme.primary, letterSpacing: 0.2 }}>Tojey</div>
           <div style={{ fontSize: 11, color: theme.textSecondary }}>YouTube inside</div>
         </div>
-        <button onClick={onOpenChats} style={headerBtnStyle}>
+        <button onClick={() => { setBrowseView('search'); setMode('browse'); }} style={headerBtnStyle} title="Search">
+          <Search size={21} color={theme.primary} />
+        </button>
+        <button onClick={() => { setBrowseView('library'); setMode('browse'); }} style={{ ...headerBtnStyle, marginLeft: 12 }} title="Library">
+          <Bookmark size={20} color={theme.primary} />
+        </button>
+        <button onClick={onOpenChats} style={{ ...headerBtnStyle, marginLeft: 12 }}>
           <MessageCircle size={21} color={theme.primary} />
         </button>
         <button onClick={onOpenSettings} style={{ ...headerBtnStyle, marginLeft: 12 }}>
@@ -215,7 +243,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       )}
 
       {!!watch && (
-        <WatchModal item={watch} onClose={() => setWatch(null)} saved={isSaved(watch.videoId)} onToggleSave={() => toggleSave(watch)} />
+        <WatchModal item={watch} token={token} onClose={() => setWatch(null)} saved={isSaved(watch.videoId)} onToggleSave={() => toggleSave(watch)} />
       )}
     </div>
   );
@@ -223,40 +251,42 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
 const headerBtnStyle = { background: 'none', border: 'none', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center' };
 
-function WatchModal({ item, onClose, saved, onToggleSave }) {
+function WatchModal({ item, token, onClose, saved, onToggleSave }) {
   const { theme } = useTheme();
   const vid = sanitizeVideoId(item.videoId);
   return (
     <div style={{
-      position: 'fixed', inset: 0, zIndex: 60, display: 'flex', flexDirection: 'column', background: theme.background,
-      maxWidth: 480, width: '100%', margin: '0 auto',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.background }}>
-        <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</div>
-          <div style={{ fontSize: 12, color: theme.textSecondary }}>{item.channelTitle}</div>
+      position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'rgba(8,5,14,0.72)', padding: 20,
+    }} onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: 'flex', flexDirection: 'column', background: theme.background, borderRadius: 14, overflow: 'hidden',
+          width: '100%', maxWidth: 980, maxHeight: '92vh', boxShadow: theme.frameShadow,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.panelHeader || theme.background }}>
+          <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</div>
+            <div style={{ fontSize: 12, color: theme.textSecondary }}>{item.channelTitle}</div>
+          </div>
+          <button
+            onClick={onToggleSave}
+            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: saved ? theme.primaryLight : theme.primary, color: saved ? theme.primary : '#fff' }}
+            aria-label="Save for offline"
+          >
+            {saved ? <Check size={18} /> : <Download size={18} />}
+          </button>
         </div>
-        <button
-          onClick={onToggleSave}
-          style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: saved ? theme.primaryLight : theme.primary, color: saved ? theme.primary : '#fff' }}
-          aria-label="Save for offline"
-        >
-          {saved ? <Check size={18} /> : <Download size={18} />}
-        </button>
-      </div>
-      <div style={{ flex: 1, background: '#000' }}>
-        {vid ? (
-          <iframe
-            title={item.title}
-            src={`https://www.youtube-nocookie.com/embed/${vid}?autoplay=1&playsinline=1&rel=0&modestbranding=1`}
-            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-            allowFullScreen
-            style={{ width: '100%', height: '100%', border: 0 }}
-          />
-        ) : (
-          <div style={{ color: theme.textSecondary, textAlign: 'center', padding: 30 }}>Video unavailable</div>
-        )}
+        <div style={{ background: '#000', width: '100%' }}>
+          {vid ? (
+            <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} />
+          ) : (
+            <div style={{ color: theme.textSecondary, textAlign: 'center', padding: 30 }}>Video unavailable</div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -81,6 +81,10 @@ function Shell() {
       last_seen: contact.last_seen ?? contact.lastSeen ?? null,
       bio: contact.bio || '',
     });
+    // A banner can already be on screen when the room opens (e.g. it arrived a
+    // moment earlier, or the room was opened from the banner itself). Clear it so
+    // nothing lingers over the conversation the user just chose to enter.
+    setIncomingBanner(null);
   }, [session, activeChat]);
   openConversationWithRef.current = openConversationWith;
 
@@ -317,6 +321,11 @@ function Shell() {
         AppState.currentState === 'active' &&
         activeChat && String(activeChat.id) === String(sender.userId)
       ) return;
+      // Seated in any room: no in-app banner at all, not even for a different
+      // sender. The room is the user's current focus and a popup over the
+      // conversation is pure noise. This has to be a separate check from the one
+      // above, which only suppresses the conversation already on screen.
+      if (AppState.currentState === 'active' && activeChat) return;
       const prefs = await getNotifPrefs().catch(() => null);
       if (!prefs || !prefs.enabled) return;
       const preview = messagePreviewText(message).slice(0, 90);
@@ -520,8 +529,10 @@ function Shell() {
             user={session.user}
             token={session.token}
             setUser={(u) => setSession({ ...session, user: u })}
-            onLogout={handleLogout}
-            onOpenChat={setActiveChat}
+            onOpenChat={(c) => {
+              setIncomingBanner(null);
+              setActiveChat(c);
+            }}
             onOpenSettings={() => setShowSettings(true)}
             activeChatId={activeChat?.id}
           />

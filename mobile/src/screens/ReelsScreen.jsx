@@ -20,15 +20,21 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { SERVER_URL } from '../config';
+import { getShortStream } from '../services/innertube';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
-const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache';
-const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp';
+// Storage keys are v3: the feed moved from Piped to our own innertube backend,
+// which invalidates both kinds of persisted state. Old feed caches hold Piped
+// item shapes (including the 3-to-130-minute uploads Piped returned), and old
+// cursors are opaque Piped tokens that YouTube's innertube continuation cannot
+// use. Bumping the keys retires both without needing a migration.
+const STORAGE_KEY_FEED_CACHE = '@tojey_reels_feed_cache_v3';
+const STORAGE_KEY_FEED_CACHE_TIMESTAMP = '@tojey_reels_feed_cache_timestamp_v3';
 const FEED_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes local metadata cache
 const STORAGE_KEY_SEEN = '@tojey_reels_seen_v2';
-const STORAGE_KEY_CURSOR = '@tojey_reels_cursor_v2';
+const STORAGE_KEY_CURSOR = '@tojey_reels_cursor_v3';
 const SEEN_MAX_IDS = 500;
 const AUTO_ADVANCE_MAX_PAGES = 4;
 const MIN_FRESH_BATCH = 8;
@@ -152,7 +158,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [likedIds, setLikedIds] = useState(() => new Set());
   const [muted, setMuted] = useState(false);
   const [activePaused, setActivePaused] = useState(false);
-  // videoId -> resolved { source:{url,kind,height}, audioSource }
+  // videoId -> resolved { source: { url, kind, height } }
   const [resolved, setResolved] = useState(() => new Map());
 
   const mutedRef = useRef(false);
@@ -181,6 +187,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const streamCacheRef = useRef(new Map());
   const inflightStreamRef = useRef(new Map());
   const failedStreamsRef = useRef(new Set());
+  // Consecutive playback errors on the current clip, reset once one plays.
+  const playErrorTriesRef = useRef(0);
 
   // thumbnail fade animation per video id
   const thumbAnims = useRef(new Map());
@@ -242,27 +250,29 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     saveSeen(user.id, seenSetRef.current);
   }, [user.id]);
 
-  // ---- stream resolution (Piped, via backend) --------------------------------
+  // ---- stream resolution (on-device, via innertube) ---------------------------
+  //
+  // Resolved from the phone rather than from Render: YouTube bot-flags datacenter
+  // IPs, so asking from the device's own network is what makes streams playable.
+  // No third-party proxy, no video bytes through the backend.
 
-  const resolveFor = useCallback((item) => {
+  const resolveFor = useCallback((item, opts = {}) => {
     if (!item || !item.videoId || !validateVideoId(item.videoId)) return Promise.resolve(null);
     const id = item.videoId;
-    if (failedStreamsRef.current.has(id)) return Promise.resolve(null);
-    const cached = streamCacheRef.current.get(id);
+    // A caller retrying explicitly is saying "this one is worth another try".
+    if (failedStreamsRef.current.has(id) && !opts.retry) return Promise.resolve(null);
+    const cached = opts.retry ? null : streamCacheRef.current.get(id);
     if (cached) {
       setResolved((prev) => (prev.has(id) ? prev : new Map(prev).set(id, cached)));
       return Promise.resolve(cached);
     }
-    const inflight = inflightStreamRef.current.get(id);
+    const inflight = opts.retry ? null : inflightStreamRef.current.get(id);
     if (inflight) return inflight;
-    const p = fetch(`${SERVER_URL}/api/piped/streams/${encodeURIComponent(id)}`, { headers: authHeaders })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`http ${r.status}`))))
+    const p = getShortStream(id, { attempts: opts.retry ? 2 : 3 })
       .then((data) => {
-        const source = data && data.source;
-        if (!source || !source.url) throw new Error('no playable source');
+        if (!data || !data.url) throw new Error('no playable source');
         const entry = {
-          source: { url: source.url, kind: source.kind || 'progressive', height: source.height || 0 },
-          audioSource: data.audioSource || null,
+          source: { url: data.url, kind: data.kind || 'progressive', height: data.height || 0 },
         };
         const cache = streamCacheRef.current;
         cache.delete(id);
@@ -278,14 +288,17 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         });
         return entry;
       })
-      .catch(() => {
+      .catch((e) => {
+        console.log('[Reels] stream resolve failed', id, e && e.message ? e.message : '');
         failedStreamsRef.current.add(id);
         return null;
       });
-    inflightStreamRef.current.set(id, p);
-    p.finally(() => inflightStreamRef.current.delete(id)).catch(() => {});
+    if (!opts.retry) {
+      inflightStreamRef.current.set(id, p);
+      p.finally(() => inflightStreamRef.current.delete(id)).catch(() => {});
+    }
     return p;
-  }, [authHeaders]);
+  }, []);
 
   const primeWindow = useCallback((index) => {
     const list = videosRef.current;
@@ -302,9 +315,32 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   // ---- video error / skip ----------------------------------------------------
 
-  const handleVideoError = useCallback((item, index) => {
+  // Surfaces the real Media3 failure instead of a silent skip, so a clip that
+  // will not play can be traced back to a decoder/network error instead of just
+  // disappearing from the feed.
+  const handleVideoError = useCallback((item, index, payload) => {
     if (!item || !item.videoId) return;
-    console.log('[Reels] video error, excluding:', item.videoId);
+    const detail = payload && payload.error
+      ? `code=${payload.error.code}${payload.error.message ? ` msg=${payload.error.message}` : ''}`
+      : 'no error payload';
+
+    // A signed googlevideo URL 403s or drops on first use fairly often even for
+    // clips that play fine, so give it a freshly-signed URL before giving up.
+    // Only after the retried clip fails do we treat it as genuinely unplayable.
+    const tries = playErrorTriesRef.current;
+    if (tries < 2) {
+      playErrorTriesRef.current = tries + 1;
+      streamCacheRef.current.delete(item.videoId);
+      inflightStreamRef.current.delete(item.videoId);
+      console.log(`[Reels] video error, re-resolving (${tries + 1}/2):`, item.videoId, detail);
+      resolveFor(item, { retry: true }).then((entry) => {
+        if (entry) playErrorTriesRef.current = 0;
+      });
+      return;
+    }
+
+    console.log('[Reels] video error after retries, excluding:', item.videoId, detail);
+    playErrorTriesRef.current = 0;
     failedVideoIdsRef.current.add(item.videoId);
     failedStreamsRef.current.add(item.videoId);
     streamCacheRef.current.delete(item.videoId);
@@ -313,7 +349,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     if (index === activeIndexRef.current && skipToIndexRef.current) {
       skipToIndexRef.current(index);
     }
-  }, [markSeenIds]);
+  }, [markSeenIds, resolveFor]);
 
   const skipToIndex = useCallback((index) => {
     if (pendingSkipRef.current || !isMountedRef.current) return;
@@ -350,13 +386,13 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
   useEffect(() => { skipToIndexRef.current = skipToIndex; }, [skipToIndex]);
 
-  // ---- feed fetching (Piped, seed rotation on refresh) -----------------------
+  // ---- feed fetching (backend innertube feed, seed rotation on refresh) ------
 
   async function fetchFeedPage(cat, token, refresh) {
     const q = [`category=${encodeURIComponent(cat)}`];
-    if (token) q.push(`nextpage=${encodeURIComponent(token)}`);
+    if (token) q.push(`nextToken=${encodeURIComponent(token)}`);
     if (refresh) q.push('refresh=1');
-    const res = await fetch(`${SERVER_URL}/api/piped/feed?${q.join('&')}`, { headers: authHeaders });
+    const res = await fetch(`${SERVER_URL}/api/shorts/feed?${q.join('&')}`, { headers: authHeaders });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load feed');
     return data;
@@ -398,7 +434,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       if (!isMountedRef.current || reqId !== requestIdRef.current) return;
 
       let finalVideos = [];
-      let cursor = data.nextpage || pageToken || null;
+      let cursor = data.nextToken || pageToken || null;
       let hasMore = data.hasMore === true;
 
       const novel = (list) =>
@@ -411,29 +447,29 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
         if (!refresh) {
           const savedCursor = await loadCursor(user.id, cat);
-          if (savedCursor && savedCursor !== data.nextpage) {
+          if (savedCursor && savedCursor !== data.nextToken) {
             try {
               const deeper = await fetchFeedPage(cat, savedCursor, false);
               if (!isMountedRef.current || reqId !== requestIdRef.current) return;
               unseen = novel(deeper.videos);
               data = deeper;
-              cursor = deeper.nextpage || savedCursor;
+              cursor = deeper.nextToken || savedCursor;
               hasMore = deeper.hasMore === true;
             } catch (e) { /* keep page-1 data */ }
           }
         }
 
         finalVideos = unseen;
-        if (finalVideos.length < MIN_FRESH_BATCH && data.nextpage && hasMore) {
-          let token = data.nextpage;
+        if (finalVideos.length < MIN_FRESH_BATCH && data.nextToken && hasMore) {
+          let token = data.nextToken;
           for (let i = 0; i < AUTO_ADVANCE_MAX_PAGES; i++) {
             const p = await fetchFeedPage(cat, token, false);
             if (!isMountedRef.current || reqId !== requestIdRef.current) return;
             finalVideos = [...finalVideos, ...novel(p.videos)];
-            cursor = p.nextpage || token;
+            cursor = p.nextToken || token;
             hasMore = p.hasMore === true;
-            if (finalVideos.length >= MIN_FRESH_BATCH || !hasMore || !p.nextpage) break;
-            token = p.nextpage;
+            if (finalVideos.length >= MIN_FRESH_BATCH || !hasMore || !p.nextToken) break;
+            token = p.nextToken;
           }
         }
 
@@ -446,7 +482,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         }
       } else {
         finalVideos = (data.videos || []).filter((v) => v && v.videoId);
-        cursor = data.nextpage || pageToken || null;
+        cursor = data.nextToken || pageToken || null;
         hasMore = data.hasMore === true;
       }
 
@@ -522,7 +558,7 @@ const loadMore = useCallback(async () => {
         return merged;
       });
       if (valid.length) markSeen(valid);
-      const cursor = data.nextpage || token;
+      const cursor = data.nextToken || token;
       nextPageTokenRef.current = cursor;
       hasMoreRef.current = data.hasMore === true && !!cursor;
       if (cursor) await saveCursor(user.id, currentCategory, cursor);
@@ -541,7 +577,7 @@ const loadMore = useCallback(async () => {
   // ---- categories ------------------------------------------------------------
 
   useEffect(() => {
-    fetch(`${SERVER_URL}/api/piped/categories`, { headers: authHeaders })
+    fetch(`${SERVER_URL}/api/shorts/categories`, { headers: authHeaders })
       .then((r) => (r.ok ? r.json() : { categories: [] }))
       .then((d) => { if (Array.isArray(d.categories) && d.categories.length) setCategories(d.categories); })
       .catch(() => {});
@@ -797,8 +833,8 @@ const loadMore = useCallback(async () => {
             muted={muted || !isActive}
             repeat
             playInBackground={false}
-            onLoad={() => fadeOutThumb(item.videoId)}
-            onError={() => handleVideoError(item, index)}
+            onLoad={() => { playErrorTriesRef.current = 0; fadeOutThumb(item.videoId); }}
+            onError={(payload) => handleVideoError(item, index, payload)}
           />
         ) : null}
         <Animated.View style={[styles.thumbOverlay, { opacity: thumbAnim }]} pointerEvents="none">

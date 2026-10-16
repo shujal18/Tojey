@@ -21,6 +21,10 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   const [conversation, setConversation] = useState({ id: null, other: null, messages: [], typing: false });
   const [presence, setPresence] = useState({});
   const [conversations, setConversations] = useState([]);
+  // Unread message counts keyed by the other user's id, mirroring the mobile app's
+  // client-side badge. Incremented when a message arrives for a conversation that is
+  // not currently open, cleared as soon as that conversation is opened.
+  const [unread, setUnread] = useState({});
   const [wallpaper, setWallpaper] = useState(null);
   const [toast, setToast] = useState(null);
   // In-app heads-up banner (WhatsApp / Facebook Lite style) for chat messages landing
@@ -172,6 +176,10 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
         if (socket) socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
         return { ...prev, messages: [...prev.messages, { ...message, status: 'SENT' }] };
       });
+      // Bump the sidebar badge unless this exact conversation is the one on screen.
+      if (!isMine && message.sender_id != null && conversationRef.current.other?.id !== message.sender_id) {
+        setUnread(prev => ({ ...prev, [message.sender_id]: (prev[message.sender_id] || 0) + 1 }));
+      }
       // Heads-up banner for messages that arrived while a DIFFERENT screen/chat is open.
       if (!isMine && document.visibilityState === 'visible') {
         setBanner({
@@ -289,6 +297,12 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   function openConversation(otherUser) {
     setConversation({ id: null, other: otherUser, messages: [], typing: false });
     if (otherUser && otherUser.id != null) {
+      setUnread(prev => {
+        if (!prev[otherUser.id]) return prev;
+        const next = { ...prev };
+        delete next[otherUser.id];
+        return next;
+      });
       setPresence(prev => ({
         ...prev,
         [otherUser.id]: {
@@ -361,7 +375,7 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   }
 
   return (
-    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast, banner, dismissBanner: () => setBanner(null), openChatScreen: onOpenChat }}>
+    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast, banner, dismissBanner: () => setBanner(null), openChatScreen: onOpenChat, unread, markRead: (id) => setUnread(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; }), totalUnread: Object.values(unread).reduce((a, b) => a + b, 0) }}>
       {children}
       {toast && (
         <div style={{

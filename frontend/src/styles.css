@@ -81,6 +81,24 @@ input, textarea {
   to { transform: rotate(360deg); }
 }
 
+.spinner {
+  border-radius: 50%;
+  border: 3px solid rgba(108, 60, 233, 0.25);
+  border-top-color: #6C3CE9;
+  animation: spin 0.8s linear infinite;
+}
+
+.tf-row-hover:hover {
+  background: var(--tf-row-hover);
+}
+.tf-icon-btn:hover {
+  background: var(--tf-row-hover);
+  border-radius: 50%;
+}
+.tf-nav-hover:hover {
+  background: var(--tf-row-hover);
+}
+
 @keyframes nudgeShake {
   0%, 100% { transform: rotate(0); }
   20% { transform: rotate(-18deg); }

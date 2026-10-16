@@ -556,6 +556,36 @@ function parsePlayerMeta(j, videoId) {
 
 // --- public API -----------------------------------------------------------
 
+// Home grid categories (regular-length videos, not Shorts). Mirrors the app's
+// category list; feeds are built from innertube search so no Data API key is
+// needed. Shorts-style clips (<= 90s) are filtered out of the grid.
+const HOME_CATEGORIES = {
+  trending: { query: 'trending now', label: 'Trending' },
+  music: { query: 'popular music videos', label: 'Music' },
+  comedy: { query: 'funny comedy clips', label: 'Comedy' },
+  gaming: { query: 'gaming videos', label: 'Gaming' },
+  tech: { query: 'tech reviews', label: 'Tech' },
+  news: { query: 'tech news', label: 'News' },
+};
+
+function homeCategories() {
+  return Object.keys(HOME_CATEGORIES).map((id) => ({ id, label: HOME_CATEGORIES[id].label }));
+}
+
+function isRegularVideo(item) {
+  return !!item && item.type === 'video' && (item.durationSeconds || 0) >= 91;
+}
+
+async function home(category, token) {
+  const conf = HOME_CATEGORIES[category] || HOME_CATEGORIES.trending;
+  const res = await search(token ? null : conf.query, token || null, 'videos');
+  return {
+    videos: (res.items || []).filter(isRegularVideo),
+    nextToken: res.nextToken || '',
+    hasMore: !!res.hasMore,
+  };
+}
+
 async function search(query, token, filter) {
   const params = filter === 'videos'
     ? 'EgIQAQ%3D%3D'
@@ -723,6 +753,64 @@ async function videoInfo(videoId, token, skipCache = false) {
   return meta;
 }
 
+function normalizeFormat(f) {
+  if (!f || !f.url) return null;
+  const mime = String(f.mimeType || '');
+  const codecs = (mime.match(/codecs="([^"]*)"/) || [])[1] || '';
+  const hasVideo = /video\//.test(mime);
+  // Muxed progressive formats (e.g. itag 18) use a `video/mp4` MIME whose codecs
+  // string also lists an audio codec, so check the codecs too.
+  const hasAudio = /audio\//.test(mime) || /mp4a|opus|vorbis|ac-3|ec-3|flac/.test(codecs);
+  const approxDurationMs = parseInt(f.approxDurationMs, 10) || 0;
+  const contentLength = parseInt(f.contentLength, 10)
+    || (f.bitrate && approxDurationMs ? Math.round((f.bitrate * approxDurationMs) / 8000) : 0);
+  return {
+    itag: f.itag,
+    url: f.url,
+    mimeType: mime,
+    codecs,
+    quality: f.quality || '',
+    qualityLabel: f.qualityLabel || f.audioQuality || '',
+    width: f.width || 0,
+    height: f.height || 0,
+    fps: f.fps || 0,
+    bitrate: f.bitrate || 0,
+    averageBitrate: f.averageBitrate || 0,
+    contentLength,
+    audioQuality: f.audioQuality || '',
+    audioSampleRate: f.audioSampleRate || '',
+    audioChannels: f.audioChannels || 0,
+    approxDurationMs: parseInt(f.approxDurationMs, 10) || 0,
+    hasVideo,
+    hasAudio,
+  };
+}
+
+// Returns normalized stream metadata. `url` values are signed, IP-bound
+// googlevideo links and must stay server-side (the /api/yt/media proxy uses
+// them with the same egress IP that requested them).
+async function playerStreams(videoId, skipCache = false) {
+  const j = await call('player', {
+    videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+    playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
+  }, { skipCache, cacheKey: `playerStreams:${videoId}`, ttl: 30 * 60 * 1000 });
+  const sd = j.streamingData || {};
+  const progressive = (sd.formats || []).map(normalizeFormat).filter(Boolean);
+  const adaptive = (sd.adaptiveFormats || []).map(normalizeFormat).filter(Boolean);
+  return {
+    videoId,
+    status: navTo(j, ['playabilityStatus', 'status']) || '',
+    reason: textOf(navTo(j, ['playabilityStatus', 'reason'])) || '',
+    expiresInSeconds: parseInt(sd.expiresInSeconds, 10) || 0,
+    hlsManifestUrl: sd.hlsManifestUrl || '',
+    dashManifestUrl: sd.dashManifestUrl || '',
+    formats: progressive,
+    adaptiveFormats: adaptive,
+  };
+}
+
 async function playerInfo(videoId, skipCache = false) {
   const j = await call('player', {
     videoId,
@@ -796,11 +884,14 @@ async function dearrow(videoId) {
 
 module.exports = {
   search,
+  home,
+  homeCategories,
   suggestions,
   channel,
   playlist,
   videoInfo,
   playerInfo,
+  playerStreams,
   sponsorSegments,
   dislikes,
   dearrow,

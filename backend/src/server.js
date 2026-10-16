@@ -6,8 +6,9 @@ const { Server } = require('socket.io');
 const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
 const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
-const { getFeed } = require('./youtube');
+const shortsFeed = require('./shortsFeed');
 const path = require('path');
+const { Readable } = require('stream');
 const { upload } = require('./media');
 
 // Show only the start and end of a token so logs stay debuggable without leaking FCM tokens.
@@ -506,9 +507,7 @@ app.post('/api/reels/report', authMiddleware, (req, res) => {
     if (!Array.isArray(videoIds) || !videoIds.length) {
       return res.status(400).json({ error: 'videoIds required' });
     }
-    const { markVideoFailed } = require('./youtube');
-    const validCategories = ['trending', 'memes', 'hindi', 'hindi_songs', 'love'];
-    const c = typeof category === 'string' && validCategories.includes(category) ? category : 'trending';
+    const c = shortsFeed.isKnownCategory(category) ? category : 'trending';
     const valid = videoIds
       .filter((id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id))
       .slice(0, 20);
@@ -532,7 +531,7 @@ app.post('/api/reels/report', authMiddleware, (req, res) => {
       reelsReportRate.set(uid, { start: now, count: 1 });
     }
 
-    valid.forEach((id) => markVideoFailed(c, id, 'client_report'));
+    valid.forEach((id) => shortsFeed.markFailed(c, id, 'client_report'));
     res.json({ ok: true, marked: valid.length });
   } catch (e) {
     console.error('reels:report error', e.message);
@@ -540,160 +539,82 @@ app.post('/api/reels/report', authMiddleware, (req, res) => {
   }
 });
 
-// Reels feed endpoint - returns short video metadata from YouTube via backend proxy
-app.get('/api/reels/feed', authMiddleware, async (req, res) => {
-  try {
-    const { category = 'trending', refresh = 'false', pageToken } = req.query;
-    const validCategories = [
-      'trending', 'memes', 'hindi', 'hindi_songs', 'love'
-    ];
-    if (!validCategories.includes(category)) {
-      return res.status(400).json({ error: 'Invalid category' });
-    }
-
-    const forceRefresh = refresh === 'true';
-    const { getFeed, getQuotaStatus } = require('./youtube');
-    const result = await getFeed(category, forceRefresh, pageToken);
-    
-    const quotaStatus = getQuotaStatus();
-    
-    res.json({
-      videos: result.videos.map(v => ({
-        videoId: v.videoId,
-        title: v.title,
-        thumbnailUrl: v.thumbnailUrl,
-        durationSeconds: v.durationSeconds,
-        category: v.category,
-        channelTitle: v.channelTitle,
-        publishedAt: v.publishedAt,
-        source: v.source,
-        localUrl: v.localUrl,
-      })),
-      cached: result.cached,
-      category,
-      nextPageToken: result.nextPageToken,
-      hasMore: result.hasMore,
-      source: result.source,
-      cacheAge: result.cacheAge,
-      stale: result.stale,
-      warning: result.warning,
-      quota: quotaStatus,
-    });
-  } catch (e) {
-    console.error('reels:feed error', e.message);
-    if (e.message.includes('YOUTUBE_API_KEY')) {
-      return res.status(503).json({ error: 'Reels service unavailable - API key not configured' });
-    }
-    if (e.message.startsWith('QUOTA_')) {
-      const { getQuotaStatus } = require('./youtube');
-      return res.status(200).json({
-        videos: [],
-        cached: false,
-        category,
-        nextPageToken: null,
-        hasMore: false,
-        source: 'empty',
-        warning: 'YouTube quota exceeded - no cached content available',
-        quota: getQuotaStatus(),
-      });
-    }
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Reels categories list endpoint
-app.get('/api/reels/categories', authMiddleware, async (req, res) => {
-  try {
-    const categories = [
-      { id: 'trending', label: 'For You' },
-      { id: 'memes', label: 'Memes' },
-      { id: 'hindi', label: 'Hindi' },
-      { id: 'hindi_songs', label: 'Hindi Songs' },
-      { id: 'love', label: 'Love & Romantic' },
-    ];
-    res.json({ categories });
-  } catch (e) {
-    console.error('reels:categories error', e.message);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Reels direct-stream endpoint: resolves signed video+audio URLs via yt-dlp so
-// the client plays the reel directly instead of a YouTube embed. Embeds get gated
-// when several devices share one IP ("second device just loads"); direct streams
-// let every device play at once. Cached + single-flight in ytFormat.
-app.get('/api/reels/format/:videoId', authMiddleware, async (req, res) => {
-  const videoId = String(req.params.videoId || '').trim();
-  if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-    return res.status(400).json({ error: 'Invalid video id' });
-  }
-  try {
-    const { getFormat } = require('./ytFormat');
-    const f = await getFormat(videoId);
-    res.json(f);
-  } catch (e) {
-    console.error('reels:format error', videoId, e.code, e.message);
-    res.status(502).json({ error: 'format unavailable', code: e.code, detail: String(e.message).slice(0, 300) });
-  }
-});
+// The legacy Shorts endpoints that lived here - /api/reels/feed,
+// /api/reels/categories and /api/reels/format/:videoId - were the YouTube Data
+// API path plus a yt-dlp server-side stream resolver. Both are gone:
+//   - metadata now comes from the app's own innertube layer (see shortsFeed.js)
+//   - streams are resolved on-device by mobile/src/services/innertube.js
+// Shorts clients call /api/shorts/* instead. /api/reels/report is kept because
+// it is the shared "this clip will not play" signal, and is now backed by
+// shortsFeed's failure memory.
 
 // YouTube (Home video grid) feed — regular-length videos, not Shorts.
+// Served from the innertube scraper (ytInner.home) so no Data API key/quota is
+// needed. Falls back to the Data API implementation only if it is configured and
+// innertube fails.
 app.get('/api/youtube/feed', authMiddleware, async (req, res) => {
+  const { category = 'trending', pageToken } = req.query;
+  const valid = yt.homeCategories().map((c) => c.id);
+  if (!valid.includes(category)) {
+    return res.status(400).json({ error: 'Invalid category' });
+  }
   try {
-    const { category = 'trending', refresh = 'false', pageToken } = req.query;
-    const forceRefresh = refresh === 'true';
-    const { getVideosFeed, getVideoCategories, getQuotaStatus } = require('./youtube');
-    const valid = getVideoCategories().map((c) => c.id);
-    if (!valid.includes(category)) {
-      return res.status(400).json({ error: 'Invalid category' });
-    }
-    const result = await getVideosFeed(category, forceRefresh, pageToken);
-    res.json({
+    const result = await yt.home(category, pageToken || null);
+    return res.json({
       videos: result.videos.map((v) => ({
         videoId: v.videoId,
         title: v.title,
         thumbnailUrl: v.thumbnailUrl,
         durationSeconds: v.durationSeconds,
-        category: v.category,
+        category,
         channelTitle: v.channelTitle,
         publishedAt: v.publishedAt,
-        source: v.source,
+        source: 'innertube',
       })),
-      cached: result.cached,
+      cached: false,
       category,
-      nextPageToken: result.nextPageToken || null,
+      nextPageToken: result.nextToken || null,
       hasMore: !!result.hasMore,
-      source: result.source,
-      warning: result.warning,
-      quota: getQuotaStatus(),
+      source: 'innertube',
     });
   } catch (e) {
-    console.error('youtube:feed error', e.message);
-    if (e.message.includes('YOUTUBE_API_KEY')) {
-      return res.status(503).json({ error: 'YouTube service unavailable - API key not configured' });
+    console.error('youtube:feed innertube error', e.message);
+    if (!process.env.YOUTUBE_API_KEY) {
+      return res.status(502).json({ error: 'feed unavailable', detail: e.message.slice(0, 160) });
     }
-    if (e.message.startsWith('QUOTA_')) {
-      return res.status(200).json({
-        videos: [],
-        cached: false,
+    try {
+      const { getVideosFeed, getQuotaStatus } = require('./youtube');
+      const result = await getVideosFeed(category, req.query.refresh === 'true', pageToken);
+      return res.json({
+        videos: result.videos.map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          thumbnailUrl: v.thumbnailUrl,
+          durationSeconds: v.durationSeconds,
+          category: v.category,
+          channelTitle: v.channelTitle,
+          publishedAt: v.publishedAt,
+          source: v.source,
+        })),
+        cached: result.cached,
         category,
-        nextPageToken: null,
-        hasMore: false,
-        source: 'empty',
-        warning: 'YouTube quota exceeded - no cached content available',
-        quota: require('./youtube').getQuotaStatus(),
+        nextPageToken: result.nextPageToken || null,
+        hasMore: !!result.hasMore,
+        source: result.source,
+        warning: result.warning,
+        quota: getQuotaStatus(),
       });
+    } catch (e2) {
+      console.error('youtube:feed error', e2.message);
+      return res.status(500).json({ error: 'Server error' });
     }
-    res.status(500).json({ error: 'Server error' });
   }
 });
 
 // YouTube (Home video grid) categories list.
 app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
   try {
-    const { getVideoCategories } = require('./youtube');
-    const categories = getVideoCategories().map((c) => ({ id: c.id, label: c.label }));
-    res.json({ categories });
+    res.json({ categories: yt.homeCategories() });
   } catch (e) {
     console.error('youtube:categories error', e.message);
     res.status(500).json({ error: 'Server error' });
@@ -702,9 +623,10 @@ app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
 
 // --- LibreTube-style innertube API (no Data API quota) ----------------------
 // Search, channels, playlists, watch pages and related videos run through the
-// direct innertube scraper in ytInner.js. Stream URLs stay client-side (signed
-// googlevideo URLs are IP-bound, so the backend cannot resolve playable links
-// for the device - the mobile client resolves its own streams via getStreams).
+// direct innertube scraper in ytInner.js. Mobile resolves its own signed
+// streams via getStreams (same device IP as the innertube call). Signed
+// googlevideo URLs are IP-bound, so for the web the bytes are proxied through
+// /api/yt/media (see below) rather than handed to the browser directly.
 const yt = require('./ytInner');
 const YTID = /^[a-zA-Z0-9_-]{11}$/;
 const ID = /^[a-zA-Z0-9_-]+$/;
@@ -874,37 +796,142 @@ app.get('/api/yt/dislikes/:videoId', authMiddleware, async (req, res) => {
   }
 });
 
-// ---- Piped-backed Reels (Shorts) feed ---------------------------------------
-// The Android Reels screen talks only to this backend; this service resolves
-// metadata + stream URLs from a configurable Piped instance (see piped.js).
-// No video bytes and no thumbnails are stored in Neon - streams are played
-// directly from Piped/CDN via Media3/ExoPlayer on the device.
+// ---- YouTube stream resolution + media proxy --------------------------------
+// Signed googlevideo URLs embed the requester's egress IP (the `ip=` query
+// param), so a browser on a different network cannot fetch them directly (403).
+// The web client therefore streams bytes through this proxy: the URL is
+// re-resolved server-side (same egress IP) and the client's Range requests are
+// forwarded. Mobile keeps resolving streams on-device and does not use these.
 
-const piped = require('./piped');
+function mediaAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const headerToken = header.startsWith('Bearer ') ? header.slice(7) : header;
+  const token = headerToken || String(req.query.token || '');
+  const user = token ? verifyToken(token) : null;
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  req.user = user;
+  next();
+}
 
-app.get('/api/piped/categories', authMiddleware, (req, res) => {
+function pickFormat(streams, itag) {
+  const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
+  if (itag) {
+    const f = all.find((x) => String(x.itag) === String(itag));
+    if (f) return f;
+  }
+  const muxed = (streams.formats || []).filter((f) => f.hasVideo && f.hasAudio);
+  if (muxed.length) return muxed.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  return (streams.formats || [])[0] || all[0] || null;
+}
+
+app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
   try {
-    res.json({ categories: piped.categories() });
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    const streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
+    const strip = (f) => { const { url, ...rest } = f; return rest; };
+    res.json({
+      videoId,
+      status: streams.status,
+      reason: streams.reason,
+      formats: streams.formats.map(strip),
+      adaptiveFormats: streams.adaptiveFormats.map(strip),
+    });
   } catch (e) {
-    console.error('piped:categories error', e.message);
+    console.error('yt:streams error', e.message);
+    res.status(502).json({ error: 'streams unavailable', detail: e.message.slice(0, 200) });
+  }
+});
+
+app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
+  const videoId = String(req.params.videoId || '');
+  if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+  const itag = req.query.itag ? String(req.query.itag).slice(0, 10) : '18';
+  const download = req.query.download === '1';
+
+  const attempt = async (skipCache) => {
+    const streams = await yt.playerStreams(videoId, skipCache);
+    const fmt = pickFormat(streams, itag);
+    if (!fmt || !fmt.url) return { upstream: null, fmt: null };
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      Accept: '*/*',
+    };
+    if (req.headers.range) headers.Range = req.headers.range;
+    const upstream = await fetch(fmt.url, { headers });
+    return { upstream, fmt };
+  };
+
+  try {
+    let { upstream, fmt } = await attempt(false);
+    if (upstream && (upstream.status === 403 || upstream.status === 410)) {
+      try { await upstream.body?.cancel?.(); } catch (e) {}
+      ({ upstream, fmt } = await attempt(true));
+    }
+    if (!upstream) return res.status(502).json({ error: 'no playable stream' });
+    if (!upstream.ok && upstream.status !== 206) {
+      return res.status(upstream.status === 403 ? 502 : upstream.status).json({ error: 'upstream error', status: upstream.status });
+    }
+    res.status(upstream.status);
+    res.set('Accept-Ranges', 'bytes');
+    res.set('Content-Type', fmt.mimeType || 'video/mp4');
+    const cl = upstream.headers.get('content-length');
+    const cr = upstream.headers.get('content-range');
+    if (cl) res.set('Content-Length', cl);
+    if (cr) res.set('Content-Range', cr);
+    res.set('Cache-Control', 'private, no-store');
+    if (download) {
+      const ext = /audio\//.test(fmt.mimeType || '') ? 'm4a' : 'mp4';
+      res.set('Content-Disposition', `attachment; filename="tojey-${videoId}-${fmt.itag}.${ext}"`);
+    }
+    if (req.method === 'HEAD') return res.end();
+    const nodeStream = Readable.fromWeb(upstream.body);
+    nodeStream.on('error', () => { try { res.destroy(); } catch (e) {} });
+    nodeStream.pipe(res);
+  } catch (e) {
+    console.error('yt:media error', e.message);
+    if (!res.headersSent) res.status(502).json({ error: 'media unavailable', detail: e.message.slice(0, 200) });
+    else res.end();
+  }
+});
+
+// ---- Reels (Shorts) feed -----------------------------------------------------
+// The Android Reels screen talks only to this backend, which serves metadata
+// from the app's own innertube layer (see shortsFeed.js). Streams are resolved
+// on the device through mobile/src/services/innertube.js over the phone's own
+// network - the LibreTube/NewPipe pattern - so there is no third-party proxy and
+// no datacenter bot-check involved.
+//
+// No video bytes and no thumbnails are stored in Neon.
+
+app.get('/api/shorts/categories', authMiddleware, (req, res) => {
+  try {
+    res.json({ categories: shortsFeed.categories() });
+  } catch (e) {
+    console.error('shorts:categories error', e.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.get('/api/piped/feed', authMiddleware, async (req, res) => {
+app.get('/api/shorts/feed', authMiddleware, async (req, res) => {
   try {
     const category = String(req.query.category || 'trending').slice(0, 30);
-    const nextpage = String(req.query.nextpage || '').slice(0, 4000) || null;
+    const nextToken = String(req.query.nextToken || '').slice(0, 4000) || null;
     const refresh = String(req.query.refresh || '');
-    const result = await piped.feed(category, nextpage, refresh);
+    const result = await shortsFeed.feed(category, nextToken, refresh);
     res.json({
-      videos: result.items,
+      // `items` is the field name: the app's own Shorts service returns `items`,
+      // and both the Android and web clients read `items`. This response was
+      // still emitting the retired Piped/YouTube-Data-API field name `videos`,
+      // so every client parsed an empty feed while the backend looked healthy.
+      items: result.items,
       category: result.category,
-      nextpage: result.nextpage,
+      nextToken: result.nextToken,
       hasMore: result.hasMore,
+      cached: result.cached === true,
     });
   } catch (e) {
-    console.error('piped:feed error', e.code || '', e.message);
+    console.error('shorts:feed error', e.code || '', e.message);
     res.status(502).json({
       error: 'feed unavailable',
       code: e.code || null,
@@ -913,25 +940,8 @@ app.get('/api/piped/feed', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/piped/streams/:videoId', authMiddleware, async (req, res) => {
-  const videoId = String(req.params.videoId || '');
-  try {
-    if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-      return res.status(400).json({ error: 'Invalid video id' });
-    }
-    const result = await piped.streams(videoId);
-    res.json(result);
-  } catch (e) {
-    console.error('piped:streams error', videoId, e.code || '', e.message);
-    res.status(502).json({
-      error: 'streams unavailable',
-      code: e.code || null,
-      detail: String(e.message || '').slice(0, 200),
-    });
-  }
-});
-
-// Reels YouTube quota status endpoint
+// YouTube Data API quota status (long-form Home grid only; Shorts no longer
+// use the Data API at all).
 app.get('/api/reels/quota-status', authMiddleware, async (req, res) => {
   try {
     const { getQuotaStatus } = require('./youtube');

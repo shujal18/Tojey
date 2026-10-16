@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { ArrowLeft, Trash2, Download, Check, X } from 'lucide-react';
+import { ArrowLeft, Trash2, Download, Check, X, Loader2 } from 'lucide-react';
+import YoutubePlayer, { triggerDownload } from '../components/YoutubePlayer';
 
 const SAVED_KEY = 'tojey_saved_v2';
 
@@ -28,6 +29,7 @@ export default function DownloadsScreen({ token, onBack, onOpenChats }) {
   const { theme } = useTheme();
   const [items, setItems] = useState([]);
   const [watch, setWatch] = useState(null);
+  const [downloading, setDownloading] = useState(null);
 
   useEffect(() => { setItems(readSaved()); }, []);
 
@@ -35,6 +37,14 @@ export default function DownloadsScreen({ token, onBack, onOpenChats }) {
     const next = items.filter((x) => x.videoId !== id);
     saveList(next);
     setItems(next);
+  };
+
+  const startDownload = (v) => {
+    // The proxy streams with Content-Disposition: attachment, so the browser
+    // saves the file directly - no in-page buffering needed.
+    triggerDownload(v.videoId, token);
+    setDownloading(v.videoId);
+    setTimeout(() => setDownloading((cur) => (cur === v.videoId ? null : cur)), 3000);
   };
 
   return (
@@ -54,7 +64,7 @@ export default function DownloadsScreen({ token, onBack, onOpenChats }) {
           </div>
           <div style={{ fontSize: 17, fontWeight: 800, color: theme.text, marginTop: 16 }}>No saved videos yet</div>
           <div style={{ fontSize: 13, marginTop: 8, lineHeight: 1.45 }}>
-            Open a video in Home and tap the download button to save it here for quick access.
+            Tap the download button on any video in YouTube to save it here.
           </div>
         </div>
       ) : (
@@ -76,6 +86,19 @@ export default function DownloadsScreen({ token, onBack, onOpenChats }) {
                     </div>
                   </div>
                 </button>
+                <button
+                  onClick={() => startDownload(v)}
+                  title={downloading === v.videoId ? 'Download started' : 'Download file'}
+                  style={{
+                    background: downloading === v.videoId ? theme.primaryLight : 'none',
+                    border: 'none', cursor: 'pointer', padding: 8, marginLeft: 2, borderRadius: 8,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  {downloading === v.videoId
+                    ? <Loader2 size={17} color={theme.primary} className="spin" style={{ animation: 'spin 1s linear infinite' }} />
+                    : <Download size={17} color={theme.primary} />}
+                </button>
                 <button onClick={() => remove(v.videoId)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 8, marginLeft: 6 }}>
                   <Trash2 size={17} color={theme.textSecondary} />
                 </button>
@@ -92,13 +115,11 @@ export default function DownloadsScreen({ token, onBack, onOpenChats }) {
             <div style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{watch.title}</div>
           </div>
           <div style={{ flex: 1, background: '#000' }}>
-            <iframe
-              title={watch.title}
-              src={`https://www.youtube-nocookie.com/embed/${watch.videoId}?autoplay=1&playsinline=1&rel=0&modestbranding=1`}
-              allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-              allowFullScreen
-              style={{ width: '100%', height: '100%', border: 0 }}
-            />
+            {sanitizeVideoId(watch.videoId) ? (
+              <YoutubePlayer videoId={watch.videoId} token={token} poster={thumbnailUrlFor(watch)} fill />
+            ) : (
+              <div style={{ color: '#999', textAlign: 'center', padding: 30 }}>Video unavailable</div>
+            )}
           </div>
         </div>
       )}

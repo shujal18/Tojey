@@ -25,7 +25,7 @@ export default function BottomTabBar({ active, onChange, theme }) {
               accessibilityState={{ selected: isActive }}
             >
               <View style={[styles.iconWrap, isActive && { backgroundColor: theme.primaryLight }]}>
-                <Icon name={isActive ? it.activeIcon : it.icon} size={22} color={isActive ? theme.primary : theme.textSecondary} />
+                <Icon name={isActive ? it.activeIcon : it.icon} size={20} color={isActive ? theme.primary : theme.textSecondary} />
               </View>
               <Text
                 style={[
@@ -44,17 +44,20 @@ export default function BottomTabBar({ active, onChange, theme }) {
   );
 }
 
+// Compact sizing: the bar sits above the system navigation area and previously
+// ate ~82px of vertical space, which pushed the last grid row out of view on
+// short screens. Roughly 30% shorter while keeping the tap targets usable.
 const styles = StyleSheet.create({
   shell: {
     paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 10,
+    paddingTop: 4,
+    paddingBottom: 6,
   },
   bar: {
     flexDirection: 'row',
-    borderRadius: 26,
+    borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingVertical: 8,
+    paddingVertical: 4,
     paddingHorizontal: 6,
     shadowColor: '#000',
     shadowOpacity: 0.35,
@@ -65,18 +68,18 @@ const styles = StyleSheet.create({
   btn: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 4,
+    paddingVertical: 2,
   },
   iconWrap: {
-    width: 46,
-    height: 30,
-    borderRadius: 15,
+    width: 40,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   label: {
-    fontSize: fs(11),
-    marginTop: 2,
+    fontSize: fs(10),
+    marginTop: 1,
     fontWeight: '500',
   },
   labelActive: {

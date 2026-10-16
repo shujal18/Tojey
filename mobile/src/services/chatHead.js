@@ -67,3 +67,23 @@ export async function setNudgeVibrationEnabled(enabled) {
 }
 
 export const NUDGE_PATTERN = [0, 450, 150, 450, 150, 450, 150, 450, 150, 450];
+
+// Enter-to-send. Stored here alongside the other chat preferences, but note the
+// default is OFF: reading as the default behaviour is what most people expect
+// from a messaging app, and turning it on is an explicit choice. A missing key
+// means off, not on, so a fresh install starts disabled.
+const ENTER_SEND_KEY = '@tojey_enter_to_send';
+
+export async function getEnterToSend() {
+  try {
+    return (await AsyncStorage.getItem(ENTER_SEND_KEY)) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+export async function setEnterToSend(enabled) {
+  try {
+    await AsyncStorage.setItem(ENTER_SEND_KEY, enabled ? '1' : '0');
+  } catch (e) {}
+}

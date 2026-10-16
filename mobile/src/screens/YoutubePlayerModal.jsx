@@ -1,14 +1,17 @@
 // LibreTube-style player modal: device-resolved streams (react-native-video)
 // with quality/speed/audio-only, backend metadata (RYD + SponsorBlock), chapters,
-// related videos, watch history and save/playlist/subscribe actions. Falls back
-// to the YouTube embed if direct streaming fails.
+// related videos, watch history and save/playlist/subscribe actions.
+//
+// Playback is native only. This modal previously fell back to a YouTube embed
+// WebView when a stream failed, which surfaced the iframe player's error 153
+// ("player configuration error") and hid the real Media3 failure. It now reports
+// the actual error and offers a retry.
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, Modal, Image, ScrollView, FlatList,
   StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native';
 import Video from 'react-native-video';
-import { WebView } from 'react-native-webview';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
@@ -43,7 +46,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [playing, setPlaying] = useState(true);
   const [pos, setPos] = useState(0);
   const [dur, setDur] = useState(0);
-  const [useNative, setUseNative] = useState(true);
+  const [playError, setPlayError] = useState(null);
   const [speed, setSpeed] = useState(1);
   const [maxHeight, setMaxHeight] = useState(720);
   const [streaming, setStreaming] = useState(false);
@@ -84,7 +87,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setDur(0);
     setMaxHeight(720);
     setSpeed(1);
-    setUseNative(true);
+    setPlayError(null);
     setAudioOnly(false);
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
@@ -139,7 +142,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const handleEnd = () => {
     setPlaying(false);
     const rel = (info?.related || []).find((r) => r && r.videoId && r.type !== 'channel' && r.type !== 'playlist');
-    if (!useNative || !rel || !cur.videoId) return;
+    if (!rel || !cur.videoId) return;
     setNextVideo(rel);
     if (nextTimerRef.current) clearTimeout(nextTimerRef.current);
     nextTimerRef.current = setTimeout(() => {
@@ -217,7 +220,22 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             <View style={styles.videoLoading}>
               <ActivityIndicator color={theme.primary} />
             </View>
-          ) : useNative && stream && streamSrc ? (
+          ) : playError ? (
+            <View style={styles.videoLoading}>
+              <Text style={{ color: theme.text, fontSize: fs(15), fontWeight: '700', textAlign: 'center' }}>
+                Cannot play this video
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: fs(12), textAlign: 'center', marginTop: 6, paddingHorizontal: 24 }}>
+                {playError}
+              </Text>
+              <TouchableOpacity
+                onPress={() => { setPlayError(null); loadVideo(cur); }}
+                style={{ marginTop: 14, paddingHorizontal: 20, paddingVertical: 9, borderRadius: 18, backgroundColor: theme.primary }}
+              >
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: fs(14) }}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : stream && streamSrc ? (
             <Video
               ref={videoRef}
               source={{ uri: streamSrc }}
@@ -228,22 +246,22 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               onLoad={(m) => { if (m.duration) setDur(m.duration); }}
               onProgress={onProgress}
               onEnd={handleEnd}
-              onError={() => setUseNative(false)}
+              onError={(p) => setPlayError(
+                p && p.error
+                  ? `Playback error ${p.error.code}${p.error.message ? `: ${p.error.message}` : ''}`
+                  : 'Playback failed'
+              )}
               rate={speed}
               playInBackground={audioOnly || pip}
               ignoreSilentSwitch="ignore"
               mixWithOthers="inherit"
             />
           ) : (
-            <WebView
-              source={{ uri: `https://www.youtube-nocookie.com/embed/${cur.videoId}?autoplay=1&playsinline=1&rel=0&modestbranding=1${Math.round(pos) ? `&start=${Math.round(pos)}` : ''}` }}
-              style={{ flex: 1 }}
-              javaScriptEnabled
-              domStorageEnabled
-              allowsInlineMediaPlayback
-              mediaPlaybackRequiresUserAction={false}
-              androidLayerType="hardware"
-            />
+            <View style={styles.videoLoading}>
+              <Text style={{ color: theme.textSecondary, fontSize: fs(13), textAlign: 'center', paddingHorizontal: 24 }}>
+                No playable stream for this video.
+              </Text>
+            </View>
           )}
           {streaming && (
             <View style={styles.streamingBadge}>
@@ -399,7 +417,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             <View style={styles.section}>
               <Text style={[styles.sectionTitle, { color: theme.text }]}>Chapters</Text>
               {info.chapters.map((ch, i) => (
-                <TouchableOpacity key={i} style={styles.chapterRow} onPress={() => { if (videoRef.current && useNative) videoRef.current.seek(ch.start); }}>
+                <TouchableOpacity key={i} style={styles.chapterRow} onPress={() => { if (videoRef.current && !playError) videoRef.current.seek(ch.start); }}>
                   <Text style={[styles.chapterTime, { color: theme.primary }]}>{fmt(ch.start)}</Text>
                   <Text style={[styles.chapterTitle, { color: theme.text }]} numberOfLines={2}>{ch.title}</Text>
                 </TouchableOpacity>

@@ -13,10 +13,13 @@ import { VoiceBubble } from '../components/MessageBubble';
 import MediaViewer from '../components/MediaViewer';
 import DrawingCanvas from '../components/DrawingCanvas';
 import MediaPreview from '../components/MediaPreview';
-import { quickReactions, getChatColor } from '../theme';
+import { getChatColor } from '../theme';
 import { uploadFile, makeThumbnail, resolveUrl, formatBytes, isVideoMime, isImageMime } from '../services/upload';
 
 const API = import.meta.env.VITE_API_URL || '';
+
+// Fuller reaction palette for the message action sheet (matches the app's 12-emoji sheet).
+const FULL_REACTIONS = ['❤️', '😂', '😮', '😢', '🙏', '👍', '👎', '🔥', '🎉', '😍', '😡', '🤔'];
 
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
@@ -450,13 +453,14 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   return (
     <div style={{
-      height: '100vh',
-      maxWidth: 480,
-      margin: '0 auto',
+      height: '100%',
+      width: '100%',
+      flex: 1,
       display: 'flex',
       flexDirection: 'column',
-      background: wallpaper ? parseWallpaper(wallpaper, theme) : theme.background,
+      background: wallpaper ? parseWallpaper(wallpaper, theme) : theme.panelBg,
       position: 'relative',
+      overflow: 'hidden',
     }}>
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5, pointerEvents: 'none' }}>
         <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />
@@ -1117,14 +1121,13 @@ function ReactionMenu({ message, theme, onReact, onReply, onCopy, onEdit, onDele
         pointerEvents: 'auto',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <span style={{ color: theme.textSecondary, fontSize: 12 }}>Message actions</span>
-          <button onClick={onReact} style={{ color: theme.primary, fontSize: 13, fontWeight: 600 }}>React +</button>
+          <span style={{ color: theme.textSecondary, fontSize: 12 }}>React</span>
         </div>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 10 }}>
-          {quickReactions.map(r => (
+        <div style={{ display: 'flex', gap: 6, justifyContent: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+          {FULL_REACTIONS.map(r => (
             <button key={r} onClick={() => onReact(r)} style={{
               fontSize: 22, background: theme.primaryLight, borderRadius: 12,
-              width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'transform 0.1s',
             }}>
               {r}

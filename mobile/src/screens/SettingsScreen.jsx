@@ -15,6 +15,7 @@ import {
   supportsChatHead, getChatHeadEnabled, setChatHeadEnabled,
   canDrawOverlay, openOverlaySettings,
   getNudgeVibrationEnabled, setNudgeVibrationEnabled,
+  getEnterToSend, setEnterToSend,
 } from '../services/chatHead';
 import {
   supportsKeepAlive, getKeepAliveEnabled, setKeepAliveEnabled,
@@ -30,20 +31,23 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
   const [chatHead, setChatHead] = useState(false);
   const [chatHeadPending, setChatHeadPending] = useState(false);
   const [nudgeVib, setNudgeVib] = useState(true);
+  const [enterSend, setEnterSend] = useState(false);
   const [keepAlive, setKeepAlive] = useState(true);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [ch, nv, ka] = await Promise.all([
+      const [ch, nv, ka, es] = await Promise.all([
         getChatHeadEnabled(),
         getNudgeVibrationEnabled(),
         supportsKeepAlive() ? getKeepAliveEnabled() : Promise.resolve(false),
+        getEnterToSend(),
       ]);
       if (mounted) {
         setChatHead(ch);
         setNudgeVib(nv);
         setKeepAlive(ka);
+        setEnterSend(es);
       }
     })();
     return () => { mounted = false; };
@@ -363,6 +367,12 @@ export default function SettingsScreen({ user, token, onBack, onLogout, setUser,
         </SettingRow>
         <Text style={[styles.helperText, { color: theme.textSecondary }]}>
           Vibrates when someone nudges you (from the chat menu or long-press in chats).
+        </Text>
+        <SettingRow label="Enter to Send" icon="return-down-forward-outline" theme={theme}>
+          <Switch value={enterSend} onValueChange={async (v) => { setEnterSend(v); await setEnterToSend(v); }} trackColor={{ true: theme.primary }} />
+        </SettingRow>
+        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+          When off, Enter adds a new line. When on, Enter sends the message and Shift+Enter adds a new line.
         </Text>
       </Section>
 

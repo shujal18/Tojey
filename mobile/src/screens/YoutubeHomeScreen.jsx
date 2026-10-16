@@ -3,7 +3,8 @@
 // sub-screens and the full player modal.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, Image, StyleSheet, ActivityIndicator, Dimensions,
+  View, Text, TouchableOpacity, FlatList, Image, StyleSheet, ActivityIndicator,
+  useWindowDimensions,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -105,10 +106,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   useEffect(() => {
     let mounted = true;
-    fetch(`${SERVER_URL}/api/reels/feed?category=trending`, { headers: authHeaders })
+    fetch(`${SERVER_URL}/api/shorts/feed?category=trending`, { headers: authHeaders })
       .then((r) => r.json())
       .then((d) => {
-        if (mounted && Array.isArray(d.videos)) setShortsStrip(d.videos.slice(0, 8));
+        if (mounted && Array.isArray(d.items)) setShortsStrip(d.items.slice(0, 8));
       })
       .catch(() => {});
     return () => {
@@ -208,8 +209,14 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       />
     ) : null;
 
-  const width = Dimensions.get('window').width;
-  const cardW = (width - 20 - 16 * 2) / 2;
+  // Grid card width must match the list's own chrome exactly: 16px padding on
+  // each side plus a 14px gutter between the two columns. The old constant left
+  // each card ~3px short, so the right-hand column never reached the right
+  // margin and the row looked off-centre. useWindowDimensions also makes this
+  // correct on rotation and split-screen, where the old module-level
+  // Dimensions.get() snapshot stayed at the launch size.
+  const { width } = useWindowDimensions();
+  const cardW = (width - 16 * 2 - 14) / 2;
   const historyArr = snap?.history || [];
   const subsArr = snap?.subs || [];
 

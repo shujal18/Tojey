@@ -7,7 +7,7 @@ import { wallpapers, chatColors, getChatColor, setChatColor, shadeColor, quickRe
 
 const API = import.meta.env.VITE_API_URL || '';
 
-export default function SettingsScreen({ onLogout }) {
+export default function SettingsScreen({ onLogout, onBack }) {
   const { theme, mode, setMode } = useTheme();
   const { user, token, setUser } = useAuth();
   const { wallpaper, setWallpaper } = useChat();
@@ -55,10 +55,21 @@ export default function SettingsScreen({ onLogout }) {
   const profilePic = user.profilePic || '';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto' }}>
-      <div style={{ padding: '16px 16px 12px' }}>
-        <h1 style={{ color: theme.text, fontSize: 24, fontWeight: 700 }}>Settings</h1>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto', background: theme.panelBg }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '12px 16px', background: theme.panelHeader,
+        borderBottom: `1px solid ${theme.border}`, position: 'sticky', top: 0, zIndex: 2,
+      }}>
+        {onBack && (
+          <button onClick={onBack} title="Back" className="tf-icon-btn" style={{ color: theme.text, padding: 6, display: 'flex', borderRadius: '50%' }}>
+            <ChevronRight size={22} style={{ transform: 'rotate(180deg)' }} />
+          </button>
+        )}
+        <h1 style={{ color: theme.text, fontSize: 20, fontWeight: 700 }}>Settings</h1>
       </div>
+
+      <div style={{ width: '100%', maxWidth: 760, margin: '0 auto', paddingBottom: 8 }}>
 
       {/* Profile */}
       <div style={{
@@ -193,8 +204,9 @@ export default function SettingsScreen({ onLogout }) {
           <LogOut size={18} /> Log Out
         </button>
         <div style={{ color: theme.textSecondary, fontSize: 13, marginTop: 20 }}>
-          Tojey · Private Chat · v1.1.0
+          Tojey · Private Chat · v1.19.2
         </div>
+      </div>
       </div>
     </div>
   );
