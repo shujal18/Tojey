@@ -84,6 +84,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const streamRef = useRef(null);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
+  const messageInputRef = useRef(null);
   const typingStopTimerRef = useRef(null);
   const typingActiveRef = useRef(false);
   const recordGenRef = useRef(0);
@@ -94,6 +95,15 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [messages.length, viewing]);
+
+  // Auto-grow the message box up to ~5 lines, then scroll internally. Keeps the
+  // composer a comfortable fixed bar at the bottom without clipping long text.
+  useEffect(() => {
+    const el = messageInputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [text, editing]);
 
   useEffect(() => {
     if (recording) {
@@ -713,7 +723,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       <div style={{
         background: theme.composerBg,
         borderTop: `1px solid ${theme.border}`,
-        padding: '8px 10px',
+        padding: '10px 12px',
         paddingBottom: 14,
       }}>
         {showEmoji && (
@@ -722,22 +732,31 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
           </div>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
           <IconBtn onClick={() => setShowEmoji(!showEmoji)} icon={<Smile size={22} />} theme={theme} active={showEmoji} />
           <IconBtn onClick={() => { setShowAttach(!showAttach); setShowEmoji(false); }} icon={<Paperclip size={20} />} theme={theme} active={showAttach} />
 
           <div style={{
-            flex: 1, display: 'flex', alignItems: 'center',
-            background: theme.inputBg, borderRadius: 22, padding: '8px 14px',
+            flex: 1, minWidth: 0, display: 'flex', alignItems: 'flex-end',
+            background: theme.inputBg, borderRadius: 22, padding: '10px 16px', minHeight: 44,
           }}>
-            <input
+            <textarea
+              ref={messageInputRef}
+              rows={1}
               value={text}
               onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendText()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+              }}
               onInput={() => emitTyping()}
               onBlur={() => stopTypingNow()}
               placeholder="Message"
-              style={{ flex: 1, background: 'transparent', color: theme.text, fontSize: 14 }}
+              style={{
+                flex: 1, minWidth: 0, display: 'block', background: 'transparent',
+                color: theme.text, fontSize: 14, lineHeight: '20px',
+                maxHeight: 120, resize: 'none', overflowY: 'auto',
+                padding: 0, margin: 0, border: 'none',
+              }}
             />
           </div>
 
@@ -745,7 +764,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
           {text.trim() ? (
             <button onClick={sendText} style={{
-              width: 42, height: 42, borderRadius: 21,
+              flexShrink: 0, width: 42, height: 42, borderRadius: 21,
               background: 'linear-gradient(135deg, #6C3CE9 0%, #4E22B8 100%)',
               color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
               boxShadow: '0 3px 10px rgba(108,60,233,0.4)',
@@ -753,7 +772,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
               <Send size={18} />
             </button>
           ) : (
-            <div style={{ position: 'relative' }}
+            <div style={{ position: 'relative', flexShrink: 0 }}
               onMouseDown={startRecording}
               onMouseUp={handleHoldEnd}
               onMouseLeave={() => recording && !lockedRecord && stopRecording(true)}

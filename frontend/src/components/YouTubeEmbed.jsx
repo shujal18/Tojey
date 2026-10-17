@@ -1,15 +1,23 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { RotateCcw, RotateCw, Volume2, VolumeX } from 'lucide-react';
+import { VolumeX } from 'lucide-react';
 
-// Official YouTube IFrame Player API, loaded once and cached. We keep YouTube's
-// own control bar (`controls: 1`) so captions, quality, seeking, fullscreen and
-// the unmute button all behave exactly like youtube.com. The only chrome we add
-// on top is a slim skip -10s/+10s pair (Shorts and the watch screen) and, in the
-// Shorts feed, a sound toggle so the feed can remember the viewer's choice.
+// Official YouTube IFrame Player API, loaded once and cached.
 //
-// A single YT.Player instance is created per mount and reused across videoId
-// changes via loadVideoById(), so swiping the Shorts feed never tears down and
-// rebuilds the iframe (which caused the long black/buffering gap between clips).
+// Shorts (`variant="short"`): the player runs with YouTube's own control chrome
+// DISABLED (`controls: 0`). That chrome — the `.ytp-chrome-bottom` control bar
+// and its `.ytp-gradient-bottom` dark band — is what painted the "horizontal
+// black line" across the video whenever the controls appeared, and it also sat
+// on top of the caption/duration. YouTube's own mobile Shorts player shows no
+// such bar either, so we draw a single tap-to-play/pause layer instead and drive
+// playback through the API. The iframe is non-interactive (`pointerEvents:
+// none`) so vertical wheel/touch scrolling still chains to the feed.
+//
+// Watch (`variant="full"`): keep YouTube's native controls (seek, volume,
+// captions, fullscreen) — that is a normal video, not an immersive feed.
+//
+// One YT.Player is created per mount and reused across videoId changes through
+// loadVideoById(), so switching clips never tears down/rebuilds the iframe
+// (which previously caused the long black/buffering gap between Shorts).
 let shortsSoundOn = false;
 
 let ytApiPromise = null;
@@ -32,38 +40,52 @@ function loadYouTubeApi() {
   return ytApiPromise;
 }
 
-export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style, fill = false, variant = 'full', loop = false }) {
-  const wrapRef = useRef(null);
+export default function YouTubeEmbed({
+  videoId,
+  autoPlay = true,
+  onEnded,
+  onError,
+  onProgress,
+  style,
+  fill = false,
+  variant = 'full',
+  loop = false,
+  paused = false,
+}) {
   const mountRef = useRef(null);
   const playerRef = useRef(null);
   const readyRef = useRef(false);
+
   const onEndedRef = useRef(onEnded);
+  const onErrorRef = useRef(onError);
+  const onProgressRef = useRef(onProgress);
   onEndedRef.current = onEnded;
+  onErrorRef.current = onError;
+  onProgressRef.current = onProgress;
 
   const [ready, setReady] = useState(false);
-  const [muted, setMuted] = useState(variant === 'short' && !shortsSoundOn);
-  const [current, setCurrent] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [muted, setMuted] = useState(variant === 'short' ? !shortsSoundOn : false);
 
-  // Keep the latest props/values available inside the one-time player callbacks.
   const desiredIdRef = useRef(videoId);
   const variantRef = useRef(variant);
-  const loopRef = useRef(loop);
   const autoPlayRef = useRef(autoPlay);
+  const loopRef = useRef(loop);
+  const pausedRef = useRef(paused);
   variantRef.current = variant;
-  loopRef.current = loop;
   autoPlayRef.current = autoPlay;
+  loopRef.current = loop;
+  pausedRef.current = paused;
 
-  const applyShortsSound = useCallback((p) => {
+  const reportMute = useCallback((m) => { setMuted(m); }, []);
+
+  const applySound = useCallback((p) => {
     try {
       if (variantRef.current === 'short') {
         if (shortsSoundOn) p.unMute(); else p.mute();
-        setMuted(p.isMuted());
-      } else {
-        setMuted(p.isMuted());
       }
+      reportMute(p.isMuted());
     } catch (e) {}
-  }, []);
+  }, [reportMute]);
 
   // Create exactly one player. videoId changes are handled below.
   useEffect(() => {
@@ -80,39 +102,36 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
       holder.style.height = '100%';
       mountRef.current.appendChild(holder);
 
+      const isShort = variantRef.current === 'short';
       const startId = desiredIdRef.current;
       playerRef.current = new YT.Player(holder, {
         videoId: startId,
-        playerVars: {
-          controls: 1,
-          modestbranding: 1,
-          rel: 0,
-          playsinline: 1,
-          fs: 1,
-          disablekb: 0,
-          iv_load_policy: 3,
-          origin: window.location.origin,
-        },
+        playerVars: isShort
+          // No YouTube chrome at all for Shorts: this is what removes the black
+          // control bar/gradient overlay.
+          ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin }
+          : { controls: 1, disablekb: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 1, iv_load_policy: 3, origin: window.location.origin },
         events: {
           onReady: (e) => {
             if (cancelled) return;
             readyRef.current = true;
             setReady(true);
-            applyShortsSound(e.target);
+            applySound(e.target);
             // A swipe may have happened before the API finished loading.
             if (desiredIdRef.current && desiredIdRef.current !== startId) {
-              try { e.target.loadVideoById(desiredIdRef.current); applyShortsSound(e.target); } catch (err) {}
+              try { e.target.loadVideoById(desiredIdRef.current); applySound(e.target); } catch (err) {}
             }
-            if (autoPlayRef.current) {
+            if (autoPlayRef.current && !pausedRef.current) {
               try { e.target.playVideo(); } catch (err) {}
-              // If autoplay was blocked by policy, retry muted so it still plays.
+              // Autoplay policies block unmuted playback: retry muted so the
+              // feed still plays, and let a tap restore sound (see toggleMute).
               unblockTimer = setTimeout(() => {
                 const p = playerRef.current;
                 if (!p || cancelled) return;
                 try {
-                  if (p.getPlayerState() !== YT.PlayerState.PLAYING && !p.isMuted()) {
+                  if (p.getPlayerState() !== YT.PlayerState.PLAYING && variantRef.current === 'short' && !shortsSoundOn) {
                     p.mute();
-                    setMuted(true);
+                    reportMute(true);
                     p.playVideo();
                   }
                 } catch (err) {}
@@ -123,14 +142,18 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
             if (cancelled) return;
             const YTS = YT.PlayerState;
             if (e.data === YTS.PLAYING) {
-              try { setMuted(e.target.isMuted()); } catch (err) {}
+              applySound(e.target);
             } else if (e.data === YTS.ENDED) {
               if (loopRef.current) {
                 try { e.target.seekTo(0, true); e.target.playVideo(); } catch (err) {}
-              } else {
-                onEndedRef.current && onEndedRef.current();
+              } else if (onEndedRef.current) {
+                onEndedRef.current();
               }
             }
+          },
+          onError: (e) => {
+            if (cancelled) return;
+            if (onErrorRef.current) onErrorRef.current(e && e.data);
           },
         },
       });
@@ -145,7 +168,7 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
       readyRef.current = false;
       if (mountRef.current) mountRef.current.innerHTML = '';
     };
-  }, [applyShortsSound]);
+  }, [applySound]);
 
   // Switch clips on the existing player (no iframe rebuild → no long buffer).
   useEffect(() => {
@@ -153,38 +176,38 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
     const p = playerRef.current;
     if (!p || !readyRef.current || !videoId) return;
     try {
-      if (autoPlayRef.current) p.loadVideoById(videoId);
+      if (autoPlayRef.current && !pausedRef.current) p.loadVideoById(videoId);
       else p.cueVideoById(videoId);
-      applyShortsSound(p);
+      applySound(p);
     } catch (e) {}
-  }, [videoId, applyShortsSound]);
+  }, [videoId, applySound]);
 
-  // Lightweight progress poll for the skip buttons.
+  // React to the parent's play/pause intent (Shorts tap-to-play/pause).
+  useEffect(() => {
+    const p = playerRef.current;
+    if (!p || !readyRef.current) return;
+    try {
+      if (paused) {
+        p.pauseVideo();
+      } else {
+        p.playVideo();
+        if (variantRef.current === 'short' && shortsSoundOn) p.unMute();
+      }
+    } catch (e) {}
+  }, [paused]);
+
+  // Progress poll: drives the Shorts progress bar and reports length upward.
   useEffect(() => {
     const t = setInterval(() => {
       const p = playerRef.current;
       if (!p || typeof p.getCurrentTime !== 'function') return;
       try {
-        setCurrent(p.getCurrentTime() || 0);
-        const d = p.getDuration() || 0;
-        if (d) setDuration(d);
+        const current = p.getCurrentTime() || 0;
+        const duration = p.getDuration() || 0;
+        if (onProgressRef.current) onProgressRef.current(current, duration);
       } catch (e) {}
-    }, 400);
+    }, 500);
     return () => clearInterval(t);
-  }, []);
-
-  const skipBy = useCallback((delta) => {
-    const p = playerRef.current;
-    if (!p || typeof p.seekTo !== 'function') return;
-    try {
-      const d = p.getDuration() || 0;
-      const t = p.getCurrentTime() || 0;
-      let next = t + delta;
-      if (next < 0) next = 0;
-      if (d && next > d - 0.4) next = Math.max(0, d - 0.4);
-      p.seekTo(next, true);
-      setCurrent(next);
-    } catch (e) {}
   }, []);
 
   const toggleMute = useCallback((e) => {
@@ -193,34 +216,28 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
     if (!p) return;
     try {
       if (p.isMuted()) {
+        shortsSoundOn = true;
         p.unMute();
-        setMuted(false);
-        if (variantRef.current === 'short') shortsSoundOn = true;
+        reportMute(false);
+        if (!pausedRef.current) p.playVideo();
       } else {
+        shortsSoundOn = false;
         p.mute();
-        setMuted(true);
-        if (variantRef.current === 'short') shortsSoundOn = false;
+        reportMute(true);
       }
     } catch (e) {}
-  }, []);
+  }, [reportMute]);
 
-  const skipBtn = {
-    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    width: 46, height: 46, border: 'none', borderRadius: 23, cursor: 'pointer',
-    background: 'rgba(0,0,0,0.5)', color: '#fff', backdropFilter: 'blur(2px)',
-    pointerEvents: 'auto', gap: 0, padding: 0, fontSize: 9, fontWeight: 800,
-  };
+  const isShort = variant === 'short';
 
   return (
     <div
-      ref={wrapRef}
-      style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: (fill || variant === 'short') ? undefined : '16/9', background: '#000', overflow: 'hidden', userSelect: 'none', ...style }}
+      style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: (fill || isShort) ? undefined : '16/9', background: '#000', overflow: 'hidden', userSelect: 'none', ...style }}
     >
-      {/* The iframe keeps pointer events so YouTube's native controls (captions,
-          seek, fullscreen, unmute) stay fully usable. Vertical swipes still
-          scroll the Shorts feed: Chrome chains wheel/touch scroll from the
-          (non-scrollable) iframe up to the feed. */}
-      <div ref={mountRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'auto' }} />
+      {/* Shorts: no pointer events on the iframe so taps hit the feed's own
+          play/pause handler and vertical swipes still scroll. Watch: keep it
+          interactive for YouTube's native controls. */}
+      <div ref={mountRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: isShort ? 'none' : 'auto' }} />
 
       {!ready && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
@@ -228,37 +245,20 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
         </div>
       )}
 
-      {/* Forward / backward skip. Sits above YouTube's bottom control bar. */}
-      <div
-        style={{
-          position: 'absolute', left: 0, right: 0, bottom: variant === 'short' ? 76 : 58,
-          display: 'flex', justifyContent: 'center', gap: 26, pointerEvents: 'none', zIndex: 5,
-        }}
-      >
-        <button onClick={(e) => { e.stopPropagation(); skipBy(-10); }} title="Back 10 seconds" style={skipBtn}>
-          <RotateCcw size={17} />
-          <span>10</span>
-        </button>
-        <button onClick={(e) => { e.stopPropagation(); skipBy(10); }} title="Forward 10 seconds" style={skipBtn}>
-          <RotateCw size={17} />
-          <span>10</span>
-        </button>
-      </div>
-
-      {/* Shorts sound toggle. Lets the feed remember the choice; YouTube's own
-          bar has its own mute button too. */}
-      {variant === 'short' && (
+      {/* Minimal sound affordance: only appears when the clip is muted, so it
+          never clutters an otherwise clean Short. Tap to enable audio. */}
+      {isShort && muted && (
         <button
           onClick={toggleMute}
-          title={muted ? 'Unmute' : 'Mute'}
+          title="Unmute"
           style={{
-            position: 'absolute', right: 12, bottom: 16, zIndex: 6, pointerEvents: 'auto',
+            position: 'absolute', right: 14, bottom: 96, zIndex: 6, pointerEvents: 'auto',
             width: 42, height: 42, borderRadius: 21, border: 'none', cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: 'rgba(0,0,0,0.55)', color: '#fff', backdropFilter: 'blur(2px)',
           }}
         >
-          {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
+          <VolumeX size={19} />
         </button>
       )}
     </div>

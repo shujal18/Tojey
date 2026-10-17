@@ -13,6 +13,15 @@ function sanitizeVideoId(videoId) {
   return null;
 }
 
+// "0:55" style length for the caption.
+function fmtLen(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return '';
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${String(r).padStart(2, '0')}`;
+}
+
 function thumbnailUrlFor(item, quality = 'hqdefault') {
   if (item && typeof item.thumbnailUrl === 'string' && item.thumbnailUrl.trim()) {
     return item.thumbnailUrl.trim();
@@ -59,6 +68,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   // datacenter IP is flagged by YouTube), we show the official embed for it
   // instead of skipping. Cleared every time the active clip changes.
   const [embedVideoId, setEmbedVideoId] = useState(null);
+  // Playback position/length for the thin Shorts progress bar.
+  const [progress, setProgress] = useState({ current: 0, duration: 0 });
 
   const shellRef = useRef(null);
   const toastTimerRef = useRef(null);
@@ -74,6 +85,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   // straight to the embed instead of re-trying the proxy for each one. Pre-seeded
   // from the shared memo so entering Shorts after a blocked watch video is instant.
   const nativeBrokenRef = useRef(ytEgressBlocked());
+  // Guards the embed's onError so one unavailable Short is skipped at most once.
+  const embedErrorHandledRef = useRef(false);
 
   const videosRef = useRef([]);
   const nextPageTokenRef = useRef(null);
@@ -449,6 +462,38 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     img.src = thumbnailUrlFor(nextItem, 'maxresdefault');
   }, [activeIdx, videos]);
 
+  // Reset the progress bar / error guard whenever the active clip changes.
+  useEffect(() => {
+    setProgress({ current: 0, duration: 0 });
+    embedErrorHandledRef.current = false;
+  }, [activeIdx, embedVideoId]);
+
+  // Swiping to another Short always resumes playback (like the YouTube app).
+  useEffect(() => {
+    setPaused(false);
+  }, [activeIdx]);
+
+  // The embed reports YouTube error codes: 100/101/150 mean the video is gone or
+  // embedding is disallowed → skip it. Anything else is surfaced, not skipped.
+  const handleEmbedError = useCallback((code) => {
+    if (embedErrorHandledRef.current) return;
+    if (code !== 100 && code !== 101 && code !== 150) {
+      showToast('Playback error — swipe to continue');
+      return;
+    }
+    embedErrorHandledRef.current = true;
+    const list = videosRef.current;
+    const cur = activeIdxRef.current;
+    const item = list[cur];
+    if (item && item.videoId) failedVideoIdsRef.current.add(item.videoId);
+    if (cur + 1 < list.length) {
+      switchToIndex(cur + 1);
+      showToast('Skipped an unavailable Short');
+    } else {
+      showToast('This Short is unavailable');
+    }
+  }, [showToast, switchToIndex]);
+
   const handleScroll = useCallback(() => {
     const el = shellRef.current;
     if (!el || !viewH) return;
@@ -501,208 +546,243 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
           </button>
         </div>
       ) : (
-        <div
-          ref={shellRef}
-          onClick={handleTap}
-          onScroll={handleScroll}
-          style={{
-            flex: 1,
-            overflowY: 'scroll',
-            scrollSnapType: 'y mandatory',
-            background: '#000',
-            position: 'relative',
-            cursor: 'pointer',
-            WebkitOverflowScrolling: 'touch',
-            scrollbarWidth: 'none',
-            msOverflowStyle: 'none',
-          }}
-        >
-          <style>{'::-webkit-scrollbar{display:none}'}</style>
-          {windowStart > 0 && <div style={{ height: windowStart * viewH }} />}
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center', background: '#000', minHeight: 0, position: 'relative' }}>
+          {/* Centered portrait (9:16) viewing area, like the YouTube Shorts
+              player. On phones it just fills the available width. */}
+          <div style={{
+            position: 'relative', height: '100%', aspectRatio: '9 / 16', maxWidth: '100%',
+            flex: '0 0 auto', background: '#000', overflow: 'hidden',
+          }}>
+            <div
+              ref={shellRef}
+              onClick={handleTap}
+              onScroll={handleScroll}
+              style={{
+                position: 'absolute', inset: 0,
+                overflowY: 'scroll',
+                scrollSnapType: 'y mandatory',
+                background: '#000',
+                cursor: 'pointer',
+                WebkitOverflowScrolling: 'touch',
+                scrollbarWidth: 'none',
+                msOverflowStyle: 'none',
+              }}
+            >
+              <style>{'::-webkit-scrollbar{display:none}'}</style>
+              {windowStart > 0 && <div style={{ height: windowStart * viewH }} />}
 
-          {videos.slice(windowStart, windowEnd).map((item, i) => {
-            const index = windowStart + i;
-            const thumb = thumbnailUrlFor(item);
-            const isActive = index === activeIdx;
-            const vid = sanitizeVideoId(item.videoId);
-            return (
+              {videos.slice(windowStart, windowEnd).map((item, i) => {
+                const index = windowStart + i;
+                const thumb = thumbnailUrlFor(item);
+                const isActive = index === activeIdx;
+                const vid = sanitizeVideoId(item.videoId);
+                return (
+                  <div
+                    key={item.videoId}
+                    style={{
+                      height: viewH,
+                      scrollSnapAlign: 'start',
+                      position: 'relative',
+                      background: '#000',
+                    }}
+                  >
+                    {vid ? (
+                      <div
+                        style={{
+                          position: 'absolute', inset: 0,
+                          backgroundImage: `url(${thumb})`,
+                          backgroundSize: 'cover',
+                          backgroundPosition: 'center',
+                          backgroundRepeat: 'no-repeat',
+                          opacity: isActive ? 0 : 1,
+                        }}
+                      />
+                    ) : (
+                      <div style={{ position: 'absolute', inset: 0, background: '#111', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>Unavailable</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {windowEnd < videos.length && <div style={{ height: (videos.length - windowEnd) * viewH }} />}
+
+              {videos.length === 0 && !loading && (
+                <div style={{ height: viewH, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40 }}>
+                  <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 15, textAlign: 'center' }}>
+                    {toast || 'No videos available right now'}
+                  </div>
+                  {toast && (
+                    <button onClick={() => fetchFeed(category, { refresh: true })} style={{
+                      padding: '10px 24px', borderRadius: 10, border: 'none', background: theme.primary, color: '#fff', fontWeight: 600, cursor: 'pointer',
+                    }}>
+                      Retry
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* The single active player layer, translated onto the active row. */}
               <div
-                key={item.videoId}
                 style={{
-                  height: viewH,
-                  scrollSnapAlign: 'start',
-                  position: 'relative',
+                  position: 'absolute', top: 0, left: 0, width: '100%', height: viewH,
+                  transform: `translateY(${-activeIdx * viewH}px)`,
+                  transition: 'transform 0.15s ease-out',
+                  pointerEvents: 'none',
+                  zIndex: 4,
                   background: '#000',
                 }}
               >
-                {vid ? (
-                  <div
-                    style={{
-                      position: 'absolute', inset: 0,
-                      backgroundImage: `url(${thumb})`,
-                      backgroundSize: 'cover',
-                      backgroundPosition: 'center',
-                      backgroundRepeat: 'no-repeat',
-                    }}
-                  />
-                ) : (
-                  <div style={{ position: 'absolute', inset: 0, background: '#111' }} />
-                )}
-
-                {isActive && (
-                  <div style={{ position: 'absolute', left: 14, right: 60, bottom: 16, zIndex: 5, pointerEvents: 'none' }}>
-                    <div style={{
-                      color: '#fff', fontSize: 15, fontWeight: 700, lineHeight: 1.3,
-                      textShadow: '0 1px 6px rgba(0,0,0,0.8)', overflow: 'hidden', display: '-webkit-box',
-                      WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-                    }}>
-                      {item.title || ''}
-                    </div>
-                    <div style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, marginTop: 3, textShadow: '0 1px 6px rgba(0,0,0,0.8)' }}>
-                      {item.channelTitle || ''}
-                      {item.durationSeconds ? `  •  ${Math.round(item.durationSeconds)}s` : ''}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {windowEnd < videos.length && <div style={{ height: (videos.length - windowEnd) * viewH }} />}
-
-          {videos.length === 0 && !loading && (
-            <div style={{ height: viewH, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40 }}>
-              <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 15, textAlign: 'center' }}>
-                {toast || 'No videos available right now'}
-              </div>
-              {toast && (
-                <button onClick={() => fetchFeed(category, { refresh: true })} style={{
-                  padding: '10px 24px', borderRadius: 10, border: 'none', background: theme.primary, color: '#fff', fontWeight: 600, cursor: 'pointer',
-                }}>
-                  Retry
-                </button>
-              )}
-            </div>
-          )}
-
-          <div
-            style={{
-              position: 'absolute', top: 0, left: 0, width: '100%', height: viewH,
-              transform: `translateY(${-activeIdx * viewH}px)`,
-              transition: 'transform 0.15s ease-out',
-              pointerEvents: 'none',
-              zIndex: 4,
-            }}
-          >
-            <>
-              <video
-                ref={el => {
-                  playerElsRef.current[0] = el;
-                  if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
-                }}
-                playsInline
-                preload="auto"
-                onEnded={() => handleSlotEnded(0)}
-                onError={() => handleSlotError(0)}
-                style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%',
-                  objectFit: 'contain', background: '#000',
-                  zIndex: 3,
-                  opacity: (!embedVideoId && overlayVideoId && activeSlot === 0) ? 1 : 0,
-                  pointerEvents: 'none',
-                }}
-              />
-              <video
-                ref={el => {
-                  playerElsRef.current[1] = el;
-                  if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
-                }}
-                playsInline
-                preload="auto"
-                onEnded={() => handleSlotEnded(1)}
-                onError={() => handleSlotError(1)}
-                style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%',
-                  objectFit: 'contain', background: '#000',
-                  zIndex: 2,
-                  opacity: (!embedVideoId && overlayVideoId && activeSlot === 1) ? 1 : 0,
-                  pointerEvents: 'none',
-                }}
-              />
-              {embedVideoId && (
-                <div style={{ position: 'absolute', inset: 0, zIndex: 4, background: '#000', pointerEvents: 'none' }}>
+                <video
+                  ref={el => {
+                    playerElsRef.current[0] = el;
+                    if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
+                  }}
+                  playsInline
+                  preload="auto"
+                  onEnded={() => handleSlotEnded(0)}
+                  onError={() => handleSlotError(0)}
+                  onTimeUpdate={(e) => {
+                    if (activeSlotRef.current !== 0) return;
+                    const v = e.currentTarget;
+                    setProgress({ current: v.currentTime || 0, duration: Number.isFinite(v.duration) ? v.duration : 0 });
+                  }}
+                  style={{
+                    position: 'absolute', inset: 0, width: '100%', height: '100%',
+                    objectFit: 'contain', background: 'transparent',
+                    zIndex: 3,
+                    opacity: (!embedVideoId && overlayVideoId && activeSlot === 0) ? 1 : 0,
+                    pointerEvents: 'none',
+                  }}
+                />
+                <video
+                  ref={el => {
+                    playerElsRef.current[1] = el;
+                    if (playerElsRef.current[0] && playerElsRef.current[1] && !poolReady) setPoolReady(true);
+                  }}
+                  playsInline
+                  preload="auto"
+                  onEnded={() => handleSlotEnded(1)}
+                  onError={() => handleSlotError(1)}
+                  onTimeUpdate={(e) => {
+                    if (activeSlotRef.current !== 1) return;
+                    const v = e.currentTarget;
+                    setProgress({ current: v.currentTime || 0, duration: Number.isFinite(v.duration) ? v.duration : 0 });
+                  }}
+                  style={{
+                    position: 'absolute', inset: 0, width: '100%', height: '100%',
+                    objectFit: 'contain', background: 'transparent',
+                    zIndex: 2,
+                    opacity: (!embedVideoId && overlayVideoId && activeSlot === 1) ? 1 : 0,
+                    pointerEvents: 'none',
+                  }}
+                />
+                {embedVideoId && (
                   <YouTubeEmbed
                     videoId={embedVideoId}
                     autoPlay
                     variant="short"
                     loop
-                    style={{ position: 'absolute', inset: 0 }}
+                    paused={paused}
+                    onProgress={(current, duration) => setProgress({ current, duration: Number.isFinite(duration) ? duration : 0 })}
+                    onError={handleEmbedError}
+                    style={{ position: 'absolute', inset: 0, zIndex: 4 }}
                   />
+                )}
+
+                {/* Bottom scrim + caption: gradient only where the text sits. */}
+                {overlayVideoId && (
+                  <>
+                    <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 170, zIndex: 5, pointerEvents: 'none', background: 'linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0))' }} />
+                    <div style={{ position: 'absolute', left: 16, right: 16, bottom: 18, zIndex: 6, pointerEvents: 'none' }}>
+                      <div style={{
+                        color: '#fff', fontSize: 15, fontWeight: 700, lineHeight: 1.3,
+                        textShadow: '0 1px 6px rgba(0,0,0,0.9)', overflow: 'hidden', display: '-webkit-box',
+                        WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                      }}>
+                        {activeItem?.title || ''}
+                      </div>
+                      <div style={{ color: 'rgba(255,255,255,0.9)', fontSize: 13, marginTop: 4, textShadow: '0 1px 6px rgba(0,0,0,0.9)' }}>
+                        {activeItem?.channelTitle || ''}
+                        {fmtLen(activeItem?.durationSeconds || progress.duration) ? `  •  ${fmtLen(activeItem?.durationSeconds || progress.duration)}` : ''}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Video length / position indicator. */}
+                <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, zIndex: 7, background: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }}>
+                  <div style={{ height: '100%', width: `${progress.duration ? Math.min(100, (progress.current / progress.duration) * 100) : 0}%`, background: '#fff', transition: 'width 0.25s linear' }} />
                 </div>
-              )}
-              {!embedVideoId && overlayVideoId && paused && (
-                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-                  <div style={{
-                    width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    <div style={{ width: 0, height: 0, borderLeft: '20px solid #fff', borderTop: '12px solid transparent', borderBottom: '12px solid transparent', marginLeft: 4 }} />
+
+                {/* Minimal play glyph; tap anywhere (outside chips/buttons) to toggle. */}
+                {paused && overlayVideoId && (
+                  <div style={{ position: 'absolute', inset: 0, zIndex: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.18)', pointerEvents: 'none' }}>
+                    <div style={{ width: 72, height: 72, borderRadius: 36, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div style={{ width: 0, height: 0, borderLeft: '22px solid #fff', borderTop: '13px solid transparent', borderBottom: '13px solid transparent', marginLeft: 5 }} />
+                    </div>
                   </div>
-                </div>
-              )}
-            </>
-          </div>
-        </div>
-      )}
+                )}
+              </div>
+            </div>
 
-      {videos.length > 0 && categories.length > 0 && (
-        <div
-          style={{
-            position: 'absolute', top: 10, left: onBack ? 58 : 12, right: 12,
-            zIndex: 46, display: 'flex', gap: 8, overflowX: 'auto',
-            scrollbarWidth: 'none', msOverflowStyle: 'none', padding: '4px 0',
-          }}
-          onClick={(e) => e.stopPropagation()}
-          className="reels-chip-row"
-        >
-          <style>{'.reels-chip-row::-webkit-scrollbar{display:none}'}</style>
-          {categories.map((c) => {
-            const active = c.id === category;
-            return (
-              <button
-                key={c.id}
-                onClick={() => selectCategory(c.id)}
+            {/* Top scrim so the category chips stay readable over any video. */}
+            {videos.length > 0 && (
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 132, zIndex: 44, pointerEvents: 'none', background: 'linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0))' }} />
+            )}
+
+            {videos.length > 0 && categories.length > 0 && (
+              <div
                 style={{
-                  flexShrink: 0, border: 'none', cursor: 'pointer',
-                  padding: '6px 13px', borderRadius: 16, fontSize: 13, fontWeight: 700,
-                  color: active ? '#fff' : 'rgba(255,255,255,0.9)',
-                  background: active ? theme.primary : 'rgba(0,0,0,0.5)',
-                  boxShadow: active ? 'none' : '0 1px 6px rgba(0,0,0,0.45)',
-                  whiteSpace: 'nowrap',
+                  position: 'absolute', top: 14, left: onBack ? 60 : 12, right: 12,
+                  zIndex: 46, display: 'flex', gap: 8, overflowX: 'auto',
+                  scrollbarWidth: 'none', msOverflowStyle: 'none', padding: '2px 0',
                 }}
+                onClick={(e) => e.stopPropagation()}
+                className="reels-chip-row"
               >
-                {c.label}
+                <style>{'.reels-chip-row::-webkit-scrollbar{display:none}'}</style>
+                {categories.map((c) => {
+                  const active = c.id === category;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => selectCategory(c.id)}
+                      style={{
+                        flexShrink: 0, border: 'none', cursor: 'pointer',
+                        padding: '7px 14px', borderRadius: 16, fontSize: 13, fontWeight: 700,
+                        color: active ? '#fff' : 'rgba(255,255,255,0.95)',
+                        background: active ? theme.primary : 'rgba(0,0,0,0.55)',
+                        boxShadow: active ? 'none' : '0 1px 6px rgba(0,0,0,0.45)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {onBack && (
+              <button onClick={(e) => { e.stopPropagation(); onBack(); }} title="Back" style={{
+                position: 'absolute', top: 14, left: 12, zIndex: 50,
+                width: 38, height: 38, borderRadius: 19,
+                background: 'rgba(0,0,0,0.55)', color: '#fff',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                border: 'none', cursor: 'pointer',
+              }}>
+                <ArrowLeft size={20} />
               </button>
-            );
-          })}
-        </div>
-      )}
+            )}
+          </div>
 
-      {onBack && (
-        <button onClick={onBack} title="Back to chats" style={{
-          position: 'absolute', top: 10, left: 12, zIndex: 50,
-          width: 38, height: 38, borderRadius: 19,
-          background: 'rgba(0,0,0,0.5)', color: '#fff',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          border: 'none', cursor: 'pointer',
-        }}>
-          <ArrowLeft size={20} />
-        </button>
-      )}
-
-      {loadMoreSpinner && (
-        <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 45 }}>
-          <RefreshCw size={20} color="rgba(255,255,255,0.8)" style={{ animation: 'spin 1s linear infinite' }} />
+          {loadMoreSpinner && (
+            <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 45, pointerEvents: 'none' }}>
+              <RefreshCw size={20} color="rgba(255,255,255,0.8)" style={{ animation: 'spin 1s linear infinite' }} />
+            </div>
+          )}
         </div>
       )}
 
