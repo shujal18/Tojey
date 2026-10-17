@@ -13,6 +13,13 @@ services:
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT_B64
         sync: false
+      # Optional. On a datacenter IP (Render) YouTube may answer the player
+      # request with LOGIN_REQUIRED ("Sign in to confirm you're not a bot").
+      # Setting a guest/session cookie here (copy the Cookie header from an
+      # incognito youtube.com tab) is the documented workaround. Leave unset to
+      # rely on anonymous PO-token-free client rotation.
+      - key: YOUTUBE_COOKIE
+        sync: false
       - key: PORT
         value: 10000
       - key: MAX_FILE_SIZE

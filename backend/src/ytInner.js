@@ -38,21 +38,60 @@ const CLIENTS = {
     gl: 'US',
     utcOffsetMinutes: 0,
   },
+  // ANDROID_VR and VISIONOS are the clients YouTube currently does NOT require
+  // a PO Token for (same ones yt-dlp recommends). Both return direct,
+  // byte-range-addressable adaptive URLs (mp4 avc1) and are the least likely to
+  // hit the datacenter "Sign in to confirm you're not a bot" wall.
+  ANDROID_VR: {
+    clientName: 'ANDROID_VR',
+    clientVersion: '1.60.19',
+    deviceMake: 'Oculus',
+    deviceModel: 'Quest 3',
+    osName: 'Android',
+    osVersion: '12',
+    androidSdkVersion: 32,
+    hl: 'en',
+    gl: 'US',
+    utcOffsetMinutes: 0,
+  },
+  VISIONOS: {
+    clientName: 'VISIONOS',
+    clientVersion: '0.1',
+    deviceMake: 'Apple',
+    deviceModel: 'RealityDevice14,1',
+    osName: 'visionOS',
+    osVersion: '1.3.0',
+    hl: 'en',
+    gl: 'US',
+    utcOffsetMinutes: 0,
+  },
 };
 
 const UAS = {
   ANDROID: 'com.google.android.youtube/20.12.37 (Linux; U; Android 11; US)',
   WEB: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   IOS: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+  ANDROID_VR: 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip',
+  VISIONOS: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
 };
 
 // Client rotation for the streaming `player` call. YouTube flags datacenter
 // IPs with `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot") on a
 // per-client basis, so when one client is bot-checked we retry the next. Only
-// clients that return a direct `url` (not a signatureCipher) are listed; IOS
-// and ANDROID both do. `playbackContext` (html5Preference) materially reduces
-// bot-checks and is always sent.
-const PLAYBACK_CLIENTS = ['ANDROID', 'IOS'];
+// clients that return a direct `url` (not a signatureCipher) are listed.
+// ANDROID_VR/VISIONOS are PO-token-free and tried first; IOS/ANDROID follow.
+// `playbackContext` (html5Preference) materially reduces bot-checks and is
+// always sent.
+const PLAYBACK_CLIENTS = ['ANDROID_VR', 'VISIONOS', 'IOS', 'ANDROID'];
+
+// Optional: a YouTube cookie string (e.g. from an incognito session) exported
+// into YOUTUBE_COOKIE. On datacenter IPs (Render et al.) a PO Token alone does
+// not clear the IP-based bot check; an authenticated/guest cookie is the
+// documented workaround. Unset -> anonymous requests, exactly as before.
+function cookieHeader() {
+  const c = process.env.YOUTUBE_COOKIE;
+  return c ? String(c).trim() : '';
+}
 const PLAYBACK_TTL = 30 * 60 * 1000;
 
 const CHANNEL_TAB_PARAMS = {
@@ -95,6 +134,8 @@ async function call(endpoint, body, opts = {}) {
       Accept: 'application/json',
       'User-Agent': UAS[client],
     };
+    const cookie = cookieHeader();
+    if (cookie) headers.Cookie = cookie;
     if (client === 'ANDROID') {
       headers['X-YouTube-Client-Name'] = '38';
       headers['X-YouTube-Client-Version'] = CLIENTS[client].clientVersion;
@@ -744,12 +785,14 @@ async function videoInfo(videoId, token, skipCache = false) {
   }
   const [pl, nx] = await Promise.all([
     playerResponse(videoId, skipCache),
+    // Related videos are best-effort: a datacenter bot-check on the WEB `next`
+    // endpoint must not take down the whole watch screen.
     call('next', {
       videoId,
       contentCheckOk: true,
       racyCheckOk: true,
       playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-    }, { client: 'WEB', skipCache, cacheKey: `next:${videoId}`, ttl: 10 * 60 * 1000 }),
+    }, { client: 'WEB', skipCache, cacheKey: `next:${videoId}`, ttl: 10 * 60 * 1000 }).catch(() => ({})),
   ]);
   const meta = parsePlayerMeta(pl, videoId);
   const related = collectRelated(nx);
@@ -820,6 +863,15 @@ function hasDirectUrl(j) {
   return any.some((f) => !!f.url);
 }
 
+// A muxed (progressive audio+video) format — e.g. itag 18. Used to prefer the
+// response that keeps the progressive path playable (Shorts/Reels `itag=best`
+// and the DASH-failure fallback both need one); some clients (IOS) return only
+// video-only adaptive streams.
+function hasMuxedUrl(j) {
+  const sd = j.streamingData || {};
+  return (sd.formats || []).some((f) => f.url && /video\//.test(String(f.mimeType || '')) && /(mp4a|opus|vorbis|ac-3|ec-3|flac)/.test(String(f.mimeType || '')));
+}
+
 async function playerResponse(videoId, skipCache = false) {
   const key = `playerResp:${videoId}`;
   if (!skipCache) {
@@ -830,6 +882,8 @@ async function playerResponse(videoId, skipCache = false) {
 
   const p = (async () => {
     let firstNonOk = null;
+    let firstOk = null;
+    const tried = [];
     for (const client of PLAYBACK_CLIENTS) {
       let j;
       try {
@@ -840,16 +894,28 @@ async function playerResponse(videoId, skipCache = false) {
           playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
         }, { client, skipCache: true });
       } catch (e) {
+        tried.push(`${client}:err`);
         if (!firstNonOk) firstNonOk = e;
         continue;
       }
       const status = navTo(j, ['playabilityStatus', 'status']);
+      tried.push(`${client}:${status}${hasMuxedUrl(j) ? '+mux' : ''}`);
       if (status === 'OK' && hasDirectUrl(j)) {
-        cacheSet(key, j, PLAYBACK_TTL);
-        return j;
+        // Prefer a response that also carries a muxed format so the progressive
+        // path stays usable; keep the first OK-with-URL as a fallback.
+        if (hasMuxedUrl(j)) {
+          cacheSet(key, j, PLAYBACK_TTL);
+          return j;
+        }
+        if (!firstOk) firstOk = j;
       }
       if (!firstNonOk) firstNonOk = j;
     }
+    if (firstOk) {
+      cacheSet(key, firstOk, PLAYBACK_TTL);
+      return firstOk;
+    }
+    console.warn(`yt:player no playable source for ${videoId} [${tried.join(' ')}]`);
     // Every client was bot-checked/unplayable. Return whatever we saw so the
     // caller can surface the playability reason to the UI instead of throwing a
     // generic network error.

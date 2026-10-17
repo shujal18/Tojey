@@ -102,9 +102,15 @@ export default function YoutubePlayer({
 
     const fail = (msg) => {
       if (cancelled) return;
+      const raw = String(msg || '');
+      // Surface a friendly message for YouTube's anti-bot notice; the concrete
+      // per-client reason is logged server-side for the operator.
+      const shown = /bot|sign in|login|verify/i.test(raw)
+        ? 'Playback is temporarily unavailable. Tap Retry.'
+        : (raw || 'Playback failed');
       setState('error');
-      setErrMsg(msg || 'Playback failed');
-      onErrorRef.current && onErrorRef.current(new Error(msg || 'Playback failed'));
+      setErrMsg(shown);
+      onErrorRef.current && onErrorRef.current(new Error(shown));
     };
 
     // Progressive muxed (360p) path: last-resort fallback when DASH cannot start
