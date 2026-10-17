@@ -7,7 +7,14 @@ const API = import.meta.env.VITE_API_URL || '';
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     const raw = localStorage.getItem('tojey-user');
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (e) {
+      try { localStorage.removeItem('tojey-user'); } catch (e2) {}
+      return null;
+    }
   });
   const [token, setToken] = useState(() => localStorage.getItem('tojey-token') || '');
   const [loading, setLoading] = useState(false);

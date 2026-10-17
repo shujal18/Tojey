@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../services/AuthContext';
 import { ChatProvider, useChat } from '../services/ChatContext';
 import { CallProvider } from '../services/CallContext';
+import { WatchTogetherProvider, useWatchTogether } from '../services/WatchTogetherContext';
 import CallScreen from '../components/CallScreen';
 import { createSocket, emitAppVisibility } from '../services/socket';
 import { subscribeWebPush, stopWebPush } from '../services/webPush';
@@ -134,25 +135,27 @@ export default function HomeLayout() {
   return (
     <ChatProvider socket={socket} currentUser={currentUser} onOpenChat={handleOpenChat}>
       <CallProvider socket={socket} currentUser={currentUser}>
-        <div
-          style={{
-            height: '100vh',
-            width: '100%',
-            display: 'flex',
-            justifyContent: 'center',
-            background: theme.shellBg,
-            ...shellVars,
-          }}
-        >
-          <div style={{
-            width: '100%',
-            maxWidth: isDesktop ? 1600 : '100%',
-            height: '100%',
-            display: 'flex',
-            background: theme.background,
-            boxShadow: isDesktop ? theme.frameShadow : 'none',
-            overflow: 'hidden',
-          }}>
+        <WatchTogetherProvider socket={socket} currentUser={currentUser}>
+          <WatchTogetherBridge goSection={goSection} />
+          <div
+            style={{
+              height: '100vh',
+              width: '100%',
+              display: 'flex',
+              justifyContent: 'center',
+              background: theme.shellBg,
+              ...shellVars,
+            }}
+          >
+            <div style={{
+              width: '100%',
+              maxWidth: isDesktop ? 1600 : '100%',
+              height: '100%',
+              display: 'flex',
+              background: theme.background,
+              boxShadow: isDesktop ? theme.frameShadow : 'none',
+              overflow: 'hidden',
+            }}>
             <NavRail
               section={section}
               onSelect={goSection}
@@ -214,9 +217,10 @@ export default function HomeLayout() {
           </div>
         </div>
 
-        <CallScreen />
-        <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
-        <HeadsUpBanner />
+          <CallScreen />
+          <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
+          <HeadsUpBanner />
+        </WatchTogetherProvider>
       </CallProvider>
     </ChatProvider>
   );
@@ -322,6 +326,62 @@ function NavRail({ section, onSelect, user, onLogout }) {
         <LogOut size={22} />
       </button>
     </div>
+  );
+}
+
+// Global wiring for Watch Together: shows the incoming-invitation card on any
+// section, and jumps to the YouTube section the moment a room becomes active so
+// the shared video can open.
+function WatchTogetherBridge({ goSection }) {
+  const { theme } = useTheme();
+  const { invite, outgoing, room, partnerLeft, respondInvite } = useWatchTogether();
+  const wasRoomRef = useRef(null);
+
+  useEffect(() => {
+    const id = room && room.roomId;
+    if (id && id !== wasRoomRef.current) goSection('youtube');
+    wasRoomRef.current = id || null;
+  }, [room && room.roomId, goSection]);
+
+  return (
+    <>
+      {(invite || outgoing || partnerLeft) && (
+        <div style={{ position: 'fixed', top: 14, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 90, pointerEvents: 'none' }}>
+          <div
+            style={{
+              pointerEvents: 'auto',
+              display: 'flex', alignItems: 'center', gap: 12,
+              background: theme.panelBg || '#1b1428',
+              color: theme.text, border: `1px solid ${theme.border}`,
+              borderRadius: 14, padding: '10px 14px', boxShadow: theme.frameShadow || '0 12px 30px rgba(0,0,0,0.45)',
+              maxWidth: 460,
+            }}
+          >
+            {invite && (
+              <>
+                <div style={{ fontSize: 13, lineHeight: 1.4 }}>
+                  <b>{(invite.from && invite.from.displayName) || 'Friend'}</b> invited you to watch together
+                  {invite.title ? <div style={{ color: theme.textSecondary, fontSize: 12 }}>{invite.title}</div> : null}
+                </div>
+                <button onClick={() => respondInvite(true)} style={{ background: theme.primary, color: '#fff', border: 'none', borderRadius: 18, padding: '7px 14px', fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Accept</button>
+                <button onClick={() => respondInvite(false)} style={{ background: 'none', color: theme.textSecondary, border: `1px solid ${theme.border}`, borderRadius: 18, padding: '7px 14px', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}>Decline</button>
+              </>
+            )}
+            {outgoing && (
+              <div style={{ fontSize: 13 }}>
+                Waiting for <b>{outgoing.toName}</b> to join…
+                <div style={{ color: theme.textSecondary, fontSize: 12 }}>Invitation sent</div>
+              </div>
+            )}
+            {partnerLeft && (
+              <div style={{ fontSize: 13 }}>
+                <b>{(partnerLeft.by && partnerLeft.by.displayName) || 'Your friend'}</b> left the room.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

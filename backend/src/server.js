@@ -7,6 +7,7 @@ const { initDB, pool } = require('./db');
 const { signToken, verifyToken, authenticate, authMiddleware } = require('./auth');
 const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
 const shortsFeed = require('./shortsFeed');
+const { attachWatchTogether } = require('./watchtogether');
 const path = require('path');
 const { Readable } = require('stream');
 const { upload } = require('./media');
@@ -52,6 +53,8 @@ const io = new Server(server, {
   pingInterval: 15000,
   pingTimeout: 10000,
 });
+
+attachWatchTogether(io);
 
 app.get('/', (req, res) => res.json({ app: 'Tojey', status: 'running' }));
 
@@ -628,8 +631,10 @@ app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
 // googlevideo URLs are IP-bound, so for the web the bytes are proxied through
 // /api/yt/media (see below) rather than handed to the browser directly.
 const yt = require('./ytInner');
+const mux = require('./mux');
 const YTID = /^[a-zA-Z0-9_-]{11}$/;
 const ID = /^[a-zA-Z0-9_-]+$/;
+const YT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 app.get('/api/yt/search', authMiddleware, async (req, res) => {
   try {
@@ -830,10 +835,39 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
     const streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
     const strip = (f) => { const { url, ...rest } = f; return rest; };
+    // The best audio-only track is what a video-only (HD) download would be
+    // remuxed with server-side; the client adds its size to each option so the
+    // "with audio" figures are accurate.
+    // Only AAC-in-MP4 audio can be remuxed into the MP4 delivered to the user.
+    const defaultAudio = streams.adaptiveFormats
+      .filter((f) => f.hasAudio && !f.hasVideo && /mp4a/.test(f.codecs || f.mimeType || ''))
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    // Opt-in gate probe (used by the download menu): YouTube serves some
+    // adaptive files only up to a prefix without a PO token, in which case HD
+    // remuxing falls back to the progressive stream. One 1-byte tail request
+    // tells us which case this video is.
+    let gated = false;
+    if (req.query.probe === '1') {
+      const top = streams.adaptiveFormats
+        .filter((f) => f.hasVideo && !f.hasAudio && f.url && f.contentLength > 0)
+        .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+      if (top) {
+        try {
+          const r = await fetch(top.url, {
+            headers: { 'User-Agent': YT_UA, Accept: '*/*', Range: `bytes=${top.contentLength - 1}-${top.contentLength - 1}` },
+          });
+          try { await r.body?.cancel?.(); } catch (e) {}
+          gated = r.status === 403 || r.status === 410;
+        } catch (e) { /* treat unknown as not gated */ }
+      }
+    }
     res.json({
       videoId,
       status: streams.status,
       reason: streams.reason,
+      canMux: mux.available(),
+      gated,
+      defaultAudio: defaultAudio ? strip(defaultAudio) : null,
       formats: streams.formats.map(strip),
       adaptiveFormats: streams.adaptiveFormats.map(strip),
     });
@@ -843,35 +877,33 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
   }
 });
 
+// Streams a completed temp file to the client as an attachment and deletes it
+// once sent. Used for remuxed/extracted downloads that can't be piped straight
+// through from YouTube.
+function streamDownloadFile(res, filePath, filename, contentType) {
+  let size;
+  try { size = fs.statSync(filePath).size; } catch (e) { return res.status(502).json({ error: 'download failed' }); }
+  res.set('Content-Type', contentType || 'application/octet-stream');
+  res.set('Content-Length', String(size));
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Content-Disposition', `attachment; filename="${filename}"`);
+  const rs = fs.createReadStream(filePath);
+  const done = () => mux.cleanup(filePath);
+  rs.on('close', done);
+  rs.on('error', () => { try { res.destroy(); } catch (e) {} done(); });
+  rs.pipe(res);
+}
+
 app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
   const videoId = String(req.params.videoId || '');
   if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
   const itag = req.query.itag ? String(req.query.itag).slice(0, 10) : '18';
   const download = req.query.download === '1';
+  const wantMux = req.query.mux === '1';
 
-  const attempt = async (skipCache) => {
-    const streams = await yt.playerStreams(videoId, skipCache);
-    const fmt = pickFormat(streams, itag);
-    if (!fmt || !fmt.url) return { upstream: null, fmt: null };
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      Accept: '*/*',
-    };
-    if (req.headers.range) headers.Range = req.headers.range;
-    const upstream = await fetch(fmt.url, { headers });
-    return { upstream, fmt };
-  };
-
-  try {
-    let { upstream, fmt } = await attempt(false);
-    if (upstream && (upstream.status === 403 || upstream.status === 410)) {
-      try { await upstream.body?.cancel?.(); } catch (e) {}
-      ({ upstream, fmt } = await attempt(true));
-    }
-    if (!upstream) return res.status(502).json({ error: 'no playable stream' });
-    if (!upstream.ok && upstream.status !== 206) {
-      return res.status(upstream.status === 403 ? 502 : upstream.status).json({ error: 'upstream error', status: upstream.status });
-    }
+  // Forward an upstream response to the client (playback Range proxy and the
+  // progressive-download shortcut both use this).
+  const proxyUpstream = (upstream, fmt) => {
     res.status(upstream.status);
     res.set('Accept-Ranges', 'bytes');
     res.set('Content-Type', fmt.mimeType || 'video/mp4');
@@ -891,6 +923,134 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
     const nodeStream = Readable.fromWeb(upstream.body);
     nodeStream.on('error', () => { try { res.destroy(); } catch (e) {} });
     nodeStream.pipe(res);
+  };
+
+  const fetchPlain = (url) => fetch(url, { headers: { 'User-Agent': YT_UA, Accept: '*/*' } });
+
+  // A download request. Progressive formats stream straight through; adaptive
+  // (HD video-only / audio-only) formats are pulled in bounded chunks and, for
+  // video, remuxed with the best audio track. YouTube gate-limits some adaptive
+  // files to a prefix (PO token required) - those fall back to the muxed 360p.
+  const downloadFormat = async (streams, fmt) => {
+    const bestProgressive = () => (streams.formats || [])
+      .filter((f) => f.hasVideo && f.hasAudio)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+    const bestAudio = () => (streams.adaptiveFormats || [])
+      .filter((f) => f.hasAudio && !f.hasVideo && /mp4a/.test(f.codecs || f.mimeType || ''))
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+    if (!fmt || !fmt.url) return res.status(502).json({ error: 'no playable stream' });
+
+    // Muxed progressive (e.g. itag 18): small enough to stream the whole file.
+    if (fmt.hasVideo && fmt.hasAudio) {
+      const upstream = await fetchPlain(fmt.url);
+      if (!upstream.ok && upstream.status !== 206) {
+        try { await upstream.body?.cancel?.(); } catch (e) {}
+        return res.status(502).json({ error: 'upstream error', status: upstream.status });
+      }
+      return proxyUpstream(upstream, fmt);
+    }
+
+    if (!mux.available()) {
+      try {
+        const out = await mux.downloadToFile(fmt.url, fmt.contentLength, mux.tmpFile());
+        const ext = fmt.hasVideo ? 'mp4' : 'm4a';
+        return streamDownloadFile(res, out, `tojey-${videoId}-${fmt.itag}.${ext}`, fmt.mimeType);
+      } catch (e) {
+        return res.status(502).json({ error: 'download failed', detail: String(e.message).slice(0, 120) });
+      }
+    }
+
+    // Video-only adaptive -> remux with the best audio track (HD with audio).
+    if (fmt.hasVideo && !fmt.hasAudio) {
+      if (wantMux) {
+        const audio = bestAudio();
+        if (audio && audio.url) {
+          try {
+            const out = await mux.muxToFile(fmt, audio);
+            return streamDownloadFile(res, out, `tojey-${videoId}-${fmt.itag}-muxed.mp4`, 'video/mp4');
+          } catch (e) {
+            if (!e.gated) console.warn('yt:mux failed', String(e.message).slice(0, 160));
+            // Gate-limited or failed: fall back to the muxed progressive below.
+          }
+        }
+        const prog = bestProgressive();
+        if (prog && prog.url) {
+          const upstream = await fetchPlain(prog.url);
+          if (upstream.ok || upstream.status === 206) {
+            res.set('X-Tojey-Fallback', 'progressive');
+            return proxyUpstream(upstream, prog);
+          }
+          try { await upstream.body?.cancel?.(); } catch (e) {}
+        }
+      }
+      // No remux requested or fallback failed: hand over the raw video-only file.
+      try {
+        const out = await mux.downloadToFile(fmt.url, fmt.contentLength, mux.tmpFile());
+        return streamDownloadFile(res, out, `tojey-${videoId}-${fmt.itag}.mp4`, fmt.mimeType);
+      } catch (e) {
+        return res.status(502).json({ error: 'download failed' });
+      }
+    }
+
+    // Audio-only adaptive -> raw file in its own container (AAC = .m4a,
+    // Opus = .webm). If gated, extract audio from the muxed progressive
+    // stream instead (that path always yields MP4/AAC).
+    if (fmt.hasAudio && !fmt.hasVideo) {
+      const isMp4 = /audio\/mp4/.test(fmt.mimeType || '') || /mp4a/.test(fmt.codecs || '');
+      const ext = isMp4 ? 'm4a' : 'webm';
+      const tmpExt = isMp4 ? '.m4a' : '.webm';
+      try {
+        const out = await mux.downloadToFile(fmt.url, fmt.contentLength, mux.tmpFile(tmpExt));
+        return streamDownloadFile(res, out, `tojey-${videoId}-${fmt.itag}.${ext}`, fmt.mimeType || 'audio/mp4');
+      } catch (e) {
+        const prog = bestProgressive();
+        if (prog && prog.url) {
+          const tmp = mux.tmpFile('.mp4');
+          try {
+            await mux.downloadToFile(prog.url, prog.contentLength, tmp);
+            const out = mux.tmpFile('.m4a');
+            await mux.extractAudioFile(tmp, out);
+            await mux.cleanup(tmp);
+            return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
+          } catch (e2) { await mux.cleanup(tmp); }
+        }
+        return res.status(502).json({ error: 'download failed' });
+      }
+    }
+
+    return res.status(502).json({ error: 'no playable stream' });
+  };
+
+  try {
+    if (download) {
+      let streams = await yt.playerStreams(videoId, false);
+      const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
+      if (!all.some((f) => f.url)) streams = await yt.playerStreams(videoId, true);
+      return await downloadFormat(streams, pickFormat(streams, itag));
+    }
+
+    // Playback byte proxy: re-resolve once if the signed URL is rejected, and
+    // forward the client's Range so dash.js can seek.
+    const attempt = async (skipCache) => {
+      const streams = await yt.playerStreams(videoId, skipCache);
+      const fmt = pickFormat(streams, itag);
+      if (!fmt || !fmt.url) return { upstream: null, fmt: null };
+      const headers = { 'User-Agent': YT_UA, Accept: '*/*' };
+      if (req.headers.range) headers.Range = req.headers.range;
+      const upstream = await fetch(fmt.url, { headers });
+      return { upstream, fmt };
+    };
+    let { upstream, fmt } = await attempt(false);
+    if (upstream && (upstream.status === 403 || upstream.status === 410)) {
+      try { await upstream.body?.cancel?.(); } catch (e) {}
+      ({ upstream, fmt } = await attempt(true));
+    }
+    if (!upstream) return res.status(502).json({ error: 'no playable stream' });
+    if (!upstream.ok && upstream.status !== 206) {
+      return res.status(upstream.status === 403 ? 502 : upstream.status).json({ error: 'upstream error', status: upstream.status });
+    }
+    proxyUpstream(upstream, fmt);
   } catch (e) {
     console.error('yt:media error', e.message);
     if (!res.headersSent) res.status(502).json({ error: 'media unavailable', detail: e.message.slice(0, 200) });

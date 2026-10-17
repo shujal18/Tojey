@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, BookmarkCheck, X, Search } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, MoreVertical, Users, LogOut } from 'lucide-react';
 import YoutubePlayer from '../components/YoutubePlayer';
 import YoutubeBrowse from '../components/YoutubeBrowse';
 import DownloadMenu from '../components/DownloadMenu';
+import { useWatchTogether } from '../services/WatchTogetherContext';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -70,6 +71,18 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   useEffect(() => { setSaved(getSaved()); }, []);
 
+  // Watch Together: when a shared room starts (or as the partner), open the exact
+  // same video locally so both players show the same thing.
+  const { room } = useWatchTogether();
+  useEffect(() => {
+    const rid = room && sanitizeVideoId(room.videoId);
+    if (!rid) return;
+    setWatch((prev) => {
+      if (prev && sanitizeVideoId(prev.videoId) === rid) return prev;
+      return { videoId: rid, title: room.title || 'Shared video', channelTitle: 'Watch together' };
+    });
+  }, [room && room.videoId, room && room.roomId]);
+
   const authHeaders = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token]);
 
   const fetchPage = useCallback(async (cat, pageToken, opts = {}) => {
@@ -128,7 +141,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           dlMap={Object.fromEntries(saved.map((s) => [s.videoId, true]))}
         />
         {!!watch && (
-          <WatchModal item={watch} token={token} onClose={() => setWatch(null)} saved={isSaved(watch.videoId)} onToggleSave={() => toggleSave(watch)} />
+          <WatchModal item={watch} token={token} onClose={() => setWatch(null)} />
         )}
       </div>
     );
@@ -244,7 +257,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       )}
 
       {!!watch && (
-        <WatchModal item={watch} token={token} onClose={() => setWatch(null)} saved={isSaved(watch.videoId)} onToggleSave={() => toggleSave(watch)} />
+        <WatchModal item={watch} token={token} onClose={() => setWatch(null)} />
       )}
     </div>
   );
@@ -252,10 +265,19 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
 const headerBtnStyle = { background: 'none', border: 'none', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center' };
 
-function WatchModal({ item, token, onClose, saved, onToggleSave }) {
+function WatchModal({ item, token, onClose }) {
   const { theme } = useTheme();
   const [showDownload, setShowDownload] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const vid = sanitizeVideoId(item.videoId);
+  const wt = useWatchTogether();
+  const inRoom = !!(wt.room && sanitizeVideoId(wt.room.videoId) === vid);
+  const partnerName = (wt.partner && wt.partner.displayName) || 'Friend';
+  const partnerOnline = wt.room ? (wt.room.partnerOnline !== false) : (wt.partner ? wt.partner.isOnline : false);
+
+  const onController = useCallback((c) => { wt.registerController(c); }, [wt.registerController]);
+  const onUserAction = useCallback((action, position) => { wt.reportLocal(action, position); }, [wt.reportLocal]);
+
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -268,35 +290,80 @@ function WatchModal({ item, token, onClose, saved, onToggleSave }) {
           width: '100%', maxWidth: 980, maxHeight: '92vh', boxShadow: theme.frameShadow,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.panelHeader || theme.background }}>
+        <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.panelHeader || theme.background, position: 'relative' }}>
           <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</div>
             <div style={{ fontSize: 12, color: theme.textSecondary }}>{item.channelTitle}</div>
           </div>
+
+          {inRoom && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 16, background: theme.primaryLight || 'rgba(124,58,237,0.14)', color: theme.primary, fontSize: 12, fontWeight: 700 }}>
+              <Users size={14} />
+              <span style={{ whiteSpace: 'nowrap' }}>{partnerName}{partnerOnline ? '' : ' (reconnecting…)'}</span>
+              <button
+                onClick={wt.leaveRoom}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, border: 'none', cursor: 'pointer', background: theme.primary, color: '#fff', borderRadius: 14, padding: '4px 10px', fontSize: 11, fontWeight: 700 }}
+              >
+                <LogOut size={12} /> Leave
+              </button>
+            </div>
+          )}
+
           <button
-            onClick={onToggleSave}
-            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: saved ? theme.primaryLight : theme.panelBg, color: saved ? theme.primary : theme.textSecondary }}
-            aria-label="Save for offline"
-            title="Save for offline"
+            onClick={() => setMenuOpen((o) => !o)}
+            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.panelBg, color: theme.text }}
+            aria-label="Video options"
+            title="Video options"
           >
-            {saved ? <BookmarkCheck size={18} /> : <Bookmark size={18} />}
+            <MoreVertical size={18} />
           </button>
-          <button
-            onClick={() => vid && setShowDownload(true)}
-            disabled={!vid}
-            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: vid ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.primary, color: '#fff', opacity: vid ? 1 : 0.5 }}
-            aria-label="Download"
-            title="Download as video or audio"
-          >
-            <Download size={18} />
-          </button>
+          {menuOpen && (
+            <div style={{ position: 'absolute', top: 50, right: 12, minWidth: 190, background: theme.panelBg, borderRadius: 12, overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', border: `1px solid ${theme.border}`, zIndex: 5 }}>
+              <button
+                onClick={() => { setMenuOpen(false); if (vid) setShowDownload(true); }}
+                disabled={!vid}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', border: 'none', cursor: vid ? 'pointer' : 'not-allowed', padding: '12px 14px', fontSize: 13, fontWeight: 600, background: 'transparent', color: theme.text, opacity: vid ? 1 : 0.5 }}
+              >
+                <Download size={16} /> Download
+              </button>
+              <button
+                onClick={() => { setMenuOpen(false); if (vid) wt.sendInvite({ videoId: vid, title: item.title }); }}
+                disabled={!vid || inRoom}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', border: 'none', cursor: (vid && !inRoom) ? 'pointer' : 'not-allowed', padding: '12px 14px', fontSize: 13, fontWeight: 600, background: 'transparent', color: theme.text, opacity: (vid && !inRoom) ? 1 : 0.5 }}
+              >
+                <Users size={16} /> Play with Friend
+              </button>
+            </div>
+          )}
         </div>
-        <div style={{ background: '#000', width: '100%' }}>
+        <div style={{ background: '#000', width: '100%', position: 'relative' }}>
           {vid ? (
-            <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} />
+            <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} onController={onController} onUserAction={onUserAction} />
           ) : (
             <div style={{ color: theme.textSecondary, textAlign: 'center', padding: 30 }}>Video unavailable</div>
+          )}
+          {!!wt.partnerLeft && sanitizeVideoId(wt.partnerLeft.videoId) === vid && (
+            <div style={{ position: 'absolute', inset: 0, background: 'rgba(8,5,14,0.82)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, textAlign: 'center', padding: 24 }}>
+              <div style={{ color: '#fff', fontSize: 15, fontWeight: 700 }}>
+                {(wt.partnerLeft.by && wt.partnerLeft.by.displayName) || 'Your friend'} left the room.
+              </div>
+              <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>Your video is paused.</div>
+              <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+                <button
+                  onClick={() => { wt.resetPartnerLeft(); wt.leaveRoom(); }}
+                  style={{ background: theme.primary, color: '#fff', border: 'none', borderRadius: 20, padding: '9px 16px', fontWeight: 700, cursor: 'pointer', fontSize: 13 }}
+                >
+                  Watch alone
+                </button>
+                <button
+                  onClick={() => { wt.resetPartnerLeft(); if (vid) wt.sendInvite({ videoId: vid, title: item.title }); }}
+                  style={{ background: 'none', color: '#fff', border: '1px solid rgba(255,255,255,0.4)', borderRadius: 20, padding: '9px 16px', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+                >
+                  Start new session
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
