@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
 import { Play, RotateCcw, Gauge } from 'lucide-react';
+import YouTubeEmbed from './YouTubeEmbed';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -320,13 +321,13 @@ export default function YoutubePlayer({
         style={{ width: '100%', height: '100%', objectFit: fill ? 'contain' : 'cover', background: '#000', display: useEmbed ? 'none' : 'block' }}
       />
       {useEmbed && (
-        <iframe
-          key={videoId}
-          src={embedUrl(videoId, { autoPlay })}
-          title="YouTube video player"
-          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-          allowFullScreen
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, background: '#000' }}
+        <YouTubeEmbed
+          videoId={videoId}
+          autoPlay={autoPlay}
+          poster={poster}
+          fill={fill}
+          style={{ position: 'absolute', inset: 0 }}
+          onEnded={() => { onEndedRef.current && onEndedRef.current(); }}
         />
       )}
       {state === 'loading' && (

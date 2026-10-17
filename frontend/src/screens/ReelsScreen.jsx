@@ -68,6 +68,10 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const seenVideoIdsRef = useRef(new Set());
   const failedVideoIdsRef = useRef(new Set());
   const currentVideoIdRef = useRef(null);
+  // Set once native playback proves broken (e.g. the backend's egress IP is
+  // blocked by YouTube). Every clip fails identically, so later clips go
+  // straight to the embed instead of re-trying the proxy for each one.
+  const nativeBrokenRef = useRef(false);
 
   const videosRef = useRef([]);
   const nextPageTokenRef = useRef(null);
@@ -286,16 +290,24 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [viewH]);
 
   const playAt = useCallback((idx) => {
-    const el0 = playerElsRef.current[0];
-    const el1 = playerElsRef.current[1];
-    if (!el0 || !el1) return;
-    setEmbedVideoId(null);
     const list = videosRef.current;
     const videoId = sanitizeVideoId(list[idx] && list[idx].videoId);
     if (!videoId) {
       currentVideoIdRef.current = null;
       return;
     }
+    // Known-broken native path: show the embed for this clip immediately.
+    if (nativeBrokenRef.current) {
+      try { playerElsRef.current[0] && playerElsRef.current[0].pause(); } catch (e) {}
+      try { playerElsRef.current[1] && playerElsRef.current[1].pause(); } catch (e) {}
+      currentVideoIdRef.current = videoId;
+      setEmbedVideoId(videoId);
+      return;
+    }
+    const el0 = playerElsRef.current[0];
+    const el1 = playerElsRef.current[1];
+    if (!el0 || !el1) return;
+    setEmbedVideoId(null);
     const a = activeSlotRef.current;
     const b = 1 - a;
     const alreadyActive = loadedVideoIdBySlotRef.current[a] === videoId;
@@ -355,15 +367,14 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
 
   // Retry once with a cache-busting query (forces the proxy to re-resolve a
   // possibly-expired upstream URL). If it still fails, fall back to the official
-  // YouTube embed for this clip rather than skipping it: the embed plays from the
-  // viewer's own IP, so it works even when the backend's IP is flagged.
+  // YouTube embed: the embed plays from the viewer's own IP, so it works even
+  // when the backend's IP is flagged.
   const errorRetriesRef = useRef(0);
-  const handleVideoError = useCallback(() => {
-    const slot = activeSlotRef.current;
+  const handleVideoError = useCallback((slot) => {
     const el = playerElsRef.current[slot];
     const vid = loadedVideoIdBySlotRef.current[slot];
     if (!el || !vid) return;
-    if (errorRetriesRef.current < 1) {
+    if (!nativeBrokenRef.current && slot === activeSlotRef.current && errorRetriesRef.current < 1) {
       errorRetriesRef.current += 1;
       const fresh = mediaSrc(vid, token, Date.now());
       el.src = fresh;
@@ -372,10 +383,15 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       return;
     }
     errorRetriesRef.current = 0;
+    nativeBrokenRef.current = true;
     loadedVideoIdBySlotRef.current[slot] = null;
-    currentVideoIdRef.current = null;
     try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
-    setEmbedVideoId(vid);
+    // Only the visible slot drives the embed; a preload-slot failure just flips
+    // the flag so the clip embeds the moment it becomes active.
+    if (slot === activeSlotRef.current) {
+      currentVideoIdRef.current = null;
+      setEmbedVideoId(vid);
+    }
   }, [token]);
 
   const handleSlotEnded = useCallback((slot) => {
@@ -384,8 +400,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [handleEnded]);
 
   const handleSlotError = useCallback((slot) => {
-    if (slot !== activeSlotRef.current) return;
-    handleVideoError();
+    handleVideoError(slot);
   }, [handleVideoError]);
 
   useEffect(() => {
@@ -590,7 +605,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   position: 'absolute', inset: 0, width: '100%', height: '100%',
                   objectFit: 'contain', background: '#000',
                   zIndex: 3,
-                  opacity: (overlayVideoId && activeSlot === 0) ? 1 : 0,
+                  opacity: (!embedVideoId && overlayVideoId && activeSlot === 0) ? 1 : 0,
                   pointerEvents: 'none',
                 }}
               />
@@ -607,7 +622,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   position: 'absolute', inset: 0, width: '100%', height: '100%',
                   objectFit: 'contain', background: '#000',
                   zIndex: 2,
-                  opacity: (overlayVideoId && activeSlot === 1) ? 1 : 0,
+                  opacity: (!embedVideoId && overlayVideoId && activeSlot === 1) ? 1 : 0,
                   pointerEvents: 'none',
                 }}
               />
@@ -622,7 +637,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   />
                 </div>
               )}
-              {overlayVideoId && paused && (
+              {!embedVideoId && overlayVideoId && paused && (
                 <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
                   <div style={{
                     width: 64, height: 64, borderRadius: 32, background: 'rgba(0,0,0,0.55)',
