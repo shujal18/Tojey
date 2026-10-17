@@ -14,6 +14,21 @@ function loadDash() {
   return dashModulePromise;
 }
 
+// Once the backend reports that YouTube is refusing anonymous playback (its
+// egress IP is flagged), every other video will fail the same way. Remember it
+// briefly so later videos skip the doomed native attempt and go straight to the
+// embed — turnstile-free and instant. Re-probes automatically when it expires.
+let egressBlockedUntil = 0;
+const EGRESS_BLOCK_MEMO_MS = 10 * 60 * 1000;
+function isEgressBlocked() {
+  return Date.now() < egressBlockedUntil;
+}
+function notePlaybackReason(raw) {
+  if (/bot|sign in|login|verify/i.test(String(raw || ''))) {
+    egressBlockedUntil = Date.now() + EGRESS_BLOCK_MEMO_MS;
+  }
+}
+
 export function streamUrl(videoId, itag, token) {
   return `${API}/api/yt/media/${videoId}?itag=${itag}&token=${encodeURIComponent(token || '')}`;
 }
@@ -27,6 +42,26 @@ export function downloadUrl(videoId, itag, token) {
 // travels in the query string so a bare <video>/dash.js fetch is authenticated.
 export function dashUrl(videoId, token) {
   return `${API}/api/yt/dash/${videoId}?token=${encodeURIComponent(token || '')}`;
+}
+
+// Official YouTube embed. Used as a last-resort fallback when our own byte proxy
+// cannot resolve a stream (e.g. the backend's datacenter IP is flagged by
+// YouTube and every anonymous innertube client returns LOGIN_REQUIRED). The
+// iframe runs in the viewer's browser, so playback uses *their* IP and needs no
+// sign-in or cookie. `origin` matches this page so YouTube accepts the embed.
+export function embedUrl(videoId, { autoPlay = true, loop = false, controls = true, mute = false } = {}) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const p = new URLSearchParams({
+    autoplay: autoPlay ? '1' : '0',
+    playsinline: '1',
+    rel: '0',
+    modestbranding: '1',
+  });
+  if (!controls) p.set('controls', '0');
+  if (mute) p.set('mute', '1');
+  if (loop) { p.set('loop', '1'); p.set('playlist', videoId); }
+  if (origin) p.set('origin', origin);
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?${p.toString()}`;
 }
 
 // Hands the file to the browser's own downloader. The proxy sets
@@ -58,6 +93,7 @@ export default function YoutubePlayer({
   onError,
   style,
   fill = false,
+  embedFallback = true,
 }) {
   const { theme } = useTheme();
   const videoRef = useRef(null);
@@ -71,6 +107,7 @@ export default function YoutubePlayer({
   const [errMsg, setErrMsg] = useState('');
   const [muted, setMuted] = useState(autoPlay);
   const [fallback, setFallback] = useState(false);
+  const [useEmbed, setUseEmbed] = useState(false);
   const [progItag, setProgItag] = useState(18);
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
@@ -80,6 +117,13 @@ export default function YoutubePlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoId) return;
+    // Known-blocked egress: skip the native attempt entirely (the embed is
+    // interactive and autoplays from the viewer's IP).
+    if (embedFallback && videoId && isEgressBlocked()) {
+      setUseEmbed(true);
+      setState('ready');
+      return;
+    }
     let cancelled = false;
     let player = null;
     let triedFallback = false;
@@ -89,6 +133,7 @@ export default function YoutubePlayer({
     setLevels([]);
     setLevel(-1);
     setFallback(false);
+    setUseEmbed(false);
     setMenuOpen(false);
     video.muted = autoPlay;
 
@@ -103,6 +148,17 @@ export default function YoutubePlayer({
     const fail = (msg) => {
       if (cancelled) return;
       const raw = String(msg || '');
+      notePlaybackReason(raw);
+      // Both native paths failed. The usual cause is YouTube flagging the
+      // backend's egress IP (LOGIN_REQUIRED / "confirm you're not a bot"), which
+      // no client rotation can fix. Fall back to the official embed, which plays
+      // from the viewer's own IP with no sign-in required.
+      if (embedFallback && videoId) {
+        destroy();
+        setUseEmbed(true);
+        setState('ready');
+        return;
+      }
       // Surface a friendly message for YouTube's anti-bot notice; the concrete
       // per-client reason is logged server-side for the operator.
       const shown = /bot|sign in|login|verify/i.test(raw)
@@ -257,9 +313,22 @@ export default function YoutubePlayer({
         preload="metadata"
         onCanPlay={handleCanPlay}
         onEnded={fallback ? () => { onEndedRef.current && onEndedRef.current(); } : undefined}
-        onError={fallback ? () => { setState('error'); setErrMsg('Playback failed'); } : undefined}
-        style={{ width: '100%', height: '100%', objectFit: fill ? 'contain' : 'cover', background: '#000' }}
+        onError={fallback ? () => {
+          if (embedFallback && videoId) { setUseEmbed(true); setState('ready'); }
+          else { setState('error'); setErrMsg('Playback failed'); }
+        } : undefined}
+        style={{ width: '100%', height: '100%', objectFit: fill ? 'contain' : 'cover', background: '#000', display: useEmbed ? 'none' : 'block' }}
       />
+      {useEmbed && (
+        <iframe
+          key={videoId}
+          src={embedUrl(videoId, { autoPlay })}
+          title="YouTube video player"
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowFullScreen
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, background: '#000' }}
+        />
+      )}
       {state === 'loading' && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div className="spinner" style={{ width: 40, height: 40, border: '3px solid rgba(255,255,255,0.25)', borderTopColor: theme.primary, borderRadius: '50%' }} />

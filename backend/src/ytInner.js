@@ -93,6 +93,10 @@ function cookieHeader() {
   return c ? String(c).trim() : '';
 }
 const PLAYBACK_TTL = 30 * 60 * 1000;
+// How long to remember a "no playable source" result (e.g. the egress IP being
+// bot-checked). Long enough to stop repeated innertube bursts, short enough to
+// recover quickly if YouTube lifts the block.
+const NEGATIVE_TTL = 90 * 1000;
 
 const CHANNEL_TAB_PARAMS = {
   videos: 'EgZ2aWRlb3PyBgQKAjoA',
@@ -919,7 +923,14 @@ async function playerResponse(videoId, skipCache = false) {
     // Every client was bot-checked/unplayable. Return whatever we saw so the
     // caller can surface the playability reason to the UI instead of throwing a
     // generic network error.
-    if (firstNonOk && typeof firstNonOk === 'object' && firstNonOk.playabilityStatus) return firstNonOk;
+    if (firstNonOk && typeof firstNonOk === 'object' && firstNonOk.playabilityStatus) {
+      // Remember the failure briefly so the frontend's DASH-then-progressive
+      // fallback (and any repeat taps) don't each re-fire four innertube calls —
+      // a burst of requests is exactly what keeps the egress IP flagged. The
+      // frontend switches to the official embed as soon as it sees this.
+      cacheSet(key, firstNonOk, NEGATIVE_TTL);
+      return firstNonOk;
+    }
     if (firstNonOk instanceof Error) throw firstNonOk;
     throw new Error('no playable stream');
   })();

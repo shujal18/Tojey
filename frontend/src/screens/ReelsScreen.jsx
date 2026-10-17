@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
-import { streamUrl } from '../components/YoutubePlayer';
+import { streamUrl, embedUrl } from '../components/YoutubePlayer';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -54,6 +54,10 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const [viewH, setViewH] = useState(() => (typeof window !== 'undefined' ? window.innerHeight : 600));
   const [loadMoreSpinner, setLoadMoreSpinner] = useState(false);
   const [activeSlot, setActiveSlot] = useState(0);
+  // When the native proxy can't play the active short (e.g. the backend's
+  // datacenter IP is flagged by YouTube), we show the official embed for it
+  // instead of skipping. Cleared every time the active clip changes.
+  const [embedVideoId, setEmbedVideoId] = useState(null);
 
   const shellRef = useRef(null);
   const toastTimerRef = useRef(null);
@@ -285,6 +289,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     const el0 = playerElsRef.current[0];
     const el1 = playerElsRef.current[1];
     if (!el0 || !el1) return;
+    setEmbedVideoId(null);
     const list = videosRef.current;
     const videoId = sanitizeVideoId(list[idx] && list[idx].videoId);
     if (!videoId) {
@@ -334,21 +339,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     setActiveSlot(target);
   }, [token]);
 
-  const skipOnError = useCallback((erroredVideoId) => {
-    if (erroredVideoId) failedVideoIdsRef.current.add(erroredVideoId);
-    loadedVideoIdBySlotRef.current[activeSlotRef.current] = null;
-    currentVideoIdRef.current = null;
-    const cur = activeIdxRef.current;
-    let next = cur + 1;
-    while (videosRef.current[next] && failedVideoIdsRef.current.has(sanitizeVideoId(videosRef.current[next].videoId))) next++;
-    if (videosRef.current[next]) {
-      switchToIndex(next);
-    } else {
-      showToast('Some videos are unavailable');
-      fetchFeed(category, { refresh: true });
-    }
-  }, [switchToIndex, showToast, category, fetchFeed]);
-
   const handleEnded = useCallback(() => {
     if (pausedRef.current) return;
     const cur = activeIdxRef.current;
@@ -364,7 +354,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, [switchToIndex]);
 
   // Retry once with a cache-busting query (forces the proxy to re-resolve a
-  // possibly-expired upstream URL), then skip the clip like the old YT player did.
+  // possibly-expired upstream URL). If it still fails, fall back to the official
+  // YouTube embed for this clip rather than skipping it: the embed plays from the
+  // viewer's own IP, so it works even when the backend's IP is flagged.
   const errorRetriesRef = useRef(0);
   const handleVideoError = useCallback(() => {
     const slot = activeSlotRef.current;
@@ -380,8 +372,11 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       return;
     }
     errorRetriesRef.current = 0;
-    skipOnError(vid);
-  }, [token, skipOnError]);
+    loadedVideoIdBySlotRef.current[slot] = null;
+    currentVideoIdRef.current = null;
+    try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
+    setEmbedVideoId(vid);
+  }, [token]);
 
   const handleSlotEnded = useCallback((slot) => {
     if (slot !== activeSlotRef.current) return;
@@ -616,6 +611,17 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   pointerEvents: 'none',
                 }}
               />
+              {embedVideoId && (
+                <div style={{ position: 'absolute', inset: 0, zIndex: 4, background: '#000', pointerEvents: 'none' }}>
+                  <iframe
+                    key={embedVideoId}
+                    src={embedUrl(embedVideoId, { autoPlay: true, loop: true, controls: false, mute: true })}
+                    title="YouTube Short"
+                    allow="autoplay; encrypted-media; picture-in-picture"
+                    style={{ width: '100%', height: '100%', border: 0 }}
+                  />
+                </div>
+              )}
               {overlayVideoId && paused && (
                 <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
                   <div style={{
