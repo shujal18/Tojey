@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
-import { streamUrl } from '../components/YoutubePlayer';
+import { streamUrl, ytEgressBlocked, noteEgressBlocked } from '../components/YoutubePlayer';
 import YouTubeEmbed from '../components/YouTubeEmbed';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -71,8 +71,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const currentVideoIdRef = useRef(null);
   // Set once native playback proves broken (e.g. the backend's egress IP is
   // blocked by YouTube). Every clip fails identically, so later clips go
-  // straight to the embed instead of re-trying the proxy for each one.
-  const nativeBrokenRef = useRef(false);
+  // straight to the embed instead of re-trying the proxy for each one. Pre-seeded
+  // from the shared memo so entering Shorts after a blocked watch video is instant.
+  const nativeBrokenRef = useRef(ytEgressBlocked());
 
   const videosRef = useRef([]);
   const nextPageTokenRef = useRef(null);
@@ -385,6 +386,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     }
     errorRetriesRef.current = 0;
     nativeBrokenRef.current = true;
+    noteEgressBlocked();
     loadedVideoIdBySlotRef.current[slot] = null;
     try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
     // Only the visible slot drives the embed; a preload-slot failure just flips

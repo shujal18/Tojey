@@ -29,6 +29,14 @@ function notePlaybackReason(raw) {
     egressBlockedUntil = Date.now() + EGRESS_BLOCK_MEMO_MS;
   }
 }
+// Shared with the Shorts feed: once we know YouTube is refusing this egress IP,
+// the feed can skip the doomed byte-proxy attempt and go straight to the embed.
+export function ytEgressBlocked() {
+  return isEgressBlocked();
+}
+export function noteEgressBlocked() {
+  egressBlockedUntil = Date.now() + EGRESS_BLOCK_MEMO_MS;
+}
 
 export function streamUrl(videoId, itag, token) {
   return `${API}/api/yt/media/${videoId}?itag=${itag}&token=${encodeURIComponent(token || '')}`;
