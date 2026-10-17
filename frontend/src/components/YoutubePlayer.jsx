@@ -45,26 +45,6 @@ export function dashUrl(videoId, token) {
   return `${API}/api/yt/dash/${videoId}?token=${encodeURIComponent(token || '')}`;
 }
 
-// Official YouTube embed. Used as a last-resort fallback when our own byte proxy
-// cannot resolve a stream (e.g. the backend's datacenter IP is flagged by
-// YouTube and every anonymous innertube client returns LOGIN_REQUIRED). The
-// iframe runs in the viewer's browser, so playback uses *their* IP and needs no
-// sign-in or cookie. `origin` matches this page so YouTube accepts the embed.
-export function embedUrl(videoId, { autoPlay = true, loop = false, controls = true, mute = false } = {}) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const p = new URLSearchParams({
-    autoplay: autoPlay ? '1' : '0',
-    playsinline: '1',
-    rel: '0',
-    modestbranding: '1',
-  });
-  if (!controls) p.set('controls', '0');
-  if (mute) p.set('mute', '1');
-  if (loop) { p.set('loop', '1'); p.set('playlist', videoId); }
-  if (origin) p.set('origin', origin);
-  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?${p.toString()}`;
-}
-
 // Hands the file to the browser's own downloader. The proxy sets
 // `Content-Disposition: attachment`, so the browser saves it instead of
 // navigating. A synthetic (non-user-gesture) click may be ignored by some

@@ -5,6 +5,11 @@ import { Play, Pause, Volume2, VolumeX, Maximize } from 'lucide-react';
 // Official YouTube IFrame Player API, loaded once and cached. Using the API
 // (instead of a bare <iframe>) lets us hide YouTube's own control bar
 // (`controls: 0`) and drive playback from our own themed overlay.
+// Remembers the viewer's sound choice for the Shorts feed. Once they unmute one
+// short, later shorts start with sound too (the gesture that unmuted also
+// satisfies the browser's autoplay policy).
+let shortsSoundOn = false;
+
 let ytApiPromise = null;
 function loadYouTubeApi() {
   if (typeof window === 'undefined') return Promise.reject(new Error('no window'));
@@ -39,7 +44,7 @@ function fmtTime(s) {
 // Plays a YouTube video via the IFrame API with our own controls. `fill` makes
 // it occupy the parent (16:9 otherwise). Falls back to muted autoplay when the
 // browser blocks sound, matching the rest of the app.
-export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style, fill = false, poster }) {
+export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style, fill = false, poster, variant = 'full', loop = false }) {
   const { theme } = useTheme();
   const wrapRef = useRef(null);
   const mountRef = useRef(null);
@@ -50,7 +55,7 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState(false);
   const [started, setStarted] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(variant === 'short');
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loadedFrac, setLoadedFrac] = useState(0);
@@ -107,21 +112,26 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
           disablekb: 1,
           iv_load_policy: 3,
           origin: window.location.origin,
+          ...(loop ? { loop: 1, playlist: videoId } : {}),
         },
         events: {
           onReady: (e) => {
             if (cancelled) return;
             setReady(true);
             try { setDuration(e.target.getDuration() || 0); } catch (err) {}
-            try { setMuted(e.target.isMuted()); } catch (err) {}
+            // Shorts start muted (autoplay) unless the viewer already turned
+            // sound on for the feed. The watch screen keeps sound by default.
+            const startMuted = variant === 'short' ? !shortsSoundOn : false;
+            if (startMuted) { try { e.target.mute(); } catch (err) {} setMuted(true); }
+            else { try { setMuted(e.target.isMuted()); } catch (err) {} }
             if (autoPlay) {
               try { e.target.playVideo(); } catch (err) {}
-              // If unmuted autoplay is blocked by policy, retry muted so it plays.
+              // If autoplay was blocked by policy, retry muted so it plays.
               readyTimeout = setTimeout(() => {
                 const p = playerRef.current;
                 if (!p || cancelled) return;
                 try {
-                  if (p.getPlayerState() !== YT.PlayerState.PLAYING) {
+                  if (p.getPlayerState() !== YT.PlayerState.PLAYING && !p.isMuted()) {
                     p.mute();
                     setMuted(true);
                     p.playVideo();
@@ -175,7 +185,7 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
       playerRef.current = null;
       if (mountRef.current) mountRef.current.innerHTML = '';
     };
-  }, [videoId, autoPlay]);
+  }, [videoId, autoPlay, variant, loop]);
 
   useEffect(() => () => { if (hideTimerRef.current) clearTimeout(hideTimerRef.current); }, []);
 
@@ -195,10 +205,17 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
     if (!p) return;
     bumpControls();
     try {
-      if (p.isMuted()) { p.unMute(); setMuted(false); }
-      else { p.mute(); setMuted(true); }
+      if (p.isMuted()) {
+        p.unMute();
+        setMuted(false);
+        if (variant === 'short') shortsSoundOn = true;
+      } else {
+        p.mute();
+        setMuted(true);
+        if (variant === 'short') shortsSoundOn = false;
+      }
     } catch (err) {}
-  }, [bumpControls]);
+  }, [bumpControls, variant]);
 
   const enterFullscreen = useCallback((e) => {
     e.stopPropagation();
@@ -222,6 +239,38 @@ export default function YouTubeEmbed({ videoId, autoPlay = true, onEnded, style,
   const onScrubUp = useCallback(() => { scrubbingRef.current = false; setScrubbing(false); bumpControls(); }, [bumpControls]);
 
   const showBigButton = !playing;
+
+  // Compact player for the Shorts feed: no seek/time chrome, just the video and
+  // a sound toggle. Everything else (swipe, captions) is handled by the feed, so
+  // only the sound button opts back into pointer events (the wrapper is inert so
+  // vertical swipes pass through).
+  if (variant === 'short') {
+    return (
+      <div
+        ref={wrapRef}
+        style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, background: '#000', overflow: 'hidden', userSelect: 'none', ...style }}
+      >
+        <div ref={mountRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }} />
+        {!ready && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div className="spinner" style={{ width: 34, height: 34, border: '3px solid rgba(255,255,255,0.25)', borderTopColor: theme.primary, borderRadius: '50%' }} />
+          </div>
+        )}
+        <button
+          onClick={toggleMute}
+          title={muted ? 'Unmute' : 'Mute'}
+          style={{
+            position: 'absolute', right: 12, bottom: 16, zIndex: 6, pointerEvents: 'auto',
+            width: 42, height: 42, borderRadius: 21, border: 'none', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.55)', color: '#fff', backdropFilter: 'blur(2px)',
+          }}
+        >
+          {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div

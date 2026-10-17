@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
-import { streamUrl, embedUrl } from '../components/YoutubePlayer';
+import { streamUrl } from '../components/YoutubePlayer';
+import YouTubeEmbed from '../components/YouTubeEmbed';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -628,12 +629,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               />
               {embedVideoId && (
                 <div style={{ position: 'absolute', inset: 0, zIndex: 4, background: '#000', pointerEvents: 'none' }}>
-                  <iframe
-                    key={embedVideoId}
-                    src={embedUrl(embedVideoId, { autoPlay: true, loop: true, controls: false, mute: true })}
-                    title="YouTube Short"
-                    allow="autoplay; encrypted-media; picture-in-picture"
-                    style={{ width: '100%', height: '100%', border: 0 }}
+                  <YouTubeEmbed
+                    videoId={embedVideoId}
+                    autoPlay
+                    variant="short"
+                    loop
+                    style={{ position: 'absolute', inset: 0 }}
                   />
                 </div>
               )}
