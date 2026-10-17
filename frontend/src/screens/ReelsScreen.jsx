@@ -326,7 +326,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     const a = activeSlotRef.current;
     const b = 1 - a;
     const alreadyActive = loadedVideoIdBySlotRef.current[a] === videoId;
-    const target = alreadyActive ? a : b;
+    // First clip: keep slot `a` (0) so the slot we play is the one already marked
+    // active. Loading into the preload slot instead left the just-started video
+    // off the top of the stack for one render, which painted black until a
+    // scroll forced a repaint (video's first frames were never composited).
+    const noSlotLoaded = !loadedVideoIdBySlotRef.current[0] && !loadedVideoIdBySlotRef.current[1];
+    const target = (alreadyActive || noSlotLoaded) ? a : b;
 
     const el = target === 0 ? el0 : el1;
     if (loadedVideoIdBySlotRef.current[target] !== videoId) {
@@ -650,9 +655,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   }}
                   style={{
                     position: 'absolute', inset: 0, width: '100%', height: '100%',
-                    objectFit: 'contain', background: 'transparent',
-                    zIndex: 3,
-                    opacity: (!embedVideoId && overlayVideoId && activeSlot === 0) ? 1 : 0,
+                    objectFit: 'contain', background: '#000',
+                    // Always painted (never opacity:0): a <video> that starts while
+                    // hidden does not composite its first frame until a repaint,
+                    // which showed a black screen with audio only. The active slot
+                    // simply sits on top via z-index.
+                    zIndex: activeSlot === 0 ? 3 : 2,
                     pointerEvents: 'none',
                   }}
                 />
@@ -672,9 +680,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   }}
                   style={{
                     position: 'absolute', inset: 0, width: '100%', height: '100%',
-                    objectFit: 'contain', background: 'transparent',
-                    zIndex: 2,
-                    opacity: (!embedVideoId && overlayVideoId && activeSlot === 1) ? 1 : 0,
+                    objectFit: 'contain', background: '#000',
+                    zIndex: activeSlot === 1 ? 3 : 2,
                     pointerEvents: 'none',
                   }}
                 />

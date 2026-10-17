@@ -9,12 +9,11 @@ import ChatListScreen from './ChatListScreen';
 import ChatRoomScreen from './ChatRoomScreen';
 import ReelsScreen from './ReelsScreen';
 import YoutubeHomeScreen from './YoutubeHomeScreen';
-import DownloadsScreen from './DownloadsScreen';
 import SettingsScreen from './SettingsScreen';
 import HeadsUpBanner from '../components/HeadsUpBanner';
 import { useTheme } from '../theme/ThemeContext';
 import {
-  MessageCircle, Youtube, PlaySquare, Download, Settings as SettingsIcon, LogOut, Lock,
+  MessageCircle, Youtube, PlaySquare, Settings as SettingsIcon, LogOut, Lock,
 } from 'lucide-react';
 
 // Opens the ?chat=<userId> conversation a web-push notification click requested. Waits
@@ -206,16 +205,6 @@ export default function HomeLayout() {
                 </div>
               )}
 
-              {section === 'downloads' && (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
-                  <DownloadsScreen
-                    token={token}
-                    onBack={() => goSection('youtube')}
-                    onOpenChats={() => goSection('chats')}
-                  />
-                </div>
-              )}
-
               {section === 'settings' && (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
                   <SettingsScreen onLogout={logout} onBack={() => goSection('chats')} />
@@ -241,7 +230,6 @@ function NavRail({ section, onSelect, user, onLogout }) {
     { key: 'chats', label: 'Chats', icon: MessageCircle, badge: totalUnread },
     { key: 'youtube', label: 'YouTube', icon: Youtube },
     { key: 'shorts', label: 'Shorts', icon: PlaySquare },
-    { key: 'downloads', label: 'Downloads', icon: Download },
   ];
 
   const initial = (user.displayName || user.username || '?')[0].toUpperCase();

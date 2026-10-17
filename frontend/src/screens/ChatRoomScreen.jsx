@@ -982,11 +982,15 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
             whiteSpace: 'pre-wrap',
             overflowWrap: 'anywhere',
             maxWidth: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'stretch',
+            gap: 5,
           }}
         >
           {message.reply_to && (
             <div style={{
-              marginBottom: 4, marginLeft: -2, padding: '3px 8px',
+              marginBottom: 2, marginLeft: -2, padding: '3px 8px',
               background: isSent ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)',
               borderRadius: 6, borderLeft: '3px solid #6C3CE9',
               fontSize: 11, cursor: 'pointer',
@@ -1004,7 +1008,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
           {message.media_url && message.type === 'FILE' && <FileCard message={message} isSent={isSent} theme={theme} onOpen={() => window.open(resolveUrl(message.media_url), '_blank')} />}
 
           {!message.is_deleted_for_everyone && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 3, padding: '0 4px 2px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 0, padding: '0 4px 1px' }}>
               {message.is_view_once && <Lock size={10} color={isSent ? '#fff' : '#9B96A8'} />}
               {message.is_edited && <span style={{ fontSize: 10, opacity: 0.7, color: isSent ? 'rgba(255,255,255,0.7)' : '#9B96A8' }}>edited</span>}
               <span style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.75)' : '#9B96A8' }}>
@@ -1088,7 +1092,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
           </div>
         );
       default:
-        return <span style={{ fontSize: 15 }}>{m.content || ''}</span>;
+        return <span style={{ fontSize: 15, lineHeight: 1.45 }}>{m.content || ''}</span>;
     }
   }
 }

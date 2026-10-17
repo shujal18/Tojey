@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, X, Search, Bookmark } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, BookmarkCheck, X, Search } from 'lucide-react';
 import YoutubePlayer from '../components/YoutubePlayer';
 import YoutubeBrowse from '../components/YoutubeBrowse';
+import DownloadMenu from '../components/DownloadMenu';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -253,6 +254,7 @@ const headerBtnStyle = { background: 'none', border: 'none', cursor: 'pointer', 
 
 function WatchModal({ item, token, onClose, saved, onToggleSave }) {
   const { theme } = useTheme();
+  const [showDownload, setShowDownload] = useState(false);
   const vid = sanitizeVideoId(item.videoId);
   return (
     <div style={{
@@ -274,10 +276,20 @@ function WatchModal({ item, token, onClose, saved, onToggleSave }) {
           </div>
           <button
             onClick={onToggleSave}
-            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: saved ? theme.primaryLight : theme.primary, color: saved ? theme.primary : '#fff' }}
+            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: saved ? theme.primaryLight : theme.panelBg, color: saved ? theme.primary : theme.textSecondary }}
             aria-label="Save for offline"
+            title="Save for offline"
           >
-            {saved ? <Check size={18} /> : <Download size={18} />}
+            {saved ? <BookmarkCheck size={18} /> : <Bookmark size={18} />}
+          </button>
+          <button
+            onClick={() => vid && setShowDownload(true)}
+            disabled={!vid}
+            style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: vid ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.primary, color: '#fff', opacity: vid ? 1 : 0.5 }}
+            aria-label="Download"
+            title="Download as video or audio"
+          >
+            <Download size={18} />
           </button>
         </div>
         <div style={{ background: '#000', width: '100%' }}>
@@ -288,6 +300,9 @@ function WatchModal({ item, token, onClose, saved, onToggleSave }) {
           )}
         </div>
       </div>
+      {showDownload && vid && (
+        <DownloadMenu videoId={vid} token={token} title={item.title} onClose={() => setShowDownload(false)} />
+      )}
     </div>
   );
 }
