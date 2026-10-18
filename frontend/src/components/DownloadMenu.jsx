@@ -195,10 +195,10 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
               {tab === 'audio'
                 ? (videoOptions.length
                   ? 'No audio-only track for this video — the Video download already includes audio.'
-                  : 'No audio format available.')
+                  : 'No audio formats are available for this video.')
                 : (audioOptions.length
                   ? 'No video track for this video — try the Audio tab.'
-                  : 'No video format available.')}
+                  : 'No video formats are available for this video.')}
             </div>
           )}
 

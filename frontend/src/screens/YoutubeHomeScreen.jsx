@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, MoreVertical, Users, LogOut } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, Users, LogOut } from 'lucide-react';
 import YoutubePlayer from '../components/YoutubePlayer';
 import YoutubeBrowse from '../components/YoutubeBrowse';
 import DownloadMenu from '../components/DownloadMenu';
@@ -316,7 +316,7 @@ function WatchModal({ item, token, onClose }) {
             aria-label="Video options"
             title="Video options"
           >
-            <MoreVertical size={18} />
+            <Settings size={18} />
           </button>
           {menuOpen && (
             <div style={{ position: 'absolute', top: 50, right: 12, minWidth: 190, background: theme.panelBg, borderRadius: 12, overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', border: `1px solid ${theme.border}`, zIndex: 5 }}>

@@ -563,7 +563,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               onClick={handleTap}
               onScroll={handleScroll}
               style={{
-                position: 'absolute', inset: 0,
+                position: 'static', width: '100%', height: '100%',
                 overflowY: 'scroll',
                 scrollSnapType: 'y mandatory',
                 background: '#000',
@@ -632,8 +632,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               <div
                 style={{
                   position: 'absolute', top: 0, left: 0, width: '100%', height: viewH,
-                  transform: `translateY(${-activeIdx * viewH}px)`,
-                  transition: 'transform 0.15s ease-out',
                   pointerEvents: 'none',
                   zIndex: 4,
                   background: '#000',
