@@ -205,13 +205,14 @@ export default function YouTubeEmbed({
   useEffect(() => {
     const register = onControllerRef.current;
     if (!register) return undefined;
-    if (variant !== 'full') { register(null); return undefined; }
+    if (variant !== 'full') return undefined;
     let cancelled = false;
+    let ctrl = null;
     loadYouTubeApi().then(() => {
       if (cancelled) return;
       const p = playerRef.current;
-      if (!p) { register(null); return; }
-      const controller = {
+      if (!p) return;
+      ctrl = {
         isEmbed: true,
         isReady: () => readyRef.current,
         getTime: () => {
@@ -229,9 +230,12 @@ export default function YouTubeEmbed({
         seek: (t) => { try { p.seekTo(Math.max(0, t), true); } catch (e) {} },
         setRate: (r) => { try { if (p.setPlaybackRate) p.setPlaybackRate(r); } catch (e) {} },
       };
-      register(controller);
+      try { register(ctrl); } catch (e) {}
     });
-    return () => register(null);
+    return () => {
+      cancelled = true;
+      try { if (onControllerRef.current) onControllerRef.current(null); } catch (e) {}
+    };
   }, [variant, videoId, ready]);
 
   // Progress poll: drives the Shorts progress bar and reports length upward.
