@@ -233,6 +233,9 @@ export default function YouTubeEmbed({
     });
     return () => register(null);
   }, [variant, videoId, ready]);
+
+  // Progress poll: drives the Shorts progress bar and reports length upward.
+  useEffect(() => {
     const t = setInterval(() => {
       const p = playerRef.current;
       if (!p || typeof p.getCurrentTime !== 'function') return;
