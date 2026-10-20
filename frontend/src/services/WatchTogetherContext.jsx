@@ -40,16 +40,25 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const partnerRef = useRef(partner);
   partnerRef.current = partner;
 
-  // Server state -> local player. Searches only when drift passes a threshold so
-  // buffering hiccups don't cause repeated restarts.
-  const applyState = useCallback((st) => {
+  // Server state -> local player. Elapsed time is measured from when THIS client
+  // received the state (not the server's clock), so device clock skew can never
+  // turn into constant seeking. Small drift is corrected by nudging the playback
+  // rate; only large drift triggers a real seek.
+  const applyState = useCallback((raw) => {
     const c = controllerRef.current;
     if (!c || !c.isReady || !c.isReady() || c.isEmbed) return;
-    const expected = st.playing
-      ? st.position + Math.max(0, (Date.now() - st.serverNow) / 1000)
-      : st.position;
-    const drift = Math.abs((c.getTime() || 0) - expected);
-    if (drift > 1.0) c.seek(expected);
+    const st = raw || {};
+    const recvAt = Number.isFinite(st._recvAt) ? st._recvAt : Date.now();
+    const expected = (Number(st.position) || 0) + (st.playing ? Math.max(0, (Date.now() - recvAt) / 1000) : 0);
+    const drift = (c.getTime() || 0) - expected;
+    if (Math.abs(drift) > 2.0) {
+      c.seek(expected);
+      if (c.setRate) c.setRate(1);
+    } else if (st.playing && Math.abs(drift) > 0.5 && c.setRate) {
+      c.setRate(drift > 0 ? 0.95 : 1.05);
+    } else if (c.setRate) {
+      c.setRate(1);
+    }
     if (st.playing && c.isPaused()) c.play();
     else if (!st.playing && !c.isPaused()) c.pause();
   }, []);
@@ -74,16 +83,18 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     };
     const onRoomState = (st) => {
       if (!st || !st.roomId) return;
-      setRoom(st);
+      const stamped = { ...st, _recvAt: Date.now() };
+      setRoom(stamped);
       setPartnerLeft(null);
       setInvite(null);
       setOutgoing((prev) => (prev ? null : prev));
-      applyState(st);
+      applyState(stamped);
     };
     const onState = (st) => {
       if (!st || !st.roomId) return;
-      setRoom((prev) => (prev && prev.roomId === st.roomId ? { ...prev, ...st } : prev));
-      applyState(st);
+      const stamped = { ...st, _recvAt: Date.now() };
+      setRoom((prev) => (prev && prev.roomId === stamped.roomId ? { ...prev, ...stamped } : prev));
+      applyState(stamped);
     };
     const onPartnerStatus = ({ online }) => {
       setRoom((prev) => (prev ? { ...prev, partnerOnline: online } : prev));
@@ -125,8 +136,9 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       if (!r || !r.roomId) return;
       socket.emit('wt:join', { roomId: r.roomId }, (res) => {
         if (res && res.ok && res.state) {
-          setRoom(res.state);
-          applyState(res.state);
+          const stamped = { ...res.state, _recvAt: Date.now() };
+          setRoom(stamped);
+          applyState(stamped);
         } else {
           setRoom(null);
           controllerRef.current = null;

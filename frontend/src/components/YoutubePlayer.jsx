@@ -94,10 +94,16 @@ export default function YoutubePlayer({
   const onErrorRef = useRef(onError);
   onEndedRef.current = onEnded;
   onErrorRef.current = onError;
-  // Suppresses play/pause/seek reporting while we are applying a remote state,
-  // and until the first real user gesture (so native autoplay isn't echoed).
-  const applyingRef = useRef(false);
-  const interactedRef = useRef(false);
+  // Suppresses play/pause/seek reporting while we are applying a remote state.
+  // A timestamp (rather than a boolean) means overlapping corrections can't clear
+  // each other's window early.
+  const applyingUntilRef = useRef(0);
+  // The first play event after a setup is the player's own autoplay, not a user
+  // action, so it must not be echoed back into a Watch Together room.
+  const firstPlayRef = useRef(true);
+  const markApplying = useCallback((ms) => {
+    applyingUntilRef.current = Math.max(applyingUntilRef.current, Date.now() + ms);
+  }, []);
   const onUserActionRef = useRef(onUserAction);
   onUserActionRef.current = onUserAction;
   const onControllerRef = useRef(onController);
@@ -135,8 +141,8 @@ export default function YoutubePlayer({
     setFallback(false);
     setUseEmbed(false);
     setMenuOpen(false);
-    applyingRef.current = false;
-    interactedRef.current = false;
+    applyingUntilRef.current = Date.now() + 1500;
+    firstPlayRef.current = true;
     video.muted = autoPlay;
 
     const destroy = () => {
@@ -211,11 +217,11 @@ export default function YoutubePlayer({
           streaming: {
             buffer: {
               fastSwitchEnabled: true,
-              bufferToKeep: 24,
-              bufferTimeDefault: 24,
-              bufferTimeAtTopQuality: 30,
+              bufferToKeep: 20,
+              bufferTimeDefault: 12,
+              bufferTimeAtTopQuality: 20,
               bufferTimeAtTopQualityLongForm: 60,
-              initialBufferLevel: 8,
+              initialBufferLevel: 3,
               longFormContentDurationThreshold: 300,
             },
             abr: {
@@ -288,7 +294,11 @@ export default function YoutubePlayer({
   useEffect(() => {
     const register = onControllerRef.current;
     if (!register) return undefined;
-    if (useEmbed || state !== 'ready') {
+    if (useEmbed) {
+      // Embed registers its own controller via YouTube IFrame API.
+      return undefined;
+    }
+    if (state !== 'ready') {
       register(null);
       return undefined;
     }
@@ -302,35 +312,43 @@ export default function YoutubePlayer({
       play: () => {
         const v = videoRef.current;
         if (!v) return;
-        applyingRef.current = true;
+        markApplying(900);
         v.play().catch(() => {});
-        setTimeout(() => { applyingRef.current = false; }, 800);
       },
       pause: () => {
         const v = videoRef.current;
         if (!v) return;
-        applyingRef.current = true;
+        markApplying(900);
         v.pause();
-        setTimeout(() => { applyingRef.current = false; }, 800);
       },
       seek: (t) => {
         const v = videoRef.current;
         if (!v) return;
-        applyingRef.current = true;
+        markApplying(1500);
         try { v.currentTime = Math.max(0, t); } catch (e) {}
-        setTimeout(() => { applyingRef.current = false; }, 1200);
+      },
+      setRate: (r) => {
+        const v = videoRef.current;
+        if (!v) return;
+        try { v.playbackRate = r; } catch (e) {}
       },
     };
     register(controller);
     return () => register(null);
-  }, [state, useEmbed, videoId]);
+  }, [state, useEmbed, videoId, markApplying]);
 
   // Report genuine local playback gestures back to the room.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !onUserAction) return undefined;
     const report = (action) => () => {
-      if (!interactedRef.current || applyingRef.current) return;
+      // Swallow exactly one play event per setup (native autoplay), whether it
+      // arrives during or after the applying window.
+      if (action === 'play' && firstPlayRef.current) {
+        firstPlayRef.current = false;
+        return;
+      }
+      if (Date.now() < applyingUntilRef.current) return;
       const cb = onUserActionRef.current;
       if (cb) cb(action, video.currentTime || 0);
     };
@@ -368,8 +386,8 @@ export default function YoutubePlayer({
     <div
       style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: fill ? undefined : '16/9', background: '#000', overflow: 'hidden', ...style }}
       onMouseLeave={() => setMenuOpen(false)}
-      onPointerDown={() => { interactedRef.current = true; }}
-      onTouchStart={() => { interactedRef.current = true; }}
+      onPointerDown={() => { firstPlayRef.current = false; }}
+      onTouchStart={() => { firstPlayRef.current = false; }}
     >
       <video
         ref={videoRef}
@@ -394,7 +412,10 @@ export default function YoutubePlayer({
           autoPlay={autoPlay}
           poster={poster}
           fill={fill}
+          variant="full"
           style={{ position: 'absolute', inset: 0 }}
+          onController={onController}
+          onProgress={() => {}}
           onEnded={() => { onEndedRef.current && onEndedRef.current(); }}
         />
       )}

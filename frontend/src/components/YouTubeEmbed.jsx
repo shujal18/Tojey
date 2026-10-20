@@ -46,6 +46,7 @@ export default function YouTubeEmbed({
   onEnded,
   onError,
   onProgress,
+  onController,
   style,
   fill = false,
   variant = 'full',
@@ -59,9 +60,11 @@ export default function YouTubeEmbed({
   const onEndedRef = useRef(onEnded);
   const onErrorRef = useRef(onError);
   const onProgressRef = useRef(onProgress);
+  const onControllerRef = useRef(onController);
   onEndedRef.current = onEnded;
   onErrorRef.current = onError;
   onProgressRef.current = onProgress;
+  onControllerRef.current = onController;
 
   const [ready, setReady] = useState(false);
   const [muted, setMuted] = useState(variant === 'short' ? !shortsSoundOn : false);
@@ -196,8 +199,40 @@ export default function YouTubeEmbed({
     } catch (e) {}
   }, [paused]);
 
-  // Progress poll: drives the Shorts progress bar and reports length upward.
+  // Register an imperative controller when the YT iframe API is ready so
+  // Watch Together can drive play/pause/seek even when native playback falls
+  // back to the embed (e.g. Render egress blocked).
   useEffect(() => {
+    const register = onControllerRef.current;
+    if (!register) return undefined;
+    if (variant !== 'full') { register(null); return undefined; }
+    let cancelled = false;
+    loadYouTubeApi().then(() => {
+      if (cancelled) return;
+      const p = playerRef.current;
+      if (!p) { register(null); return; }
+      const controller = {
+        isEmbed: true,
+        isReady: () => readyRef.current,
+        getTime: () => {
+          try { return p.getCurrentTime ? p.getCurrentTime() || 0 : 0; } catch (e) { return 0; }
+        },
+        isPaused: () => {
+          try {
+            const YTS = window.YT && window.YT.PlayerState;
+            const s = p.getPlayerState ? p.getPlayerState() : null;
+            return s !== YTS.PLAYING && s !== YTS.BUFFERING;
+          } catch (e) { return true; }
+        },
+        play: () => { try { p.playVideo(); } catch (e) {} },
+        pause: () => { try { p.pauseVideo(); } catch (e) {} },
+        seek: (t) => { try { p.seekTo(Math.max(0, t), true); } catch (e) {} },
+        setRate: (r) => { try { if (p.setPlaybackRate) p.setPlaybackRate(r); } catch (e) {} },
+      };
+      register(controller);
+    });
+    return () => register(null);
+  }, [variant, videoId, ready]);
     const t = setInterval(() => {
       const p = playerRef.current;
       if (!p || typeof p.getCurrentTime !== 'function') return;

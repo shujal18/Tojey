@@ -853,12 +853,19 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
         .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
       if (top) {
         try {
-          const r = await fetch(top.url, {
-            headers: { 'User-Agent': YT_UA, Accept: '*/*', Range: `bytes=${top.contentLength - 1}-${top.contentLength - 1}` },
-          });
-          try { await r.body?.cancel?.(); } catch (e) {}
-          gated = r.status === 403 || r.status === 410;
-        } catch (e) { /* treat unknown as not gated */ }
+          const ac = new AbortController();
+          const to = setTimeout(() => ac.abort(), 2500);
+          try {
+            const r = await fetch(top.url, {
+              headers: { 'User-Agent': YT_UA, Accept: '*/*', Range: `bytes=${top.contentLength - 1}-${top.contentLength - 1}` },
+              signal: ac.signal,
+            });
+            try { await r.body?.cancel?.(); } catch (e) {}
+            gated = r.status === 403 || r.status === 410;
+          } finally {
+            clearTimeout(to);
+          }
+        } catch (e) { /* treat unknown/timeout as not gated */ }
       }
     }
     res.json({
