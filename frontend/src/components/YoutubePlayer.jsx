@@ -404,7 +404,7 @@ export default function YoutubePlayer({
         ref={videoRef}
         src={src}
         poster={poster}
-        controls={controls}
+        controls={false}
         autoPlay={autoPlay}
         muted={muted}
         playsInline

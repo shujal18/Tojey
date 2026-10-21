@@ -112,7 +112,7 @@ export default function YouTubeEmbed({
         playerVars: isShort
           // No YouTube chrome at all for Shorts
           ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin }
-          : { controls: 1, disablekb: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 1, iv_load_policy: 3, origin: window.location.origin },
+          : { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin },
         events: {
           onReady: (e) => {
             if (cancelled) return;
@@ -279,7 +279,7 @@ export default function YouTubeEmbed({
       {/* Shorts: no pointer events on the iframe so taps hit the feed's own
           play/pause handler and vertical swipes still scroll. Watch: keep it
           interactive for YouTube's native controls. */}
-      <div ref={mountRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: isShort ? 'none' : 'auto' }} />
+      <div ref={mountRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }} />
 
       {!ready && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
