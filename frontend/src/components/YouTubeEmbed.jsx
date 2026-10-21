@@ -113,7 +113,7 @@ export default function YouTubeEmbed({
           // No YouTube chrome at all for Shorts: this is what removes the black
           // control bar/gradient overlay.
           ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin }
-          : { controls: 1, disablekb: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 1, iv_load_policy: 3, origin: window.location.origin },
+          : { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin },
         events: {
           onReady: (e) => {
             if (cancelled) return;
