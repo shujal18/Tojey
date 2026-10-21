@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { Play, RotateCcw, Gauge } from 'lucide-react';
+import { Play, RotateCcw, Gauge, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Settings } from 'lucide-react';
 import YouTubeEmbed from './YouTubeEmbed';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -118,7 +118,17 @@ export default function YoutubePlayer({
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const [nonce, setNonce] = useState(0);
+  const [playing, setPlaying] = useState(autoPlay);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [showControls, setShowControls] = useState(true);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const controlsTimeoutRef = useRef(null);
+  const containerRef = useRef(null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -299,6 +309,27 @@ export default function YoutubePlayer({
     });
   }, [autoPlay]);
 
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onTime = () => setCurrentTime(v.currentTime || 0);
+    const onDur = () => setDuration(v.duration || 0);
+    const onPlay = () => { setPlaying(true); resetControlsTimeout(); };
+    const onPause = () => { setPlaying(false); setShowControls(true); };
+    v.addEventListener('timeupdate', onTime);
+    v.addEventListener('durationchange', onDur);
+    v.addEventListener('loadedmetadata', onDur);
+    v.addEventListener('play', onPlay);
+    v.addEventListener('pause', onPause);
+    return () => {
+      v.removeEventListener('timeupdate', onTime);
+      v.removeEventListener('durationchange', onDur);
+      v.removeEventListener('loadedmetadata', onDur);
+      v.removeEventListener('play', onPlay);
+      v.removeEventListener('pause', onPause);
+    };
+  }, [useEmbed, state, resetControlsTimeout]);
+
   // Expose a tiny imperative controller so a Watch Together room can drive this
   // player. Only the native <video> (DASH or progressive) is controllable; the
   // YouTube iframe fallback reports itself as non-controllable.
@@ -376,9 +407,70 @@ export default function YoutubePlayer({
     };
   }, [state, useEmbed, videoId, onUserAction]);
 
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (useEmbed || state !== 'ready') return;
+      if (e.key === ' ' || e.key === 'k') {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v) {
+          if (v.paused) v.play(); else v.pause();
+        }
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v) v.currentTime = Math.min(v.duration || 0, v.currentTime + 10);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v) v.currentTime = Math.max(0, v.currentTime - 10);
+      } else if (e.key === 'f') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'm') {
+        e.preventDefault();
+        toggleMute();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [useEmbed, state]);
+
+  const resetControlsTimeout = useCallback(() => {
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    setShowControls(true);
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (playing && !menuOpen && !qualityMenuOpen) setShowControls(false);
+    }, 3000);
+  }, [playing, menuOpen, qualityMenuOpen]);
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    resetControlsTimeout();
+    return () => { if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current); document.removeEventListener('fullscreenchange', onFs); };
+  }, [resetControlsTimeout]);
+
+  const toggleMute = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    const newMuted = !v.muted;
+    v.muted = newMuted;
+    setMuted(newMuted);
+  };
+
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
+    }
+  };
+
   const chooseLevel = (lvl) => {
     setLevel(lvl);
-    setMenuOpen(false);
+    setQualityMenuOpen(false);
     const player = dashRef.current;
     if (!player) return;
     try {
@@ -393,12 +485,24 @@ export default function YoutubePlayer({
 
   const src = state === 'ready' && fallback ? `${streamUrl(videoId, progItag, token)}&_=${nonce}` : undefined;
 
+  function fmtTime(t) {
+    if (!Number.isFinite(t) || t < 0) return '0:00';
+    const s = Math.floor(t);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    return `${m}:${String(sec).padStart(2,'0')}`;
+  }
+
   return (
     <div
+      ref={containerRef}
       style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: fill ? undefined : '16/9', background: '#000', overflow: 'hidden', ...style }}
-      onMouseLeave={() => setMenuOpen(false)}
-      onPointerDown={() => { firstPlayRef.current = false; }}
-      onTouchStart={() => { firstPlayRef.current = false; }}
+      onMouseMove={() => { resetControlsTimeout(); }}
+      onMouseLeave={() => { setQualityMenuOpen(false); resetControlsTimeout(); }}
+      onPointerDown={() => { firstPlayRef.current = false; resetControlsTimeout(); }}
+      onTouchStart={() => { firstPlayRef.current = false; resetControlsTimeout(); }}
     >
       <video
         ref={videoRef}
@@ -444,34 +548,85 @@ export default function YoutubePlayer({
           </button>
         </div>
       )}
-      {state === 'ready' && levels.length > 1 && (
-        <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 3 }}>
-          <button
-            onClick={() => setMenuOpen((o) => !o)}
-            title="Quality"
-            style={{ display: 'flex', alignItems: 'center', gap: 5, border: 'none', cursor: 'pointer', borderRadius: 14, padding: '5px 10px', fontSize: 11, fontWeight: 700, background: 'rgba(20,14,32,0.82)', color: '#fff' }}
+      {state === 'ready' && !useEmbed && (
+        <>
+          <div
+            onClick={() => {
+              const v = videoRef.current;
+              if (v) {
+                if (v.paused) v.play(); else v.pause();
+              }
+              resetControlsTimeout();
+            }}
+            style={{ position: 'absolute', inset: 0, cursor: 'pointer', zIndex: 2 }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: 'linear-gradient(to top, rgba(0,0,0,0.9), transparent)',
+              padding: '40px 12px 12px',
+              display: showControls ? 'flex' : 'none',
+              flexDirection: 'column',
+              gap: 8,
+              zIndex: 4,
+              transition: 'opacity 0.3s',
+            }}
           >
-            <Gauge size={13} />
-            {level < 0 ? 'Auto' : `${levels.find((l) => l.index === level)?.height || ''}p`}
-          </button>
-          {menuOpen && (
-            <div style={{ position: 'absolute', top: 32, right: 0, minWidth: 110, background: 'rgba(20,14,32,0.96)', borderRadius: 10, overflow: 'hidden', boxShadow: '0 8px 28px rgba(0,0,0,0.5)' }}>
-              <button onClick={() => chooseLevel(-1)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '8px 12px', fontSize: 12, fontWeight: level < 0 ? 800 : 500, background: level < 0 ? theme.primary : 'transparent', color: '#fff' }}>
-                Auto
-              </button>
-              {levels.map((l) => (
-                <button
-                  key={l.index}
-                  onClick={() => chooseLevel(l.index)}
-                  title={fmtBytes(l.bitrate * 8)}
-                  style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '8px 12px', fontSize: 12, fontWeight: level === l.index ? 800 : 500, background: level === l.index ? theme.primary : 'transparent', color: '#fff' }}
-                >
-                  {l.height}p{l.height >= 720 ? ' HD' : ''}
-                </button>
-              ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="range"
+                min="0"
+                max={duration || 0}
+                step="0.1"
+                value={currentTime}
+                onChange={(e) => {
+                  const v = videoRef.current;
+                  if (v) v.currentTime = parseFloat(e.target.value);
+                  resetControlsTimeout();
+                }}
+                style={{ flex: 1, cursor: 'pointer' }}
+              />
             </div>
-          )}
-        </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#fff' }}>
+              <button onClick={() => { const v = videoRef.current; if (v) { if (v.paused) v.play(); else v.pause(); } resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                {playing ? <Pause size={20} /> : <Play size={20} />}
+              </button>
+              <button onClick={() => { const v = videoRef.current; if (v) v.currentTime = Math.max(0, v.currentTime - 10); resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                <SkipBack size={18} />
+              </button>
+              <button onClick={() => { const v = videoRef.current; if (v) v.currentTime = Math.min(duration, v.currentTime + 10); resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                <SkipForward size={18} />
+              </button>
+              <span style={{ fontSize: 12 }}>{fmtTime(currentTime)} / {fmtTime(duration)}</span>
+              <div style={{ flex: 1 }} />
+              <button onClick={toggleMute} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+              </button>
+              <div style={{ position: 'relative' }}>
+                <button onClick={() => { setQualityMenuOpen(!qualityMenuOpen); resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Settings size={18} />
+                  <span style={{ fontSize: 11 }}>{level < 0 ? 'Auto' : `${levels.find((l) => l.index === level)?.height || ''}p`}</span>
+                </button>
+                {qualityMenuOpen && (
+                  <div style={{ position: 'absolute', bottom: 30, right: 0, background: 'rgba(0,0,0,0.95)', borderRadius: 8, overflow: 'hidden', minWidth: 100 }}>
+                    <button onClick={() => chooseLevel(-1)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', fontSize: 12, background: level < 0 ? theme.primary : 'transparent', color: '#fff' }}>Auto</button>
+                    {levels.map((l) => (
+                      <button key={l.index} onClick={() => chooseLevel(l.index)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', fontSize: 12, background: level === l.index ? theme.primary : 'transparent', color: '#fff' }}>
+                        {l.height}p
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button onClick={toggleFullscreen} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                {fullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

@@ -368,8 +368,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       if (nativeBrokenRef.current) return;
       if (currentVideoIdRef.current !== videoId) return;
       if (embedVideoId === videoId) return;
-      // If not broken and still trying native, don't force embed; let error handler do it
-    }, 0);
+      if (activeSlotRef.current !== target) return;
+      const elCheck = target === 0 ? el0 : el1;
+      if (elCheck && elCheck.paused && elCheck.currentTime === 0 && !pausedRef.current) {
+        try { elCheck.play().catch(() => {}); } catch (e) {}
+      }
+    }, 300);
   }, [token]);
 
   const handleEnded = useCallback(() => {
@@ -411,7 +415,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
         try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
         currentVideoIdRef.current = null;
         setEmbedVideoId(vid);
-      }, 800);
+      }, 400);
       return;
     }
     errorRetriesRef.current = 0;
@@ -656,6 +660,13 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   }}
                   playsInline
                   preload="auto"
+                  muted
+                  webkit-playsinline="true"
+                  onCanPlay={(e) => {
+                    if (activeSlotRef.current === 0 && !pausedRef.current && loadedVideoIdBySlotRef.current[0] === currentVideoIdRef.current) {
+                      e.currentTarget.play().catch(() => {});
+                    }
+                  }}
                   onEnded={() => handleSlotEnded(0)}
                   onError={() => handleSlotError(0)}
                   onTimeUpdate={(e) => {
@@ -681,6 +692,13 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   }}
                   playsInline
                   preload="auto"
+                  muted
+                  webkit-playsinline="true"
+                  onCanPlay={(e) => {
+                    if (activeSlotRef.current === 1 && !pausedRef.current && loadedVideoIdBySlotRef.current[1] === currentVideoIdRef.current) {
+                      e.currentTarget.play().catch(() => {});
+                    }
+                  }}
                   onEnded={() => handleSlotEnded(1)}
                   onError={() => handleSlotError(1)}
                   onTimeUpdate={(e) => {
