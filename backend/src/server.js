@@ -849,8 +849,8 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     } catch (e) {
       try {
         const yf = await ytFormat.getFormat(videoId);
-        const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: 'avc1', bitrate: 0, contentLength: 0, width: yf.video.width, height: yf.video.height };
-        const afmt = yf.audio && yf.audio.url ? { itag: 'ytdlp-a', url: yf.audio.url, hasVideo: false, hasAudio: true, mimeType: yf.audio.ext === 'webm' ? 'audio/webm' : 'audio/mp4', codecs: yf.audio.ext === 'webm' ? 'opus' : 'mp4a.40.2', bitrate: 0, contentLength: 0 } : null;
+        const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: 'avc1', bitrate: 0, contentLength: yf.video.filesize || 0, width: yf.video.width, height: yf.video.height };
+        const afmt = yf.audio && yf.audio.url ? { itag: 'ytdlp-a', url: yf.audio.url, hasVideo: false, hasAudio: true, mimeType: yf.audio.ext === 'webm' ? 'audio/webm' : 'audio/mp4', codecs: yf.audio.ext === 'webm' ? 'opus' : 'mp4a.40.2', bitrate: 0, contentLength: yf.audio.filesize || 0 } : null;
         streams = {
           videoId,
           status: 'OK',
