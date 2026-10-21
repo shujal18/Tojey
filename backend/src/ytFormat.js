@@ -50,6 +50,9 @@ function release() {
 }
 
 async function ensureBinary() {
+  if (process.env.YT_DLP_BIN && fs.existsSync(process.env.YT_DLP_BIN)) return process.env.YT_DLP_BIN;
+  if (fs.existsSync('/usr/bin/yt-dlp')) return '/usr/bin/yt-dlp';
+  if (fs.existsSync('/usr/local/bin/yt-dlp')) return '/usr/local/bin/yt-dlp';
   if (fs.existsSync(YTDLP_BIN)) {
     const st = fs.statSync(YTDLP_BIN);
     if (Date.now() - st.mtimeMs < 30 * 24 * 60 * 60 * 1000) return YTDLP_BIN;
