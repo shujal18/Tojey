@@ -111,8 +111,8 @@ export default function YouTubeEmbed({
         videoId: startId,
         playerVars: isShort
           // No YouTube chrome at all for Shorts
-          ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin }
-          : { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin },
+          ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin, showinfo: 0, autohide: 1 }
+          : { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin, showinfo: 0, autohide: 1 },
         events: {
           onReady: (e) => {
             if (cancelled) return;
