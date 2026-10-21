@@ -72,7 +72,6 @@ function runExtract(videoId, bin, clientArgs) {
   return new Promise((resolve, reject) => {
     const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
     if (clientArgs) args.push('--extractor-args', clientArgs);
-    args.push('--js-runtimes', 'node');
     args.push(`https://www.youtube.com/shorts/${videoId}`);
     execFile(
       bin,
@@ -154,7 +153,18 @@ function pickAudio(formats) {
 
 async function resolveOnce(videoId) {
   const bin = await ensureBinary();
-  const json = await extractWithLadder(videoId, bin);
+  // Try watch page first
+  let json = null;
+  try {
+    json = await runExtractWatch(videoId, bin);
+  } catch (e) {
+    // try shorts
+    try {
+      json = await runExtract(videoId, bin);
+    } catch (e2) {
+      throw e2;
+    }
+  }
   const video = pickVideo(json.formats);
   const audio = pickAudio(json.formats);
   if (!video || !video.url) {
@@ -173,9 +183,36 @@ async function resolveOnce(videoId) {
       width: video.width || 0,
       height: video.height || 0,
       fps: video.fps || 0,
+      filesize: video.filesize || video.filesize_approx || 0,
     },
-    audio: audio ? { url: audio.url, ext: audio.ext || '' } : { url: '' },
+    audio: audio ? { url: audio.url, ext: audio.ext || '', filesize: audio.filesize || 0 } : { url: '' },
   };
+}
+
+function runExtractWatch(videoId, bin) {
+  return new Promise((resolve, reject) => {
+    const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
+    args.push(`https://www.youtube.com/watch?v=${videoId}`);
+    execFile(
+      bin,
+      args,
+      { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          const e = new Error(String((err.stderr || '').split('\n').filter(Boolean).slice(0, 4).join(' | ') || err.message).slice(0, 300));
+          e.code = 'EXTRACT_FAIL';
+          return reject(e);
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (e) {
+          const er = new Error('bad extract json');
+          er.code = 'BAD_JSON';
+          reject(er);
+        }
+      }
+    );
+  });
 }
 
 async function getFormat(videoId) {
