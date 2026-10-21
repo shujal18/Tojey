@@ -1111,17 +1111,37 @@ app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
     const videoId = String(req.params.videoId || '');
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
     const wantAudio = req.query.audio === '1';
-    const fmt = await ytFormat.getFormat(videoId);
-    if (wantAudio && fmt.audio && fmt.audio.url) {
-      try {
-        const out = mux.tmpFile('.m4a');
-        await mux.downloadToFile(fmt.audio.url, 0, out);
-        return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
-      } catch (e) {
-        return res.status(502).json({ error: 'download failed' });
-      }
+    let fmt = null;
+    try {
+      fmt = await Promise.race([
+        ytFormat.getFormat(videoId),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000)),
+      ]);
+    } catch (e) {
+      fmt = null;
     }
-    if (fmt.video && fmt.video.url && fmt.audio && fmt.audio.url) {
+    if (wantAudio) {
+      if (fmt && fmt.audio && fmt.audio.url) {
+        try {
+          const out = mux.tmpFile('.m4a');
+          await mux.downloadToFile(fmt.audio.url, 0, out);
+          return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
+        } catch (e) {}
+      }
+      // fallback to best audio from streams
+      try {
+        let streams = await yt.playerStreams(videoId, false);
+        const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
+        const a = all.filter(x=>x.hasAudio && !x.hasVideo && /mp4a/.test(x.codecs||x.mimeType||'')).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0] || all.filter(x=>x.hasAudio && !x.hasVideo).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0];
+        if (a && a.url) {
+          const out = mux.tmpFile('.m4a');
+          await mux.downloadToFile(a.url, a.contentLength||0, out);
+          return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
+        }
+      } catch (e) {}
+      return res.status(502).json({ error: 'audio download unavailable' });
+    }
+    if (fmt && fmt.video && fmt.video.url && fmt.audio && fmt.audio.url) {
       try {
         const out = await mux.muxToFile(
           { url: fmt.video.url, hasVideo: true, hasAudio: false, contentLength: 0, mimeType: 'video/mp4', codecs: 'avc1' },
@@ -1133,21 +1153,44 @@ app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
           const out = mux.tmpFile('.mp4');
           await mux.downloadToFile(fmt.video.url, 0, out);
           return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
-        } catch (e2) {
-          return res.status(502).json({ error: 'download failed' });
-        }
+        } catch (e2) {}
       }
     }
-    if (fmt.video && fmt.video.url) {
+    if (fmt && fmt.video && fmt.video.url) {
       try {
         const out = mux.tmpFile('.mp4');
         await mux.downloadToFile(fmt.video.url, 0, out);
         return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
-      } catch (e) {
-        return res.status(502).json({ error: 'download failed' });
-      }
+      } catch (e) {}
     }
-    return res.status(404).json({ error: 'no streams' });
+    // try streams
+    try {
+      let streams = await yt.playerStreams(videoId, false);
+      if (!streams || streams.status !== 'OK') streams = await yt.playerStreams(videoId, true);
+      const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
+      const best = all.filter(x=>x.hasVideo && x.hasAudio).sort((x,y)=>(y.height||0)-(x.height||0))[0] || all.filter(x=>x.hasVideo).sort((x,y)=>(y.height||0)-(x.height||0))[0];
+      if (best && best.url) {
+        if (best.hasAudio) {
+          const out = mux.tmpFile('.mp4');
+          await mux.downloadToFile(best.url, best.contentLength||0, out);
+          return streamDownloadFile(res, out, `tojey-${videoId}.mp4`, 'video/mp4');
+        }
+      }
+      const ba = all.filter(x=>x.hasAudio && !x.hasVideo && /mp4a/.test(x.codecs||x.mimeType||'')).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0];
+      const bv = all.filter(x=>x.hasVideo && !x.hasAudio).sort((x,y)=>(y.height||0)-(x.height||0))[0];
+      if (bv && ba && ba.url) {
+        try {
+          const out = await mux.muxToFile(bv, ba);
+          return streamDownloadFile(res, out, `tojey-${videoId}-muxed.mp4`, 'video/mp4');
+        } catch (e) {}
+      }
+      if (bv && bv.url) {
+        const out = mux.tmpFile('.mp4');
+        await mux.downloadToFile(bv.url, bv.contentLength||0, out);
+        return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
+      }
+    } catch (e) {}
+    return res.status(502).json({ error: 'download failed' });
   } catch (e) {
     res.status(502).json({ error: 'download failed', detail: String(e.message).slice(0, 120) });
   }
