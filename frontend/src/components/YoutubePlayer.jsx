@@ -140,7 +140,7 @@ export default function YoutubePlayer({
         setUseEmbed(true);
         setState('ready');
       }
-    }, 2500);
+    }, 800);
 
     setState('loading');
     setErrMsg('');

@@ -835,10 +835,16 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     const videoId = String(req.params.videoId || '');
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
     let streams = null;
+    // Try innertube first but very fast fallback to yt-dlp to avoid long waits
     try {
-      streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
-      if (streams.status !== 'OK' || ((!streams.formats || streams.formats.length === 0) && (!streams.adaptiveFormats || streams.adaptiveFormats.length === 0))) {
-        throw new Error(streams.reason || 'unplayable');
+      streams = await Promise.race([
+        yt.playerStreams(videoId, req.query.refresh === 'true'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1200)),
+      ]);
+      if (streams && streams.status === 'OK' && ((streams.formats && streams.formats.length > 0) || (streams.adaptiveFormats && streams.adaptiveFormats.length > 0))) {
+        // ok
+      } else {
+        throw new Error('unplayable');
       }
     } catch (e) {
       try {
