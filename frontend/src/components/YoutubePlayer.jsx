@@ -133,6 +133,14 @@ export default function YoutubePlayer({
     let cancelled = false;
     let player = null;
     let triedFallback = false;
+    const fastFailTimer = setTimeout(() => {
+      if (cancelled || state === 'ready') return;
+      if (embedFallback && videoId) {
+        try { destroy(); } catch (e) {}
+        setUseEmbed(true);
+        setState('ready');
+      }
+    }, 2500);
 
     setState('loading');
     setErrMsg('');
@@ -155,6 +163,7 @@ export default function YoutubePlayer({
 
     const fail = (msg) => {
       if (cancelled) return;
+      clearTimeout(fastFailTimer);
       const raw = String(msg || '');
       notePlaybackReason(raw);
       // Both native paths failed. The usual cause is YouTube flagging the
@@ -269,7 +278,9 @@ export default function YoutubePlayer({
 
     return () => {
       cancelled = true;
+      clearTimeout(fastFailTimer);
       destroy();
+      if (video) { try { video.src = ''; video.load(); } catch (e) {} }
     };
   }, [videoId, token, nonce, autoPlay]);
 
