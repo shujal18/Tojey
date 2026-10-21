@@ -72,7 +72,8 @@ function runExtract(videoId, bin, clientArgs) {
   return new Promise((resolve, reject) => {
     const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
     if (clientArgs) args.push('--extractor-args', clientArgs);
-    args.push(`https://www.youtube.com/shorts/${videoId}`);
+    // Try watch URL first for most videos
+    args.push(`https://www.youtube.com/watch?v=${videoId}`);
     execFile(
       bin,
       args,
@@ -102,13 +103,27 @@ async function extractWithLadder(videoId, bin) {
       return await runExtract(videoId, bin, clientArgs);
     } catch (e) {
       lastErr = e;
-      if (String(e.message).toLowerCase().includes('not a bot') && clientArgs.includes('default')) {
-        // default never recovers once flagged; ladder already covered better clients
-      }
     }
   }
-  lastErr.code = lastErr.code || 'EXTRACT_FAIL';
-  throw lastErr;
+  // Try without client args
+  try {
+    const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
+    args.push(`https://www.youtube.com/watch?v=${videoId}`);
+    const json = await new Promise((resolve, reject) => {
+      execFile(bin, args, { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        if (err) {
+          const e = new Error(String((err.stderr || err.message)).slice(0, 300));
+          e.code = 'EXTRACT_FAIL';
+          return reject(e);
+        }
+        try { resolve(JSON.parse(stdout)); } catch (e) { reject(new Error('bad json')); }
+      });
+    });
+    return json;
+  } catch (e) {
+    // try shorts
+  }
+  throw lastErr || new Error('extract failed');
 }
 
 const VIDEO_PREFERRED_IDS = ['298', '135', '134', '299', '302', '303', '243', '242'];
