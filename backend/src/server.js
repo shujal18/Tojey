@@ -632,6 +632,7 @@ app.get('/api/youtube/categories', authMiddleware, async (req, res) => {
 // /api/yt/media (see below) rather than handed to the browser directly.
 const yt = require('./ytInner');
 const mux = require('./mux');
+const ytFormat = require('./ytFormat');
 const YTID = /^[a-zA-Z0-9_-]{11}$/;
 const ID = /^[a-zA-Z0-9_-]+$/;
 const YT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -833,7 +834,27 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
   try {
     const videoId = String(req.params.videoId || '');
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
-    const streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
+    let streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
+    // If innertube returns nothing usable (bot/gate), fall back to yt-dlp
+    if ((!streams.formats || streams.formats.length === 0) && (!streams.adaptiveFormats || streams.adaptiveFormats.length === 0)) {
+      try {
+        const yf = await ytFormat.getFormat(videoId);
+        const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: '', bitrate: 0, contentLength: 0, width: yf.video.width, height: yf.video.height };
+        const afmt = yf.audio && yf.audio.url ? { itag: 'ytdlp-a', url: yf.audio.url, hasVideo: false, hasAudio: true, mimeType: yf.audio.ext === 'webm' ? 'audio/webm' : 'audio/mp4', codecs: yf.audio.ext === 'webm' ? 'opus' : 'mp4a.40.2', bitrate: 0, contentLength: 0 } : null;
+        streams = {
+          videoId,
+          status: 'OK',
+          reason: '',
+          expiresInSeconds: 0,
+          hlsManifestUrl: '',
+          dashManifestUrl: '',
+          formats: [],
+          adaptiveFormats: afmt ? [fmt, afmt] : [fmt],
+        };
+      } catch (e) {
+        // ignore, keep original
+      }
+    }
     const strip = (f) => { const { url, ...rest } = f; return rest; };
     // The best audio-only track is what a video-only (HD) download would be
     // remuxed with server-side; the client adds its size to each option so the
