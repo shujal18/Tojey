@@ -111,8 +111,21 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
     return () => { cancelled = true; };
   }, [videoId, token]);
 
-  const pick = (f) => {
-    try { triggerDownload(videoId, token, f.itag, !!f.muxApi); } catch (e) {}
+  function pick(f) {
+    try {
+      if (f.itag && String(f.itag).startsWith('ytdlp')) {
+        const isAudio = tab === 'audio';
+        const url = `${API}/api/yt/download/${videoId}?audio=${isAudio ? '1' : '0'}&token=${encodeURIComponent(token || '')}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } else {
+        triggerDownload(videoId, token, f.itag, !!f.muxApi);
+      }
+    } catch (e) {}
     onClose();
   };
 
