@@ -38,9 +38,13 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
     setError('');
     setGated(false);
     setReason('');
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
     fetch(`${API}/api/yt/streams/${videoId}?probe=1`, {
       headers: { Authorization: `Bearer ${token || ''}` },
+      signal: ctrl.signal,
     })
+      .finally(() => clearTimeout(t))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('unavailable'))))
       .then((data) => {
         if (cancelled) return;
