@@ -839,7 +839,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     try {
       streams = await Promise.race([
         yt.playerStreams(videoId, req.query.refresh === 'true'),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 800)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 600)),
       ]);
       if (streams && streams.status === 'OK' && ((streams.formats && streams.formats.length > 0) || (streams.adaptiveFormats && streams.adaptiveFormats.length > 0))) {
         // ok
@@ -847,6 +847,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
         throw new Error('unplayable');
       }
     } catch (e) {
+      // try yt-dlp
       try {
         const yf = await ytFormat.getFormat(videoId);
         const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: 'avc1', bitrate: 0, contentLength: yf.video.filesize || 0, width: yf.video.width, height: yf.video.height };
@@ -858,7 +859,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
           expiresInSeconds: 0,
           hlsManifestUrl: '',
           dashManifestUrl: '',
-          formats: [],
+          formats: afmt ? [{ itag: 'ytdlp-mux', url: '', hasVideo: true, hasAudio: true, mimeType: 'video/mp4' }] : [],
           adaptiveFormats: afmt ? [fmt, afmt] : [fmt],
         };
       } catch (e2) {
@@ -871,9 +872,12 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     // remuxed with server-side; the client adds its size to each option so the
     // "with audio" figures are accurate.
     // Only AAC-in-MP4 audio can be remuxed into the MP4 delivered to the user.
-    const defaultAudio = streams.adaptiveFormats
+    let defaultAudio = streams.adaptiveFormats
       .filter((f) => f.hasAudio && !f.hasVideo && /mp4a/.test(f.codecs || f.mimeType || ''))
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    if (!defaultAudio && streams.adaptiveFormats.find(f=>f.itag==='ytdlp-a')) {
+      defaultAudio = streams.adaptiveFormats.find(f=>f.itag==='ytdlp-a');
+    }
     // Opt-in gate probe (used by the download menu): YouTube serves some
     // adaptive files only up to a prefix without a PO token, in which case HD
     // remuxing falls back to the progressive stream. One 1-byte tail request
