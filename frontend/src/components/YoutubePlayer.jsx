@@ -536,7 +536,7 @@ export default function YoutubePlayer({
       )}
       {state === 'loading' && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div className="spinner" style={{ width: 40, height: 40, border: '3px solid rgba(255,255,255,0.25)', borderTopColor: theme.primary, borderRadius: '50%' }} />
+          <div className="spinner" style={{ width: 40, height: 40, border: '3px solid rgba(255,255,255,0.25)', borderTopColor: '#fff', borderRadius: '50%' }} />
         </div>
       )}
       {state === 'error' && (

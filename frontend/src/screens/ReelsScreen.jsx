@@ -553,8 +553,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#000', position: 'relative', overflow: 'hidden' }}
     >
       {loading && videos.length === 0 ? (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.background }}>
-          <RefreshCw size={32} color={theme.primary} className="spin" style={{ animation: 'spin 1s linear infinite' }} />
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
+          <RefreshCw size={32} color="#fff" className="spin" style={{ animation: 'spin 1s linear infinite' }} />
         </div>
       ) : error && videos.length === 0 ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24, background: theme.background }}>
