@@ -106,7 +106,7 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
         if (!vids.length && auds.length) setTab('audio');
         else if (!vids.length && !auds.length && !unavailable) setError('No downloadable formats for this video.');
       })
-      .catch(() => {
+      .catch((e) => {
         if (!cancelled) setError('Downloading isn’t available for this video right now.');
       })
       .finally(() => {
