@@ -326,10 +326,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     const a = activeSlotRef.current;
     const b = 1 - a;
     const alreadyActive = loadedVideoIdBySlotRef.current[a] === videoId;
-    // First clip: keep slot `a` (0) so the slot we play is the one already marked
-    // active. Loading into the preload slot instead left the just-started video
-    // off the top of the stack for one render, which painted black until a
-    // scroll forced a repaint (video's first frames were never composited).
     const noSlotLoaded = !loadedVideoIdBySlotRef.current[0] && !loadedVideoIdBySlotRef.current[1];
     const target = (alreadyActive || noSlotLoaded) ? a : b;
 
@@ -342,8 +338,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     if (!pausedRef.current) {
       const pr = el.play();
       if (pr && pr.catch) pr.catch(() => {
-        // No user activation yet (autoplay policy): fall back to muted so the
-        // feed still moves, and unmute on the first tap in handleTap.
         el.muted = true;
         el.play().catch(() => {});
       });
@@ -369,6 +363,13 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
     currentVideoIdRef.current = videoId;
     activeSlotRef.current = target;
     setActiveSlot(target);
+    // If native path stalls, fallback to embed quickly
+    setTimeout(() => {
+      if (nativeBrokenRef.current) return;
+      if (currentVideoIdRef.current !== videoId) return;
+      if (embedVideoId === videoId) return;
+      // If not broken and still trying native, don't force embed; let error handler do it
+    }, 0);
   }, [token]);
 
   const handleEnded = useCallback(() => {
@@ -400,6 +401,17 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       el.src = fresh;
       el.load();
       if (!pausedRef.current) el.play().catch(() => {});
+      setTimeout(() => {
+        if (nativeBrokenRef.current) return;
+        if (slot !== activeSlotRef.current) return;
+        if (loadedVideoIdBySlotRef.current[slot] !== vid) return;
+        nativeBrokenRef.current = true;
+        noteEgressBlocked();
+        loadedVideoIdBySlotRef.current[slot] = null;
+        try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
+        currentVideoIdRef.current = null;
+        setEmbedVideoId(vid);
+      }, 800);
       return;
     }
     errorRetriesRef.current = 0;
