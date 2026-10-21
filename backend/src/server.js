@@ -834,9 +834,13 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
   try {
     const videoId = String(req.params.videoId || '');
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
-    let streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
-    // If innertube returns nothing usable (bot/gate), fall back to yt-dlp
-    if ((!streams.formats || streams.formats.length === 0) && (!streams.adaptiveFormats || streams.adaptiveFormats.length === 0)) {
+    let streams = null;
+    try {
+      streams = await yt.playerStreams(videoId, req.query.refresh === 'true');
+      if (streams.status !== 'OK' || ((!streams.formats || streams.formats.length === 0) && (!streams.adaptiveFormats || streams.adaptiveFormats.length === 0))) {
+        throw new Error(streams.reason || 'unplayable');
+      }
+    } catch (e) {
       try {
         const yf = await ytFormat.getFormat(videoId);
         const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: 'avc1', bitrate: 0, contentLength: 0, width: yf.video.width, height: yf.video.height };
@@ -851,8 +855,9 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
           formats: [],
           adaptiveFormats: afmt ? [fmt, afmt] : [fmt],
         };
-      } catch (e) {
-        // ignore, keep original
+      } catch (e2) {
+        console.error('yt:streams fallback error', e2.message);
+        return res.status(502).json({ error: 'streams unavailable', detail: String(e.message).slice(0, 200) });
       }
     }
     const strip = (f) => { const { url, ...rest } = f; return rest; };
