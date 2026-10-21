@@ -1091,22 +1091,50 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
 // the browser streams through the same-egress byte proxy (googlevideo URLs are
 // IP-bound). The client token is threaded through the query so dash.js can fetch
 // this manifest with a plain <video> element (no Authorization header).
-app.get('/api/yt/dash/:videoId', mediaAuth, async (req, res) => {
-  const videoId = String(req.params.videoId || '');
-  if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
   try {
-    const { mpd } = await yt.dashMpd(videoId, String(req.query.token || ''));
-    res.set('Content-Type', 'application/dash+xml');
-    res.set('Cache-Control', 'private, no-store');
-    res.send(mpd);
+    const videoId = String(req.params.videoId || '');
+    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+    const wantAudio = req.query.audio === '1';
+    const fmt = await ytFormat.getFormat(videoId);
+    if (wantAudio && fmt.audio && fmt.audio.url) {
+      try {
+        const out = mux.tmpFile('.m4a');
+        await mux.downloadToFile(fmt.audio.url, 0, out);
+        return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
+      } catch (e) {
+        return res.status(502).json({ error: 'download failed' });
+      }
+    }
+    if (fmt.video && fmt.video.url && fmt.audio && fmt.audio.url) {
+      try {
+        const out = await mux.muxToFile(
+          { url: fmt.video.url, hasVideo: true, hasAudio: false, contentLength: 0, mimeType: 'video/mp4', codecs: 'avc1' },
+          { url: fmt.audio.url, hasAudio: true, hasVideo: false }
+        );
+        return streamDownloadFile(res, out, `tojey-${videoId}-best.mp4`, 'video/mp4');
+      } catch (e) {
+        try {
+          const out = mux.tmpFile('.mp4');
+          await mux.downloadToFile(fmt.video.url, 0, out);
+          return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
+        } catch (e2) {
+          return res.status(502).json({ error: 'download failed' });
+        }
+      }
+    }
+    if (fmt.video && fmt.video.url) {
+      try {
+        const out = mux.tmpFile('.mp4');
+        await mux.downloadToFile(fmt.video.url, 0, out);
+        return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
+      } catch (e) {
+        return res.status(502).json({ error: 'download failed' });
+      }
+    }
+    return res.status(404).json({ error: 'no streams' });
   } catch (e) {
-    console.error('yt:dash error', e.message);
-    const unplayable = !!e.playabilityStatus && e.playabilityStatus !== 'OK';
-    res.status(unplayable ? 422 : 502).json({
-      error: 'dash unavailable',
-      status: e.playabilityStatus || null,
-      reason: String(e.reason || e.message || '').slice(0, 200),
-    });
+    res.status(502).json({ error: 'download failed', detail: String(e.message).slice(0, 120) });
   }
 });
 
