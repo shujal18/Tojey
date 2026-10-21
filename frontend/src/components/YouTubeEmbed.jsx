@@ -110,10 +110,9 @@ export default function YouTubeEmbed({
       playerRef.current = new YT.Player(holder, {
         videoId: startId,
         playerVars: isShort
-          // No YouTube chrome at all for Shorts: this is what removes the black
-          // control bar/gradient overlay.
+          // No YouTube chrome at all for Shorts
           ? { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin }
-          : { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, origin: window.location.origin },
+          : { controls: 1, disablekb: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 1, iv_load_policy: 3, origin: window.location.origin },
         events: {
           onReady: (e) => {
             if (cancelled) return;
@@ -276,7 +275,7 @@ export default function YouTubeEmbed({
     <div
       style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: (fill || isShort) ? undefined : '16/9', background: '#000', overflow: 'hidden', userSelect: 'none', ...style }}
     >
-      <style>{'.ytp-chrome-bottom,.ytp-gradient-bottom,.ytp-show-cards-title,.ytp-pause-overlay,.ytp-chrome-top,.ytp-gradient-top{display:none!important;max-height:0!important;}'}</style>
+      <style>{}</style>
       {/* Shorts: no pointer events on the iframe so taps hit the feed's own
           play/pause handler and vertical swipes still scroll. Watch: keep it
           interactive for YouTube's native controls. */}
