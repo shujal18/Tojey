@@ -839,7 +839,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
     try {
       streams = await Promise.race([
         yt.playerStreams(videoId, req.query.refresh === 'true'),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1200)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 800)),
       ]);
       if (streams && streams.status === 'OK' && ((streams.formats && streams.formats.length > 0) || (streams.adaptiveFormats && streams.adaptiveFormats.length > 0))) {
         // ok
