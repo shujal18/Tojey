@@ -276,7 +276,7 @@ export default function YouTubeEmbed({
     <div
       style={{ position: 'relative', width: '100%', height: fill ? '100%' : undefined, aspectRatio: (fill || isShort) ? undefined : '16/9', background: '#000', overflow: 'hidden', userSelect: 'none', ...style }}
     >
-      <style>{'.ytp-chrome-bottom,.ytp-gradient-bottom,.ytp-show-cards-title,.ytp-pause-overlay{display:none!important;}'}</style>
+      <style>{'.ytp-chrome-bottom,.ytp-gradient-bottom,.ytp-show-cards-title,.ytp-pause-overlay,.ytp-chrome-top,.ytp-gradient-top{display:none!important;max-height:0!important;}'}</style>
       {/* Shorts: no pointer events on the iframe so taps hit the feed's own
           play/pause handler and vertical swipes still scroll. Watch: keep it
           interactive for YouTube's native controls. */}
