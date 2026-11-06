@@ -16,6 +16,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const [room, setRoom] = useState(null); // authoritative room state
   const [partnerLeft, setPartnerLeft] = useState(null); // {by, reason}
   const [notice, setNotice] = useState('');
+  const [reaction, setReaction] = useState(null); // { id, emoji, by } floating reaction
 
   const socketRef = useRef(socket);
   socketRef.current = socket;
@@ -46,7 +47,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   // rate; only large drift triggers a real seek.
   const applyState = useCallback((raw) => {
     const c = controllerRef.current;
-    if (!c || !c.isReady || !c.isReady() || c.isEmbed) return;
+    if (!c || !c.isReady || !c.isReady()) return;
     const st = raw || {};
     const recvAt = Number.isFinite(st._recvAt) ? st._recvAt : Date.now();
     const expected = (Number(st.position) || 0) + (st.playing ? Math.max(0, (Date.now() - recvAt) / 1000) : 0);
@@ -99,6 +100,10 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     const onPartnerStatus = ({ online }) => {
       setRoom((prev) => (prev ? { ...prev, partnerOnline: online } : prev));
     };
+    const onReaction = (payload) => {
+      if (!payload || !payload.emoji) return;
+      setReaction({ id: `${payload.at || Date.now()}-${Math.random().toString(36).slice(2, 6)}`, emoji: payload.emoji, by: payload.by || null });
+    };
     const onPartnerLeft = (payload) => {
       const c = controllerRef.current;
       if (c && c.isReady && c.isReady() && !c.isEmbed && !c.isPaused()) c.pause();
@@ -115,6 +120,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     sk.on('wt:state', onState);
     sk.on('wt:partner:status', onPartnerStatus);
     sk.on('wt:room:partner-left', onPartnerLeft);
+    sk.on('wt:reaction', onReaction);
 
     return () => {
       sk.off('wt:invite:new', onInviteNew);
@@ -124,6 +130,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       sk.off('wt:state', onState);
       sk.off('wt:partner:status', onPartnerStatus);
       sk.off('wt:room:partner-left', onPartnerLeft);
+      sk.off('wt:reaction', onReaction);
     };
   }, [socket, applyState, showToast]);
 
@@ -158,6 +165,58 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     }, 3000);
     return () => clearInterval(iv);
   }, [room && room.roomId, applyState]);
+
+  const isHost = !!(room && currentUser && room.host && String(room.host) === String(currentUser.username));
+
+  // When playback runs through the YouTube embed the host's play/pause/seek
+  // happen inside a cross-origin iframe that cannot emit DOM events. Poll the
+  // embed controller and mirror real changes to the authoritative room state so
+  // the guest follows. Only the host polls; guests never write playback state.
+  const lastHostSyncRef = useRef({ playing: false, time: 0, at: 0, suppressUntil: 0 });
+  useEffect(() => {
+    if (!room || !room.roomId || !isHost) return undefined;
+    lastHostSyncRef.current = { playing: false, time: 0, at: 0, suppressUntil: 0 };
+    const tick = () => {
+      const c = controllerRef.current;
+      if (!c || !c.isEmbed || !c.isReady || !c.isReady()) return;
+      if (Date.now() < lastHostSyncRef.current.suppressUntil) return;
+      const sk = socketRef.current;
+      const r = roomRef.current;
+      if (!sk || !r) return;
+      const now = Date.now();
+      const time = Number(c.getTime()) || 0;
+      const paused = c.isPaused();
+      const last = lastHostSyncRef.current;
+      if (!last.at) {
+        last.playing = !paused;
+        last.time = time;
+        last.at = now;
+        return;
+      }
+      const expected = last.playing ? last.time + (now - last.at) / 1000 : last.time;
+      let action = null;
+      if (paused !== !last.playing) {
+        action = paused ? 'pause' : 'play';
+      } else if (!paused && Math.abs(time - expected) > 1.5) {
+        action = 'seek';
+      }
+      if (!action) return;
+      last.playing = !paused;
+      last.time = time;
+      last.at = now;
+      last.suppressUntil = now + 700;
+      sk.emit(action === 'seek' ? 'wt:seek' : action === 'pause' ? 'wt:pause' : 'wt:play', { roomId: r.roomId, position: time });
+    };
+    const iv = setInterval(tick, 600);
+    return () => clearInterval(iv);
+  }, [room && room.roomId, isHost]);
+
+  const sendReaction = useCallback((emoji) => {
+    const sk = socketRef.current;
+    const r = roomRef.current;
+    if (!sk || !r || !emoji) return;
+    sk.emit('wt:reaction', { roomId: r.roomId, emoji });
+  }, []);
 
   const sendInvite = useCallback(({ videoId, title }) => {
     const sk = socketRef.current;
@@ -207,6 +266,8 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     const sk = socketRef.current;
     const r = roomRef.current;
     if (!sk || !r) return;
+    const me = currentUserRef.current;
+    if (!me || String(r.host) !== String(me.username)) return;
     const pos = Number.isFinite(position) ? position : 0;
     if (action === 'play') sk.emit('wt:play', { roomId: r.roomId, position: pos });
     else if (action === 'pause') sk.emit('wt:pause', { roomId: r.roomId, position: pos });
@@ -223,6 +284,9 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     partnerLeft,
     notice,
     setNotice,
+    isHost,
+    reaction,
+    sendReaction,
     sendInvite,
     respondInvite,
     leaveRoom,

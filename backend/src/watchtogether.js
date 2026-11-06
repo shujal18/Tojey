@@ -97,6 +97,8 @@ function stateFor(room) {
     position: room.position,
     seq: room.seq,
     serverNow: Date.now(),
+    host: room.host,
+    rate: room.rate || 1,
     members: roomMembers(room),
   };
 }
@@ -292,12 +294,14 @@ function attach(socket) {
       id: `room${idSeq++}`,
       videoId: invite.videoId,
       title: invite.title,
+      host: invite.from,
       members: new Map([
         [invite.from, { online: true }],
         [username, { online: true }],
       ]),
       playing: false,
       position: 0,
+      rate: 1,
       seq: 1,
     };
     rooms.set(room.id, room);
@@ -324,6 +328,10 @@ function attach(socket) {
     const roomId = String((payload && payload.roomId) || '');
     const room = rooms.get(roomId);
     if (!room || !room.members.has(username)) return done({ ok: false, error: 'Not a member of that session.' });
+    // Strict host rule: the guest may only enter/leave fullscreen and leave the
+    // room. Every playback-changing event is rejected server-side, so a guest
+    // cannot bypass the UI by emitting over the socket.
+    if (room.host !== username) return done({ ok: false, error: 'Only the host can control playback.' });
     const patch = { position: payload && payload.position };
     if (playing !== undefined) patch.playing = playing;
     return done(updatePlayback(room, username, patch) ? { ok: true } : { ok: false, error: 'Bad position.' });
@@ -332,6 +340,37 @@ function attach(socket) {
   socket.on('wt:play', playbackEvent(true));
   socket.on('wt:pause', playbackEvent(false));
   socket.on('wt:seek', playbackEvent(undefined));
+
+  socket.on('wt:speed', (payload, cb) => {
+    const done = ack(cb);
+    const roomId = String((payload && payload.roomId) || '');
+    const room = rooms.get(roomId);
+    if (!room || !room.members.has(username)) return done({ ok: false, error: 'Not a member of that session.' });
+    if (room.host !== username) return done({ ok: false, error: 'Only the host can control playback.' });
+    const rate = Number(payload && payload.rate);
+    if (!Number.isFinite(rate) || rate < 0.25 || rate > 2) return done({ ok: false, error: 'Bad rate.' });
+    room.rate = rate;
+    room.seq += 1;
+    broadcastState(room);
+    return done({ ok: true });
+  });
+
+  // Reactions are allowed for both participants (they are not playback control).
+  socket.on('wt:reaction', (payload, cb) => {
+    const done = ack(cb);
+    const roomId = String((payload && payload.roomId) || '');
+    const room = rooms.get(roomId);
+    if (!room || !room.members.has(username)) return done({ ok: false });
+    const emoji = String((payload && payload.emoji) || '').slice(0, 8);
+    if (!emoji) return done({ ok: false });
+    io.to(roomSock(room.id)).emit('wt:reaction', {
+      roomId: room.id,
+      emoji,
+      by: person(username),
+      at: Date.now(),
+    });
+    return done({ ok: true });
+  });
 
   socket.on('wt:leave', (payload, cb) => {
     const done = ack(cb);

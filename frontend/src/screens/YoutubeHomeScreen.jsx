@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, Users, LogOut } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, Users, LogOut, Maximize, Minimize } from 'lucide-react';
 import YoutubePlayer from '../components/YoutubePlayer';
 import YoutubeBrowse from '../components/YoutubeBrowse';
 import DownloadMenu from '../components/DownloadMenu';
@@ -278,6 +278,36 @@ function WatchModal({ item, token, onClose }) {
   const onController = useCallback((c) => { wt.registerController(c); }, [wt.registerController]);
   const onUserAction = useCallback((action, position) => { wt.reportLocal(action, position); }, [wt.reportLocal]);
 
+  const isGuest = inRoom && !wt.isHost;
+  const playerWrapRef = useRef(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [reactionBurst, setReactionBurst] = useState(null);
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+
+  useEffect(() => {
+    if (!wt.reaction) return undefined;
+    setReactionBurst(wt.reaction);
+    const t = setTimeout(() => setReactionBurst(null), 2200);
+    return () => clearTimeout(t);
+  }, [wt.reaction]);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = playerWrapRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement) { document.exitFullscreen(); return; }
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    } catch (e) {}
+  }, []);
+
+  const quickReactions = ['😂', '🔥', '❤️', '👍', '😮', '👏'];
+
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -337,14 +367,58 @@ function WatchModal({ item, token, onClose }) {
             </div>
           )}
         </div>
-        <div style={{ background: '#000', width: '100%', position: 'relative' }}>
+        <div ref={playerWrapRef} style={{ background: '#000', width: '100%', position: 'relative' }}>
+          <style>{`@keyframes wtFloat{0%{opacity:0;transform:translate(-50%,24px) scale(.6)}15%{opacity:1;transform:translate(-50%,0) scale(1.15)}100%{opacity:0;transform:translate(-50%,-140px) scale(1)}}.wt-reaction-burst{animation:wtFloat 2.2s ease-out forwards}`}</style>
           {vid ? (
             <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} onController={onController} onUserAction={onUserAction} />
           ) : (
             <div style={{ color: theme.textSecondary, textAlign: 'center', padding: 30 }}>Video unavailable</div>
           )}
+
+          {reactionBurst && (
+            <div key={reactionBurst.id} className="wt-reaction-burst" style={{ position: 'absolute', left: '50%', bottom: 140, zIndex: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
+              <span style={{ fontSize: 44, lineHeight: 1 }}>{reactionBurst.emoji}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '1px 7px', marginTop: 2 }}>
+                {(reactionBurst.by && reactionBurst.by.displayName) || 'Friend'}
+              </span>
+            </div>
+          )}
+
+          {inRoom && (
+            <div style={{ position: 'absolute', left: '50%', bottom: 58, transform: 'translateX(-50%)', zIndex: 7, display: 'flex', alignItems: 'center', gap: 4, padding: '5px 8px', borderRadius: 22, background: 'rgba(10,6,18,0.72)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.12)' }}>
+              {quickReactions.map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => wt.sendReaction(emoji)}
+                  title={`React ${emoji}`}
+                  style={{ fontSize: 19, lineHeight: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', borderRadius: 12 }}
+                >
+                  {emoji}
+                </button>
+              ))}
+              {isGuest && (
+                <button
+                  onClick={toggleFullscreen}
+                  title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, marginLeft: 2, background: 'rgba(255,255,255,0.14)', border: 'none', cursor: 'pointer', borderRadius: 16, color: '#fff' }}
+                >
+                  {fullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
+                </button>
+              )}
+            </div>
+          )}
+
+          {isGuest && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={toggleFullscreen}
+              title="Only the host controls playback"
+              style={{ position: 'absolute', inset: 0, zIndex: 6, cursor: 'default', background: 'transparent' }}
+            />
+          )}
+
           {!!wt.partnerLeft && sanitizeVideoId(wt.partnerLeft.videoId) === vid && (
-            <div style={{ position: 'absolute', inset: 0, background: 'rgba(8,5,14,0.82)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, textAlign: 'center', padding: 24 }}>
+            <div style={{ position: 'absolute', inset: 0, zIndex: 10, background: 'rgba(8,5,14,0.82)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, textAlign: 'center', padding: 24 }}>
               <div style={{ color: '#fff', fontSize: 15, fontWeight: 700 }}>
                 {(wt.partnerLeft.by && wt.partnerLeft.by.displayName) || 'Your friend'} left the room.
               </div>
