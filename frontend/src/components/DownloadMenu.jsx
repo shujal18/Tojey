@@ -111,8 +111,9 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
     if (token) qs.set('token', token);
     const a = document.createElement('a');
     a.href = `${API}/api/yt/download/${videoId}?${qs.toString()}`;
-    a.rel = 'noopener';
-    a.target = '_blank';
+    // Download in place (same tab): the server sends Content-Disposition: attachment,
+    // so the file saves without navigating away from the video page.
+    a.target = '_self';
     document.body.appendChild(a);
     a.click();
     a.remove();
