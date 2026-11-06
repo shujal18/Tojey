@@ -262,79 +262,91 @@ async function getFormat(videoId) {
   return p;
 }
 
+// Try one (client, selector) download; resolves true on success, or {err} so the
+// ladder can keep trying other clients / selectors. `needsMerge` selects
+// adaptive video+audio (requires ffmpeg); a single muxed stream needs no merge.
+function tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge) {
+  return new Promise((resolve) => {
+    const args = ['-o', dest, '-f', selector, '--no-playlist', '--no-warnings', '--no-part', '--no-mtime'];
+    if (needsMerge) {
+      args.push('--merge-output-format', 'mp4');
+      if (FFMPEG) args.push('--ffmpeg-location', FFMPEG);
+    }
+    if (clientArgs) args.unshift('--extractor-args', clientArgs);
+    args.push(`https://www.youtube.com/watch?v=${videoId}`);
+    let attempts = 0;
+    const run = () => {
+      attempts += 1;
+      try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+      execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
+        if (err) {
+          const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
+          const transient = /403|429|timed out|connection|temporar|fragment/i.test(msg);
+          if (transient && attempts < 2) { run(); return; }
+          resolve({ ok: false, err: new Error(msg) });
+        } else if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, err: new Error('download produced no file') });
+        }
+      });
+    };
+    run();
+  });
+}
+
 // Download a requested quality to `dest`. Callers may pass an exact yt-dlp
 // `formatId`, a `height` cap (the instant picker uses this), or neither for the
 // best available. Video-only sources are merged with the best audio in the same
-// pass. `kind: 'audio'` forces an audio-only file.
+// pass; when ffmpeg is unavailable (e.g. some hosts) we fall back to a single
+// muxed stream so downloads still succeed. `kind: 'audio'` forces audio-only.
 async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}, dest) {
   const bin = await ensureBinary();
   const binDir = path.dirname(dest);
   fs.mkdirSync(binDir, { recursive: true });
 
-  let selector;
-  if (kind === 'audio') {
-    const ext = audioExt === 'webm' ? 'webm' : 'm4a';
-    selector = `bestaudio[ext=${ext}]/bestaudio/best`;
-  } else if (formatId) {
-    selector = `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/${formatId}/bestvideo+bestaudio/best`;
-  } else if (height) {
-    const h = Math.max(144, Math.min(4320, Number(height) || 0));
-    selector = `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
-  } else {
-    selector = 'bv*+ba/b';
-  }
+  const h = height ? Math.max(144, Math.min(4320, Number(height) || 0)) : 0;
+  const audioExtFinal = audioExt === 'webm' ? 'webm' : 'm4a';
 
-  const baseArgs = [
-    '-f', selector,
-    '--no-playlist',
-    '--no-warnings',
-    '--no-part',
-    '--no-mtime',
-  ];
-  if (kind !== 'audio') baseArgs.push('--merge-output-format', 'mp4');
-  if (FFMPEG) baseArgs.push('--ffmpeg-location', FFMPEG);
-  baseArgs.push(`https://www.youtube.com/watch?v=${videoId}`);
-
-  // Render's datacenter IP is inconsistently flagged by YouTube. Try the same
-  // client ladder used for extraction, so a download that fails on one client
-  // can still succeed on another instead of surfacing "download unavailable".
   const clients = [
     null,
     'youtube:player_client=android_vr,ios,web_safari',
     'youtube:player_client=tv,web_safari',
   ];
 
+  if (kind === 'audio') {
+    const selector = `bestaudio[ext=${audioExtFinal}]/bestaudio/best`;
+    let lastErr = null;
+    for (const clientArgs of clients) {
+      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, false);
+      if (res.ok) return dest;
+      lastErr = res.err;
+    }
+    throw lastErr || new Error('download failed');
+  }
+
+  const mergeSelector = formatId
+    ? `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/${formatId}/bestvideo+bestaudio/best`
+    : h
+    ? `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`
+    : 'bv*+ba/b';
+  // Single muxed file: plays without ffmpeg merging, so it works even when
+  // ffmpeg is not installed on the host.
+  const muxSelector = formatId
+    ? `${formatId}/best`
+    : h
+    ? `best[height<=${h}][ext=mp4]/best[height<=${h}]/best`
+    : 'bestvideo+bestaudio/best';
+
   let lastErr = null;
   for (const clientArgs of clients) {
-    const args = ['-o', dest, ...baseArgs];
-    if (clientArgs) args.unshift('--extractor-args', clientArgs);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
-      try {
-        await new Promise((resolve, reject) => {
-          execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
-            if (err) {
-              const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
-              const e = new Error(msg);
-              e.code = 'DOWNLOAD_FAIL';
-              return reject(e);
-            }
-            resolve();
-          });
-        });
-        if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
-        throw new Error('download produced no file');
-      } catch (e) {
-        lastErr = e;
-        const transient = /403|429|timed out|connection|temporar|fragment/i.test(e.message || '');
-        if (!transient && attempt === 0) continue;
-        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-      }
+    for (const [selector, needsMerge] of [[mergeSelector, true], [muxSelector, false]]) {
+      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge);
+      if (res.ok) return dest;
+      lastErr = res.err;
     }
   }
-  const e = new Error(lastErr ? lastErr.message : 'download failed');
-  e.code = 'DOWNLOAD_FAIL';
-  throw e;
+  throw lastErr || new Error('download failed');
 }
 
 module.exports = {
