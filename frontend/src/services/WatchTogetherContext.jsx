@@ -16,7 +16,10 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const [room, setRoom] = useState(null); // authoritative room state
   const [partnerLeft, setPartnerLeft] = useState(null); // {by, reason}
   const [notice, setNotice] = useState('');
-  const [reaction, setReaction] = useState(null); // { id, emoji, by } floating reaction
+  const [messages, setMessages] = useState([]); // in-room chat history
+  const [bubble, setBubble] = useState(null); // latest reaction/message toast
+  const bubbleTimerRef = useRef(null);
+  useEffect(() => () => { if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current); }, []);
 
   const socketRef = useRef(socket);
   socketRef.current = socket;
@@ -64,6 +67,13 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     else if (!st.playing && !c.isPaused()) c.pause();
   }, []);
 
+  const showBubble = useCallback((b) => {
+    if (!b) return;
+    setBubble(b);
+    if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current);
+    bubbleTimerRef.current = setTimeout(() => setBubble(null), b.kind === 'reaction' ? 2800 : 4800);
+  }, []);
+
   useEffect(() => {
     if (!socket) return undefined;
     const sk = socket;
@@ -86,6 +96,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       if (!st || !st.roomId) return;
       const stamped = { ...st, _recvAt: Date.now() };
       setRoom(stamped);
+      setMessages(Array.isArray(st.messages) ? st.messages : []);
       setPartnerLeft(null);
       setInvite(null);
       setOutgoing((prev) => (prev ? null : prev));
@@ -102,7 +113,18 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     };
     const onReaction = (payload) => {
       if (!payload || !payload.emoji) return;
-      setReaction({ id: `${payload.at || Date.now()}-${Math.random().toString(36).slice(2, 6)}`, emoji: payload.emoji, by: payload.by || null });
+      showBubble({
+        id: `${payload.at || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        kind: 'reaction',
+        emoji: payload.emoji,
+        by: payload.by || null,
+      });
+    };
+    const onMessage = (payload) => {
+      if (!payload || !payload.text) return;
+      const msg = { id: payload.id || `${payload.at}-${Math.random()}`, text: payload.text, by: payload.by || null, at: payload.at || Date.now() };
+      setMessages((prev) => [...prev, msg].slice(-40));
+      showBubble({ ...msg, kind: 'message' });
     };
     const onPartnerLeft = (payload) => {
       const c = controllerRef.current;
@@ -111,6 +133,8 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       controllerRef.current = null;
       setPartnerLeft(payload || {});
       setNotice('');
+      setMessages([]);
+      setBubble(null);
     };
 
     sk.on('wt:invite:new', onInviteNew);
@@ -121,6 +145,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     sk.on('wt:partner:status', onPartnerStatus);
     sk.on('wt:room:partner-left', onPartnerLeft);
     sk.on('wt:reaction', onReaction);
+    sk.on('wt:message', onMessage);
 
     return () => {
       sk.off('wt:invite:new', onInviteNew);
@@ -131,8 +156,9 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       sk.off('wt:partner:status', onPartnerStatus);
       sk.off('wt:room:partner-left', onPartnerLeft);
       sk.off('wt:reaction', onReaction);
+      sk.off('wt:message', onMessage);
     };
-  }, [socket, applyState, showToast]);
+  }, [socket, applyState, showToast, showBubble]);
 
   // Reconnect: rejoin the room we were in so playback (and pauses elsewhere)
   // survive a network blip or a backgrounded tab.
@@ -218,6 +244,14 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     sk.emit('wt:reaction', { roomId: r.roomId, emoji });
   }, []);
 
+  const sendMessage = useCallback((text) => {
+    const sk = socketRef.current;
+    const r = roomRef.current;
+    const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!sk || !r || !clean) return;
+    sk.emit('wt:message', { roomId: r.roomId, text: clean });
+  }, []);
+
   const sendInvite = useCallback(({ videoId, title }) => {
     const sk = socketRef.current;
     const p = partnerRef.current;
@@ -255,6 +289,8 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     setRoom(null);
     controllerRef.current = null;
     setPartnerLeft(null);
+    setMessages([]);
+    setBubble(null);
   }, []);
 
   const registerController = useCallback((controller) => {
@@ -285,8 +321,10 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     notice,
     setNotice,
     isHost,
-    reaction,
+    messages,
+    bubble,
     sendReaction,
+    sendMessage,
     sendInvite,
     respondInvite,
     leaveRoom,

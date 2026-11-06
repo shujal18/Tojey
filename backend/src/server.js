@@ -556,8 +556,49 @@ app.post('/api/reels/report', authMiddleware, (req, res) => {
 // needed. Falls back to the Data API implementation only if it is configured and
 // innertube fails.
 app.get('/api/youtube/feed', authMiddleware, async (req, res) => {
-  const { category = 'trending', pageToken } = req.query;
+  const { category = 'recommended', pageToken } = req.query;
   const valid = yt.homeCategories().map((c) => c.id);
+  if (category === 'recommended') {
+    const username = (req.user && req.user.username) || 'anon';
+    const seeds = parseSeedList(req.query.seeds);
+    const exclude = parseSeedList(req.query.exclude).filter((v) => YTID.test(v));
+    const nonce = Number(req.query.nonce) || 0;
+    try {
+      const rec = await recommendedFeed(username, seeds, exclude, nonce, pageToken);
+      return res.json({
+        videos: rec.videos.map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          thumbnailUrl: v.thumbnailUrl,
+          durationSeconds: v.durationSeconds,
+          category: 'recommended',
+          channelTitle: v.channelTitle,
+          publishedAt: v.publishedAt,
+          source: 'recommended',
+        })),
+        cached: rec.cached,
+        category: 'recommended',
+        nextPageToken: rec.nextToken,
+        hasMore: rec.hasMore,
+        source: 'recommended',
+      });
+    } catch (e) {
+      console.error('youtube:recommended error', e.message);
+      try {
+        const result = await yt.home('trending', pageToken || null);
+        return res.json({
+          videos: result.videos.map((v) => ({ ...v, category: 'recommended', source: 'innertube' })),
+          cached: false,
+          category: 'recommended',
+          nextPageToken: result.nextToken || null,
+          hasMore: !!result.hasMore,
+          source: 'innertube',
+        });
+      } catch (e2) {
+        return res.status(502).json({ error: 'feed unavailable', detail: e2.message.slice(0, 160) });
+      }
+    }
+  }
   if (!valid.includes(category)) {
     return res.status(400).json({ error: 'Invalid category' });
   }
@@ -636,6 +677,127 @@ const ytFormat = require('./ytFormat');
 const YTID = /^[a-zA-Z0-9_-]{11}$/;
 const ID = /^[a-zA-Z0-9_-]+$/;
 const YT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// ---- personalised recommendations -------------------------------------------
+// Search/watch history lives on the device (localStorage). The client sends its
+// recent queries + watched ids with the feed request; the server turns those
+// into fresh searches, rotates them, and remembers what it already served so a
+// user never sees the same card twice in a row.
+const REC_PAGE = 12;
+const REC_TTL_MS = 10 * 60 * 1000;
+const REC_DEFAULT_SEEDS = ['recommended videos', 'popular videos', 'trending videos', 'best videos'];
+const recState = new Map(); // username -> { key, pool, idx, at, served:Set }
+
+function parseSeedList(raw) {
+  if (!raw) return [];
+  let arr = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t) return [];
+    if (t.startsWith('[')) {
+      try { arr = JSON.parse(t); } catch (e) { arr = t.split(','); }
+    } else {
+      arr = t.split(',');
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const s = v.trim().slice(0, 120);
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function recQueries(seeds, nonce) {
+  const list = (seeds && seeds.length ? seeds : REC_DEFAULT_SEEDS).slice(0, 8);
+  const start = list.length ? Math.abs(Number(nonce) || 0) % list.length : 0;
+  const chosen = [];
+  for (let i = 0; i < list.length && chosen.length < 4; i += 1) {
+    chosen.push(list[(start + i) % list.length]);
+  }
+  return chosen;
+}
+
+function shuffleInPlace(list) {
+  for (let i = list.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = list[i]; list[i] = list[j]; list[j] = t;
+  }
+  return list;
+}
+
+async function recommendedFeed(username, seeds, exclude, nonce, pageToken) {
+  const key = (seeds.length ? seeds.slice(0, 8) : REC_DEFAULT_SEEDS).join('|').toLowerCase();
+  const continuation = typeof pageToken === 'string' && pageToken.startsWith('rec:');
+  let st = recState.get(username);
+  let rebuild = !continuation;
+  if (!st || st.key !== key || Date.now() - st.at > REC_TTL_MS) {
+    st = { key, pool: [], idx: 0, at: Date.now(), served: new Set() };
+    recState.set(username, st);
+    rebuild = true;
+  }
+  if (!rebuild && st.idx >= st.pool.length) rebuild = true;
+
+  if (rebuild) {
+    const queries = recQueries(seeds, nonce);
+    const results = await Promise.allSettled(queries.map((q) => yt.search(q, null, 'videos')));
+    const excluded = new Set([...exclude, ...st.served]);
+    const items = [];
+    const seen = new Set();
+    for (const r of results) {
+      if (!r || r.status !== 'fulfilled' || !r.value) continue;
+      for (const it of r.value.items || []) {
+        if (!it || it.type !== 'video') continue;
+        if (!YTID.test(it.videoId || '')) continue;
+        if ((Number(it.durationSeconds) || 0) < 91) continue;
+        if (seen.has(it.videoId) || excluded.has(it.videoId)) continue;
+        seen.add(it.videoId);
+        items.push(it);
+      }
+    }
+    shuffleInPlace(items);
+    if (items.length < REC_PAGE) {
+      try {
+        const h = await yt.home('trending', null);
+        for (const v of h.videos || []) {
+          if (seen.has(v.videoId) || excluded.has(v.videoId)) continue;
+          seen.add(v.videoId);
+          items.push(v);
+        }
+      } catch (e) { /* ignore */ }
+    }
+    // If everything was already served, reset the memory so the feed is never
+    // empty - better to repeat an old favourite than to show nothing.
+    if (!items.length && st.served.size) {
+      st.served = new Set();
+      try {
+        const h = await yt.home('trending', null);
+        for (const v of h.videos || []) {
+          if (exclude.includes(v.videoId)) continue;
+          items.push(v);
+        }
+      } catch (e) { /* ignore */ }
+    }
+    st.pool = items;
+    st.idx = 0;
+    st.at = Date.now();
+  }
+
+  const slice = st.pool.slice(st.idx, st.idx + REC_PAGE);
+  for (const v of slice) st.served.add(v.videoId);
+  if (st.served.size > 400) st.served = new Set([...st.served].slice(-300));
+  st.idx += slice.length;
+  const hasMore = st.idx < st.pool.length;
+  return { videos: slice, nextToken: hasMore ? `rec:${st.idx}` : null, hasMore, cached: false };
+}
 
 app.get('/api/yt/search', authMiddleware, async (req, res) => {
   try {
@@ -1161,15 +1323,20 @@ app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
     const m = /^ytdlp:(.+)$/.exec(String(req.query.itag));
     if (m) formatId = m[1].slice(0, 24);
   }
-  const ext = kind === 'audio' ? 'm4a' : 'mp4';
+  // The instant picker sends a height cap / audio container instead of a format
+  // id, so it never has to wait for a format probe before starting a download.
+  const height = Number(req.query.height) || 0;
+  const audioExt = req.query.ext === 'webm' ? 'webm' : 'm4a';
+  const ext = kind === 'audio' ? audioExt : 'mp4';
   const out = mux.tmpFile(`.${ext}`);
   try {
     // yt-dlp is the reliable downloader: it resolves current signature /
     // proof-of-origin protections and merges adaptive video+audio with ffmpeg
     // in the same pass.
-    await ytFormat.downloadFormat(videoId, { formatId, kind }, out);
+    await ytFormat.downloadFormat(videoId, { formatId, kind, height, audioExt }, out);
     const name = `tojey-${videoId}${kind === 'audio' ? '-audio' : ''}.${ext}`;
-    return streamDownloadFile(res, out, name, kind === 'audio' ? 'audio/mp4' : 'video/mp4');
+    const mime = kind === 'audio' ? (audioExt === 'webm' ? 'audio/webm' : 'audio/mp4') : 'video/mp4';
+    return streamDownloadFile(res, out, name, mime);
   } catch (e) {
     console.error('yt:download error', e.code || '', String(e.message).slice(0, 200));
     await mux.cleanup(out);
@@ -1220,7 +1387,12 @@ app.get('/api/shorts/feed', authMiddleware, async (req, res) => {
     const category = String(req.query.category || 'trending').slice(0, 30);
     const nextToken = String(req.query.nextToken || '').slice(0, 4000) || null;
     const refresh = String(req.query.refresh || '');
-    const result = await shortsFeed.feed(category, nextToken, refresh);
+    // Personalisation inputs from the device's search/watch history. Bounded so
+    // a hostile query string cannot turn into unbounded work.
+    const seeds = parseSeedList(req.query.seeds).slice(0, 8);
+    const exclude = parseSeedList(req.query.exclude).filter((v) => YTID.test(v)).slice(0, 300);
+    const opts = { seeds, exclude, key: (req.user && req.user.username) || 'anon' };
+    const result = await shortsFeed.feed(category, nextToken, refresh, opts);
     res.json({
       // `items` is the field name: the app's own Shorts service returns `items`,
       // and both the Android and web clients read `items`. This response was

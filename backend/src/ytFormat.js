@@ -262,55 +262,74 @@ async function getFormat(videoId) {
   return p;
 }
 
-// Download a specific yt-dlp format to `dest`. For a video-only format the
-// selector asks yt-dlp to merge the best audio in the same pass. `kind` is
-// 'audio' to force an audio-only file.
-async function downloadFormat(videoId, { formatId, kind } = {}, dest) {
+// Download a requested quality to `dest`. Callers may pass an exact yt-dlp
+// `formatId`, a `height` cap (the instant picker uses this), or neither for the
+// best available. Video-only sources are merged with the best audio in the same
+// pass. `kind: 'audio'` forces an audio-only file.
+async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}, dest) {
   const bin = await ensureBinary();
   const binDir = path.dirname(dest);
   fs.mkdirSync(binDir, { recursive: true });
 
   let selector;
   if (kind === 'audio') {
-    selector = 'bestaudio[ext=m4a]/bestaudio/best';
+    const ext = audioExt === 'webm' ? 'webm' : 'm4a';
+    selector = `bestaudio[ext=${ext}]/bestaudio/best`;
   } else if (formatId) {
     selector = `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/${formatId}/bestvideo+bestaudio/best`;
+  } else if (height) {
+    const h = Math.max(144, Math.min(4320, Number(height) || 0));
+    selector = `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
   } else {
     selector = 'bv*+ba/b';
   }
 
-  const args = [
+  const baseArgs = [
     '-f', selector,
     '--no-playlist',
     '--no-warnings',
     '--no-part',
-    '-o', dest,
+    '--no-mtime',
   ];
-  if (FFMPEG) args.push('--ffmpeg-location', FFMPEG);
-  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+  if (kind !== 'audio') baseArgs.push('--merge-output-format', 'mp4');
+  if (FFMPEG) baseArgs.push('--ffmpeg-location', FFMPEG);
+  baseArgs.push(`https://www.youtube.com/watch?v=${videoId}`);
 
-  // YouTube occasionally answers a signed-URL request with a transient 403;
-  // a second attempt almost always succeeds. Clean any partial output first.
+  // Render's datacenter IP is inconsistently flagged by YouTube. Try the same
+  // client ladder used for extraction, so a download that fails on one client
+  // can still succeed on another instead of surfacing "download unavailable".
+  const clients = [
+    null,
+    'youtube:player_client=android_vr,ios,web_safari',
+    'youtube:player_client=tv,web_safari',
+  ];
+
   let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
-    try {
-      await new Promise((resolve, reject) => {
-        execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
-          if (err) {
-            const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
-            const e = new Error(msg);
-            e.code = 'DOWNLOAD_FAIL';
-            return reject(e);
-          }
-          resolve();
+  for (const clientArgs of clients) {
+    const args = ['-o', dest, ...baseArgs];
+    if (clientArgs) args.unshift('--extractor-args', clientArgs);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+      try {
+        await new Promise((resolve, reject) => {
+          execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
+            if (err) {
+              const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
+              const e = new Error(msg);
+              e.code = 'DOWNLOAD_FAIL';
+              return reject(e);
+            }
+            resolve();
+          });
         });
-      });
-      if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
-      throw new Error('download produced no file');
-    } catch (e) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
+        throw new Error('download produced no file');
+      } catch (e) {
+        lastErr = e;
+        const transient = /403|429|timed out|connection|temporar|fragment/i.test(e.message || '');
+        if (!transient && attempt === 0) continue;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
     }
   }
   const e = new Error(lastErr ? lastErr.message : 'download failed');

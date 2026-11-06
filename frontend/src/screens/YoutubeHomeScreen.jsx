@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, Users, LogOut, Maximize, Minimize } from 'lucide-react';
+import { MessageCircle, Settings, PlaySquare, Download, Check, Bookmark, X, Search, Users, LogOut, Maximize, Minimize, Smile, Send } from 'lucide-react';
 import YoutubePlayer from '../components/YoutubePlayer';
 import YoutubeBrowse from '../components/YoutubeBrowse';
 import DownloadMenu from '../components/DownloadMenu';
 import { useWatchTogether } from '../services/WatchTogetherContext';
+import { getRecommendationSeeds, getWatchedVideoIds } from '../services/recommendation';
+import { addWatchHistory } from '../components/YoutubeBrowse';
 
 const API = import.meta.env.VITE_API_URL || '';
 
 const FALLBACK_CATEGORIES = [
-  { id: 'trending', label: 'Trending' },
+  { id: 'recommended', label: 'For You' },
   { id: 'music', label: 'Music' },
   { id: 'comedy', label: 'Comedy' },
   { id: 'gaming', label: 'Gaming' },
@@ -55,7 +57,7 @@ function fmtDuration(sec) {
 
 export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState('trending');
+  const [category, setCategory] = useState('recommended');
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -68,6 +70,8 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [saved, setSaved] = useState([]);
   const nextPageTokenRef = useRef(null);
   const requestIdRef = useRef(0);
+  const servedIdsRef = useRef(new Set());
+  const recNonceRef = useRef(0);
 
   useEffect(() => { setSaved(getSaved()); }, []);
 
@@ -93,9 +97,24 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       if (opts.replace) setLoading(true); else setLoadingMore(true);
       const q = [`category=${encodeURIComponent(cat)}`, `refresh=${opts.refresh ? 'true' : 'false'}`];
       if (pageToken) q.push(`pageToken=${encodeURIComponent(pageToken)}`);
+      if (cat === 'recommended') {
+        // Personalise from this device's searches/watches, and stop the same
+        // cards from coming back on refresh.
+        const seeds = getRecommendationSeeds(8);
+        const exclude = new Set([...getWatchedVideoIds(250), ...servedIdsRef.current]);
+        if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+        if (exclude.size) q.push(`exclude=${encodeURIComponent(JSON.stringify([...exclude].slice(-300)))}`);
+        if (!pageToken) q.push(`nonce=${recNonceRef.current++}`);
+      }
       const res = await fetch(`${API}/api/youtube/feed?${q.join('&')}`, { headers: authHeaders });
       const data = await res.json();
       if (reqId !== requestIdRef.current) return;
+      if (cat === 'recommended') {
+        for (const v of data.videos || []) if (v && v.videoId) servedIdsRef.current.add(v.videoId);
+        if (servedIdsRef.current.size > 500) {
+          servedIdsRef.current = new Set([...servedIdsRef.current].slice(-400));
+        }
+      }
       setVideos((prev) => (opts.replace ? data.videos || [] : [...prev, ...(data.videos || [])]));
       nextPageTokenRef.current = data.nextPageToken;
       setHasMore(!!data.hasMore);
@@ -216,12 +235,12 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           )}
 
           <div style={{ fontSize: 15, fontWeight: 800, margin: '16px 14px 8px', color: theme.text }}>
-            {FALLBACK_CATEGORIES.find((c) => c.id === category)?.label} videos
+            {category === 'recommended' ? 'Recommended for you' : `${FALLBACK_CATEGORIES.find((c) => c.id === category)?.label || ''} videos`}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '0 8px' }}>
             {videos.map((v) => (
-              <div key={v.videoId} style={{ cursor: 'pointer' }} onClick={() => setWatch(v)}>
+              <div key={v.videoId} data-yt-card={v.videoId} style={{ cursor: 'pointer' }} onClick={() => { addWatchHistory(v); setWatch(v); }}>
                 <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
                   <img src={thumbnailUrlFor(v)} alt={v.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   <div style={{ position: 'absolute', right: 6, bottom: 6, background: 'rgba(16,11,26,0.85)', borderRadius: 4, padding: '1px 5px', fontSize: 10, color: '#fff', fontWeight: 700 }}>
@@ -280,8 +299,11 @@ function WatchModal({ item, token, onClose }) {
 
   const isGuest = inRoom && !wt.isHost;
   const playerWrapRef = useRef(null);
+  const chatEndRef = useRef(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const [reactionBurst, setReactionBurst] = useState(null);
+  const [reactOpen, setReactOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatText, setChatText] = useState('');
 
   useEffect(() => {
     const onFs = () => setFullscreen(!!document.fullscreenElement);
@@ -290,11 +312,9 @@ function WatchModal({ item, token, onClose }) {
   }, []);
 
   useEffect(() => {
-    if (!wt.reaction) return undefined;
-    setReactionBurst(wt.reaction);
-    const t = setTimeout(() => setReactionBurst(null), 2200);
-    return () => clearTimeout(t);
-  }, [wt.reaction]);
+    if (!chatOpen) return;
+    if (chatEndRef.current) chatEndRef.current.scrollTop = chatEndRef.current.scrollHeight;
+  }, [chatOpen, wt.messages.length]);
 
   const toggleFullscreen = useCallback(() => {
     const el = playerWrapRef.current;
@@ -340,8 +360,76 @@ function WatchModal({ item, token, onClose }) {
             </div>
           )}
 
+          {inRoom && (
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => { setReactOpen((o) => !o); setChatOpen(false); setMenuOpen(false); }}
+                style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.panelBg, color: theme.text }}
+                aria-label="Send a reaction"
+                title="Send a reaction"
+              >
+                <Smile size={18} />
+              </button>
+              {reactOpen && (
+                <div style={{ position: 'absolute', top: 44, right: 0, zIndex: 8, display: 'flex', gap: 2, padding: 6, borderRadius: 14, background: theme.panelBg, border: `1px solid ${theme.border}`, boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
+                  {quickReactions.map((emoji) => (
+                    <button
+                      key={emoji}
+                      onClick={() => { wt.sendReaction(emoji); setReactOpen(false); }}
+                      title={`React ${emoji}`}
+                      style={{ fontSize: 20, lineHeight: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', borderRadius: 10 }}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {inRoom && (
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => { setChatOpen((o) => !o); setReactOpen(false); setMenuOpen(false); }}
+                style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.panelBg, color: theme.text }}
+                aria-label="Watch chat"
+                title="Watch chat"
+              >
+                <MessageCircle size={18} />
+              </button>
+              {chatOpen && (
+                <div style={{ position: 'absolute', top: 44, right: 0, zIndex: 8, width: 268, maxHeight: 320, display: 'flex', flexDirection: 'column', borderRadius: 12, overflow: 'hidden', background: theme.panelBg, border: `1px solid ${theme.border}`, boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
+                  <div ref={chatEndRef} style={{ flex: 1, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 70 }}>
+                    {wt.messages.length ? wt.messages.map((m) => (
+                      <div key={m.id} style={{ fontSize: 12, lineHeight: 1.4, color: theme.text, wordBreak: 'break-word' }}>
+                        <b style={{ color: theme.primary }}>{(m.by && m.by.displayName) || 'Friend'}</b>{': '}{m.text}
+                      </div>
+                    )) : (
+                      <div style={{ fontSize: 12, color: theme.textSecondary }}>No messages yet. Say hi!</div>
+                    )}
+                  </div>
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); wt.sendMessage(chatText); setChatText(''); }}
+                    style={{ display: 'flex', gap: 6, padding: 8, borderTop: `1px solid ${theme.border}` }}
+                  >
+                    <input
+                      value={chatText}
+                      onChange={(e) => setChatText(e.target.value)}
+                      maxLength={500}
+                      placeholder="Message…"
+                      style={{ flex: 1, minWidth: 0, background: theme.inputBg || theme.background, color: theme.text, border: `1px solid ${theme.border}`, borderRadius: 8, padding: '7px 9px', fontSize: 12, outline: 'none' }}
+                    />
+                    <button type="submit" aria-label="Send message" style={{ width: 34, height: 34, borderRadius: 8, border: 'none', cursor: 'pointer', background: theme.primary, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Send size={15} />
+                    </button>
+                  </form>
+                </div>
+              )}
+            </div>
+          )}
+
           <button
-            onClick={() => setMenuOpen((o) => !o)}
+            onClick={() => { setMenuOpen((o) => !o); setReactOpen(false); setChatOpen(false); }}
             style={{ width: 38, height: 38, borderRadius: 20, border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.panelBg, color: theme.text }}
             aria-label="Video options"
             title="Video options"
@@ -367,44 +455,33 @@ function WatchModal({ item, token, onClose }) {
             </div>
           )}
         </div>
-        <div ref={playerWrapRef} style={{ background: '#000', width: '100%', position: 'relative' }}>
-          <style>{`@keyframes wtFloat{0%{opacity:0;transform:translate(-50%,24px) scale(.6)}15%{opacity:1;transform:translate(-50%,0) scale(1.15)}100%{opacity:0;transform:translate(-50%,-140px) scale(1)}}.wt-reaction-burst{animation:wtFloat 2.2s ease-out forwards}`}</style>
+        <div ref={playerWrapRef} data-wt-player="" style={{ background: '#000', width: '100%', position: 'relative' }}>
+          <style>{`[data-wt-player]:fullscreen .wt-player,[data-wt-player]:fullscreen .wt-player>div{width:100%!important;height:100%!important;aspect-ratio:auto!important}`}</style>
           {vid ? (
-            <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} onController={onController} onUserAction={onUserAction} />
+            <div className="wt-player" style={{ width: '100%' }}>
+              <YoutubePlayer videoId={vid} token={token} poster={thumbnailUrlFor(item)} onController={onController} onUserAction={onUserAction} />
+            </div>
           ) : (
             <div style={{ color: theme.textSecondary, textAlign: 'center', padding: 30 }}>Video unavailable</div>
           )}
 
-          {reactionBurst && (
-            <div key={reactionBurst.id} className="wt-reaction-burst" style={{ position: 'absolute', left: '50%', bottom: 140, zIndex: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
-              <span style={{ fontSize: 44, lineHeight: 1 }}>{reactionBurst.emoji}</span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '1px 7px', marginTop: 2 }}>
-                {(reactionBurst.by && reactionBurst.by.displayName) || 'Friend'}
+          {wt.bubble && (
+            <div
+              key={wt.bubble.id}
+              style={{
+                position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 9,
+                maxWidth: '82%', display: 'flex', alignItems: 'center', gap: 8,
+                padding: '6px 12px', borderRadius: 16, pointerEvents: 'none',
+                background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,255,255,0.9)',
+                color: '#fff', fontSize: 12.5, lineHeight: 1.35, backdropFilter: 'blur(6px)',
+                boxShadow: '0 6px 20px rgba(0,0,0,0.35)',
+              }}
+            >
+              {wt.bubble.kind === 'reaction' ? <span style={{ fontSize: 18, lineHeight: 1 }}>{wt.bubble.emoji}</span> : null}
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <b>{(wt.bubble.by && wt.bubble.by.displayName) || 'Friend'}</b>
+                {wt.bubble.kind === 'message' ? `: ${wt.bubble.text}` : ' reacted'}
               </span>
-            </div>
-          )}
-
-          {inRoom && (
-            <div style={{ position: 'absolute', left: '50%', bottom: 58, transform: 'translateX(-50%)', zIndex: 7, display: 'flex', alignItems: 'center', gap: 4, padding: '5px 8px', borderRadius: 22, background: 'rgba(10,6,18,0.72)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.12)' }}>
-              {quickReactions.map((emoji) => (
-                <button
-                  key={emoji}
-                  onClick={() => wt.sendReaction(emoji)}
-                  title={`React ${emoji}`}
-                  style={{ fontSize: 19, lineHeight: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', borderRadius: 12 }}
-                >
-                  {emoji}
-                </button>
-              ))}
-              {isGuest && (
-                <button
-                  onClick={toggleFullscreen}
-                  title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, marginLeft: 2, background: 'rgba(255,255,255,0.14)', border: 'none', cursor: 'pointer', borderRadius: 16, color: '#fff' }}
-                >
-                  {fullscreen ? <Minimize size={15} /> : <Maximize size={15} />}
-                </button>
-              )}
             </div>
           )}
 
@@ -415,6 +492,17 @@ function WatchModal({ item, token, onClose }) {
               title="Only the host controls playback"
               style={{ position: 'absolute', inset: 0, zIndex: 6, cursor: 'default', background: 'transparent' }}
             />
+          )}
+
+          {isGuest && (
+            <button
+              onClick={toggleFullscreen}
+              title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              style={{ position: 'absolute', right: 10, bottom: 10, zIndex: 8, width: 34, height: 34, borderRadius: 18, border: '1px solid rgba(255,255,255,0.6)', background: 'rgba(0,0,0,0.55)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+            >
+              {fullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+            </button>
           )}
 
           {!!wt.partnerLeft && sanitizeVideoId(wt.partnerLeft.videoId) === vid && (

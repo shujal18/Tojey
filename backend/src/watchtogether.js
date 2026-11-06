@@ -100,6 +100,7 @@ function stateFor(room) {
     host: room.host,
     rate: room.rate || 1,
     members: roomMembers(room),
+    messages: (room.messages || []).slice(-40),
   };
 }
 
@@ -302,6 +303,7 @@ function attach(socket) {
       playing: false,
       position: 0,
       rate: 1,
+      messages: [],
       seq: 1,
     };
     rooms.set(room.id, room);
@@ -353,6 +355,26 @@ function attach(socket) {
     room.seq += 1;
     broadcastState(room);
     return done({ ok: true });
+  });
+
+  // In-player chat: both participants may message while watching. Kept in the
+  // room (bounded) so a reconnect restores the recent conversation.
+  socket.on('wt:message', (payload, cb) => {
+    const done = ack(cb);
+    const roomId = String((payload && payload.roomId) || '');
+    const room = rooms.get(roomId);
+    if (!room || !room.members.has(username)) return done({ ok: false });
+    const text = String((payload && payload.text) || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!text) return done({ ok: false });
+    const message = {
+      id: `msg${idSeq++}`,
+      text,
+      by: person(username),
+      at: Date.now(),
+    };
+    room.messages = [...(room.messages || []), message].slice(-40);
+    io.to(roomSock(room.id)).emit('wt:message', { roomId: room.id, ...message });
+    return done({ ok: true, message });
   });
 
   // Reactions are allowed for both participants (they are not playback control).

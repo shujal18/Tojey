@@ -3,6 +3,8 @@ import { RefreshCw, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
 import { streamUrl, ytEgressBlocked, noteEgressBlocked } from '../components/YoutubePlayer';
 import YouTubeEmbed from '../components/YouTubeEmbed';
+import { addWatchHistory } from '../components/YoutubeBrowse';
+import { getRecommendationSeeds, getWatchedVideoIds } from '../services/recommendation';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -170,6 +172,12 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       // differ: `nextToken` (not `pageToken`) and `items` (not `videos`).
       const queryParts = [`category=${encodeURIComponent(cat)}`, `refresh=${refresh ? 'true' : 'false'}`];
       if (pageToken) queryParts.push(`nextToken=${encodeURIComponent(pageToken)}`);
+      // Personalise the For You stream from search/watch history and never
+      // re-serve clips this session has already shown.
+      const seeds = getRecommendationSeeds(8);
+      const exclude = new Set([...getWatchedVideoIds(250), ...seenVideoIdsRef.current]);
+      if (seeds.length) queryParts.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+      if (exclude.size) queryParts.push(`exclude=${encodeURIComponent(JSON.stringify([...exclude].slice(-300)))}`);
       const qs = queryParts.join('&');
 
       if (!append && !pageToken && !refresh) {
@@ -514,6 +522,20 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       showToast('This Short is unavailable');
     }
   }, [showToast, switchToIndex]);
+
+  // Remember what the user actually watched so both the Home grid and the
+  // Shorts feed can personalise instead of looping the same clips.
+  useEffect(() => {
+    const item = videos[activeIdx];
+    if (!item || !item.videoId) return;
+    addWatchHistory({
+      videoId: item.videoId,
+      title: item.title,
+      thumbnailUrl: thumbnailUrlFor(item),
+      channelTitle: item.channelTitle || item.author,
+      durationSeconds: item.durationSeconds,
+    });
+  }, [videos, activeIdx]);
 
   const handleScroll = useCallback(() => {
     const el = shellRef.current;

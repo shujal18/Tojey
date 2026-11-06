@@ -118,15 +118,37 @@ function mapItem(it) {
 
 // ---- seed sessions (fresh content rotation) ----------------------------------
 
-const sessions = new Map(); // category -> { seed, pos }
+const sessions = new Map(); // `${category}|${user}` -> { seed, pos }
 
-function seedForCategory(category, refresh) {
-  const seeds = CATEGORY_SEEDS[category] || CATEGORY_SEEDS.trending;
-  let s = sessions.get(category);
+// Per-user served ids keep the For You stream from replaying the same clips.
+// Bounded + TTL, process memory only (same as the rest of this feed).
+const SERVED_TTL_MS = 30 * 60 * 1000;
+const SERVED_MAX = 400;
+const servedMemory = new Map(); // `${category}|${user}` -> { ids:Set, at }
+
+function servedFor(key) {
+  let e = servedMemory.get(key);
+  if (!e || Date.now() - e.at > SERVED_TTL_MS) {
+    e = { ids: new Set(), at: Date.now() };
+    servedMemory.set(key, e);
+  }
+  return e;
+}
+
+function seedForCategory(category, refresh, opts = {}) {
+  const base = CATEGORY_SEEDS[category] || CATEGORY_SEEDS.trending;
+  const personal = Array.isArray(opts.seeds)
+    ? opts.seeds.map((q) => String(q || '').trim()).filter(Boolean).slice(0, 8)
+    : [];
+  // For You mixes fresh history-derived searches in front of the generic seeds;
+  // other categories keep their topical seeds.
+  const seeds = category === 'trending' && personal.length ? [...personal, ...base] : base;
+  const key = `${category}|${opts.key || ''}`;
+  let s = sessions.get(key);
   if (refresh || !s) {
     const pos = s ? s.pos + 1 : 0;
     s = { seed: seeds[pos % seeds.length], pos };
-    sessions.set(category, s);
+    sessions.set(key, s);
   }
   return s.seed;
 }
@@ -167,13 +189,18 @@ function isKnownCategory(category) {
 // Rotates through the category's seeds on a refresh so the user sees different
 // clips instead of the same prefix every time. Without a refresh the current
 // seed is reused, which the cache serves instantly.
-async function feed(category, nextToken, refresh) {
+async function feed(category, nextToken, refresh, opts = {}) {
   const cat = isKnownCategory(category) ? category : 'trending';
   const wantRefresh = refresh === true || refresh === 'true' || refresh === '1';
-  const seed = seedForCategory(cat, wantRefresh);
+  const seed = seedForCategory(cat, wantRefresh, opts);
+  const servedKey = `${cat}|${opts.key || ''}`;
+  const served = servedFor(servedKey);
+  const exclude = new Set(
+    (Array.isArray(opts.exclude) ? opts.exclude : []).filter((v) => VIDEO_ID_RE.test(v))
+  );
 
-  const key = `${cat}:${seed}:${nextToken || ''}`;
-  if (!wantRefresh && !nextToken) {
+  const key = `${cat}:${seed}:${nextToken || ''}:${opts.key || ''}`;
+  if (!wantRefresh && !nextToken && !exclude.size) {
     const hit = cacheGet(key);
     if (hit) return { ...hit, seed, cached: true };
   }
@@ -200,6 +227,7 @@ async function feed(category, nextToken, refresh) {
   const raw = Array.isArray(j.items) ? j.items : [];
   const seen = new Set();
   const items = [];
+  const suppressed = [];
   let failedSkipped = 0;
   for (const it of raw) {
     const mapped = mapItem(it);
@@ -210,7 +238,26 @@ async function feed(category, nextToken, refresh) {
       failedSkipped += 1;
       continue;
     }
+    if (exclude.has(mapped.videoId) || served.ids.has(mapped.videoId)) {
+      suppressed.push(mapped);
+      continue;
+    }
     items.push(mapped);
+  }
+
+  // Never hand back an empty For You page just because everything on it was
+  // already seen. Re-show the least-recently served batch instead.
+  if (!items.length && suppressed.length) {
+    for (const m of suppressed) {
+      if (items.length >= 12) break;
+      items.push(m);
+    }
+  }
+
+  for (const m of items) served.ids.add(m.videoId);
+  served.at = Date.now();
+  if (served.ids.size > SERVED_MAX) {
+    served.ids = new Set([...served.ids].slice(-Math.floor(SERVED_MAX * 0.75)));
   }
 
   const hasMore = j.hasMore === true && typeof j.nextToken === 'string' && !!j.nextToken;
@@ -232,6 +279,9 @@ async function feed(category, nextToken, refresh) {
       items.push(mapped);
     }
   }
+  // Record everything actually returned (including the fallback batch).
+  for (const m of items) served.ids.add(m.videoId);
+  served.at = Date.now();
   if (!nextToken) cacheSet(key, { items: out.items, nextToken: out.nextToken, hasMore: out.hasMore });
   return out;
 }

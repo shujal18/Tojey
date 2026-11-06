@@ -1,7 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { X, Download, Film, Music, RefreshCw } from 'lucide-react';
-import { triggerDownload } from './YoutubePlayer';
+import { X, Download, Film, Music, Check } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -18,30 +17,38 @@ function fmtKbps(bitrate) {
   return `${Math.round(n / 1000)} kbps`;
 }
 
-// Small modal that lets the user pick a format/quality and downloads the file
-// straight to their device. Bytes stream through the backend proxy
-// (/api/yt/media ...&download=1), which sets Content-Disposition: attachment so
-// the browser saves the file instead of navigating.
+// The picker renders usable qualities immediately; a background probe then
+// replaces them with the exact heights/sizes this video actually offers. The
+// probe never blocks downloading, so a slow/blocked YouTube lookup can no longer
+// turn into "Downloading isn't available for this video right now."
+const BASE_VIDEO = [
+  { key: 'auto', label: 'Auto (best)', height: 0, note: 'Best available · MP4' },
+  { key: '1080', label: '1080p', height: 1080, note: 'Full HD · MP4' },
+  { key: '720', label: '720p', height: 720, note: 'HD · MP4' },
+  { key: '480', label: '480p', height: 480, note: 'SD · MP4' },
+  { key: '360', label: '360p', height: 360, note: 'MP4' },
+  { key: '240', label: '240p', height: 240, note: 'MP4' },
+  { key: '144', label: '144p', height: 144, note: 'MP4' },
+];
+
+const BASE_AUDIO = [
+  { key: 'm4a', label: 'Audio · M4A', ext: 'm4a', note: 'Best audio · M4A · works everywhere' },
+  { key: 'webm', label: 'Audio · Opus', ext: 'webm', note: 'Best audio · WebM/Opus' },
+];
+
 export default function DownloadMenu({ videoId, token, title, onClose }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('video');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [gated, setGated] = useState(false);
-  const [videoOptions, setVideoOptions] = useState([]);
-  const [audioOptions, setAudioOptions] = useState([]);
-  const [reason, setReason] = useState('');
+  const [videoOptions, setVideoOptions] = useState(BASE_VIDEO);
+  const [audioOptions, setAudioOptions] = useState(BASE_AUDIO);
+  const [exact, setExact] = useState(false);
+  const [picked, setPicked] = useState('');
+  const closeTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError('');
-    setGated(false);
-    setReason('');
     const ctrl = new AbortController();
-    // yt-dlp may need to refresh its binary and resolve signatures on the first
-    // request after a deploy, so allow more time than a pure innertube probe.
-    const t = setTimeout(() => ctrl.abort(), 45000);
+    const t = setTimeout(() => ctrl.abort(), 30000);
     fetch(`${API}/api/yt/streams/${videoId}?probe=1`, {
       headers: { Authorization: `Bearer ${token || ''}` },
       signal: ctrl.signal,
@@ -50,97 +57,69 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('unavailable'))))
       .then((data) => {
         if (cancelled) return;
-        // When the backend can remux, a video-only (HD) adaptive format is
-        // downloaded with its audio track mixed back in, so it is offered as a
-        // normal "with audio" quality (its size includes the audio track).
-        const gatedVideo = data.gated === true;
-        setGated(gatedVideo);
-        // Remuxing into a single MP4 needs an AAC track; without one, HD
-        // downloads are honestly offered as video-only instead.
-        const canMux = data.canMux === true && !gatedVideo && !!data.defaultAudio;
-        const audioSize = Number(data.defaultAudio && data.defaultAudio.contentLength) || 0;
-        const progressive = (data.formats || [])
-          .filter((f) => f.hasVideo && f.hasAudio)
-          .map((f) => ({ ...f, withAudio: true, muxApi: false }));
-        const videoOnly = (data.adaptiveFormats || [])
-          .filter((f) => f.hasVideo && !f.hasAudio)
-          .map((f) => ({
-            ...f,
-            withAudio: canMux,
-            muxApi: canMux,
-            contentLength: (Number(f.contentLength) || 0) + (canMux ? audioSize : 0),
-          }));
-        let vids;
-        if (canMux) {
-          // YouTube offers several codecs per resolution (H.264/VP9/AV1). All
-          // remux fine server-side, so keep one entry per height and prefer
-          // H.264 (most compatible for a downloaded file).
-          const rank = (f) => (/avc1/.test(f.codecs || '') ? 0 : /av01/.test(f.codecs || '') ? 1 : 2);
-          const byHeight = new Map();
-          for (const f of videoOnly) {
-            const h = f.height || 0;
-            const cur = byHeight.get(h);
-            if (!cur || rank(f) < rank(cur)) byHeight.set(h, f);
+        const all = [...(data.formats || []), ...(data.adaptiveFormats || [])];
+        const videoOnly = (data.adaptiveFormats || []).filter((f) => f.hasVideo && !f.hasAudio);
+        const progressive = (data.formats || []).filter((f) => f.hasVideo && f.hasAudio);
+
+        // Exact heights the video really offers, with their largest size.
+        const byHeight = new Map();
+        for (const f of [...videoOnly, ...progressive]) {
+          const h = Number(f.height) || 0;
+          if (!h) continue;
+          const size = Number(f.contentLength) || 0;
+          const cur = byHeight.get(h);
+          if (!cur || size > cur.size) byHeight.set(h, { size, withAudio: !!f.hasAudio });
+        }
+        const heights = [...byHeight.keys()].sort((a, b) => b - a);
+        if (heights.length) {
+          const autoSize = Number((data.formats || []).find((f) => f.hasVideo && f.hasAudio)?.contentLength) || 0;
+          const opts = [{ key: 'auto', label: 'Auto (best)', height: 0, note: `Best available · MP4${autoSize ? ` · ${fmtSize(autoSize)}` : ''}` }];
+          for (const h of heights) {
+            const meta = byHeight.get(h);
+            const bits = ['MP4'];
+            bits.push(meta.withAudio ? 'with audio' : 'merged with audio');
+            if (meta.size) bits.push(fmtSize(meta.size));
+            opts.push({ key: String(h), label: `${h}p`, height: h, note: bits.join(' · ') });
           }
-          vids = [...byHeight.values()];
+          setVideoOptions(opts);
+          setExact(true);
         }
-        if (gatedVideo) vids = progressive;
-        else if (!vids || !vids.length) vids = [...progressive, ...videoOnly];
-        vids.sort((a, b) => {
-          if (a.withAudio !== b.withAudio) return a.withAudio ? -1 : 1;
-          return (b.height || 0) - (a.height || 0);
-        });
-        const auds = (data.adaptiveFormats || [])
-          .filter((f) => f.hasAudio && !f.hasVideo)
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        // Surface why a video has no formats instead of a bare "No format
-        // available": the backend returns playability status/reason (private,
-        // age-restricted, region-locked, bot-checked, deleted...).
-        const st = String(data.status || '');
-        const why = String(data.reason || '').trim();
-        const unavailable = st && st !== 'OK';
-        if (unavailable && !vids.length && !auds.length) {
-          setError(why ? `This video can’t be downloaded — ${why}.` : 'This video can’t be downloaded right now.');
-        }
-        setVideoOptions(vids);
-        setAudioOptions(auds);
-        setReason(why);
-        if (!vids.length && auds.length) setTab('audio');
-        else if (!vids.length && !auds.length && !unavailable) setError('No downloadable formats for this video.');
+
+        const auds = (data.adaptiveFormats || []).filter((f) => f.hasAudio && !f.hasVideo);
+        const m4a = auds.filter((f) => /m4a|mp4a/.test(`${f.ext || ''} ${f.mimeType || ''} ${f.codecs || ''}`)).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+        const webm = auds.filter((f) => /webm|opus/.test(`${f.ext || ''} ${f.mimeType || ''} ${f.codecs || ''}`)).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+        const audioOpts = [];
+        if (m4a) audioOpts.push({ key: 'm4a', label: 'Audio · M4A', ext: 'm4a', note: ['M4A', fmtKbps(m4a.bitrate), fmtSize(m4a.contentLength)].filter(Boolean).join(' · ') });
+        if (webm) audioOpts.push({ key: 'webm', label: 'Audio · Opus', ext: 'webm', note: ['WebM', fmtKbps(webm.bitrate), fmtSize(webm.contentLength)].filter(Boolean).join(' · ') });
+        if (audioOpts.length) setAudioOptions(audioOpts);
       })
-      .catch((e) => {
-        if (!cancelled) setError('Downloading isn’t available for this video right now.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
+      .catch(() => { /* keep the instant list; downloads still work */ });
+    return () => { cancelled = true; ctrl.abort(); };
   }, [videoId, token]);
 
+  useEffect(() => () => { if (closeTimerRef.current) clearTimeout(closeTimerRef.current); }, []);
+
   function pick(f) {
-    try {
-      const itagStr = String(f.itag || '');
-      if (itagStr.startsWith('ytdlp')) {
-        const isAudio = tab === 'audio';
-        // yt-dlp formats carry their real YouTube format id (e.g. "136") or the
-        // newer "ytdlp:136" form. The backend downloads and merges via yt-dlp.
-        const fmtId = f.ytdlpFormatId || (itagStr.includes(':') ? itagStr.split(':')[1] : '');
-        const qs = new URLSearchParams();
-        qs.set('audio', isAudio ? '1' : '0');
-        if (fmtId) qs.set('fmt', fmtId);
-        if (token) qs.set('token', token);
-        const a = document.createElement('a');
-        a.href = `${API}/api/yt/download/${videoId}?${qs.toString()}`;
-        a.rel = 'noopener';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      } else {
-        triggerDownload(videoId, token, f.itag, !!f.muxApi);
-      }
-    } catch (e) {}
-    onClose();
-  };
+    const isAudio = tab === 'audio';
+    const qs = new URLSearchParams();
+    qs.set('audio', isAudio ? '1' : '0');
+    if (isAudio) {
+      if (f.ext) qs.set('ext', f.ext);
+    } else if (f.height) {
+      qs.set('height', String(f.height));
+    }
+    if (token) qs.set('token', token);
+    const a = document.createElement('a');
+    a.href = `${API}/api/yt/download/${videoId}?${qs.toString()}`;
+    a.rel = 'noopener';
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setPicked(f.key);
+    // Give the browser a beat to start the download, then close.
+    closeTimerRef.current = setTimeout(() => { if (onClose) onClose(); }, 350);
+  }
 
   const options = tab === 'video' ? videoOptions : audioOptions;
 
@@ -173,7 +152,7 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 400, maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+          width: '100%', maxWidth: 420, maxHeight: '82vh', display: 'flex', flexDirection: 'column',
           background: theme.background, borderRadius: 14, overflow: 'hidden', boxShadow: theme.frameShadow,
         }}
       >
@@ -196,71 +175,34 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
         </div>
 
         <div style={{ overflowY: 'auto', padding: '6px 12px 14px' }}>
-          {loading && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 28, color: theme.textSecondary, fontSize: 13 }}>
-              <RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> Preparing formats…
-            </div>
-          )}
-
-          {!loading && error && (
-            <div style={{ padding: 20, textAlign: 'center', color: theme.textSecondary, fontSize: 13, lineHeight: 1.5 }}>
-              {error}
-            </div>
-          )}
-
-          {!loading && !error && gated && tab === 'video' && (
-            <div style={{ margin: '6px 0 2px', padding: '9px 11px', borderRadius: 10, background: theme.primaryLight || 'rgba(124,58,237,0.12)', color: theme.textSecondary, fontSize: 12, lineHeight: 1.5 }}>
-              YouTube restricts HD for this video, so it downloads in 360p with audio.
-            </div>
-          )}
-
-          {!loading && !error && options.length === 0 && (
-            <div style={{ padding: 20, textAlign: 'center', color: theme.textSecondary, fontSize: 13, lineHeight: 1.6 }}>
-              {reason ? `YouTube returned: ${reason}.` : null}
-              {reason ? <br /> : null}
-              {tab === 'audio'
-                ? (videoOptions.length
-                  ? 'No audio-only track for this video — the Video download already includes audio.'
-                  : 'No audio formats are available for this video.')
-                : (audioOptions.length
-                  ? 'No video track for this video — try the Audio tab.'
-                  : 'No video formats are available for this video.')}
-            </div>
-          )}
-
-          {!loading && !error && options.map((f) => {
+          {options.map((f) => {
             const isAudio = tab === 'audio';
-            const label = isAudio
-              ? (f.bitrate ? fmtKbps(f.bitrate) : 'Audio')
-              : (f.qualityLabel || (f.height ? `${f.height}p` : 'Video'));
-            const size = fmtSize(f.contentLength);
-            const container = isAudio
-              ? (/audio\/webm/.test(f.mimeType || '') ? 'WEBM' : 'M4A')
-              : 'MP4';
-            const bits = [container];
-            if (!isAudio && f.withAudio) bits.push('with audio');
-            if (!isAudio && !f.withAudio) bits.push('no audio');
-            if (!isAudio && f.fps && f.fps >= 50) bits.push(`${f.fps}fps`);
-            if (size) bits.push(size);
+            const isPicked = picked === f.key;
             return (
               <button
-                key={`${tab}-${f.itag}`}
+                key={`${tab}-${f.key}`}
                 onClick={() => pick(f)}
                 style={{
                   width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   gap: 10, padding: '11px 12px', marginTop: 6, borderRadius: 10, cursor: 'pointer',
-                  background: theme.panelBg || theme.primaryLight, border: `1px solid ${theme.border}`,
+                  background: isPicked ? (theme.primaryLight || 'rgba(124,58,237,0.18)') : (theme.panelBg || theme.primaryLight),
+                  border: `1px solid ${isPicked ? theme.primary : theme.border}`,
                   textAlign: 'left',
                 }}
               >
                 <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ color: theme.text, fontSize: 14, fontWeight: 700 }}>{label}</span>
-                  <span style={{ color: theme.textSecondary, fontSize: 11.5 }}>{bits.join(' · ')}</span>
+                  <span style={{ color: theme.text, fontSize: 14, fontWeight: 700 }}>{f.label}</span>
+                  <span style={{ color: theme.textSecondary, fontSize: 11.5 }}>{f.note}</span>
                 </span>
-                <Download size={17} color={theme.primary} />
+                {isPicked ? <Check size={17} color={theme.primary} /> : <Download size={17} color={theme.primary} />}
               </button>
             );
           })}
+          <div style={{ marginTop: 12, fontSize: 11, lineHeight: 1.5, color: theme.textSecondary }}>
+            {exact
+              ? 'Choose a quality to start. Your browser saves the file when the server finishes preparing it.'
+              : 'Showing standard qualities. The server picks the closest available and merges audio automatically.'}
+          </div>
         </div>
       </div>
     </div>
