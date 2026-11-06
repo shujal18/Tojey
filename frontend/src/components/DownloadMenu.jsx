@@ -39,7 +39,9 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
     setGated(false);
     setReason('');
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
+    // yt-dlp may need to refresh its binary and resolve signatures on the first
+    // request after a deploy, so allow more time than a pure innertube probe.
+    const t = setTimeout(() => ctrl.abort(), 45000);
     fetch(`${API}/api/yt/streams/${videoId}?probe=1`, {
       headers: { Authorization: `Bearer ${token || ''}` },
       signal: ctrl.signal,
@@ -117,11 +119,18 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
 
   function pick(f) {
     try {
-      if (f.itag && String(f.itag).startsWith('ytdlp')) {
+      const itagStr = String(f.itag || '');
+      if (itagStr.startsWith('ytdlp')) {
         const isAudio = tab === 'audio';
-        const url = `${API}/api/yt/download/${videoId}?audio=${isAudio ? '1' : '0'}&token=${encodeURIComponent(token || '')}`;
+        // yt-dlp formats carry their real YouTube format id (e.g. "136") or the
+        // newer "ytdlp:136" form. The backend downloads and merges via yt-dlp.
+        const fmtId = f.ytdlpFormatId || (itagStr.includes(':') ? itagStr.split(':')[1] : '');
+        const qs = new URLSearchParams();
+        qs.set('audio', isAudio ? '1' : '0');
+        if (fmtId) qs.set('fmt', fmtId);
+        if (token) qs.set('token', token);
         const a = document.createElement('a');
-        a.href = url;
+        a.href = `${API}/api/yt/download/${videoId}?${qs.toString()}`;
         a.rel = 'noopener';
         document.body.appendChild(a);
         a.click();

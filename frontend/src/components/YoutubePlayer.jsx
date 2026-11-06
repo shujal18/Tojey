@@ -130,6 +130,38 @@ export default function YoutubePlayer({
   const controlsTimeoutRef = useRef(null);
   const containerRef = useRef(null);
 
+  const resetControlsTimeout = useCallback(() => {
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    setShowControls(true);
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (playing && !menuOpen && !qualityMenuOpen) setShowControls(false);
+    }, 3000);
+  }, [playing, menuOpen, qualityMenuOpen]);
+
+  const toggleMute = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const newMuted = !v.muted;
+    v.muted = newMuted;
+    setMuted(newMuted);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    resetControlsTimeout();
+    return () => { if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current); document.removeEventListener('fullscreenchange', onFs); };
+  }, [resetControlsTimeout]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoId) return;
@@ -435,38 +467,6 @@ export default function YoutubePlayer({
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [useEmbed, state]);
-
-  const resetControlsTimeout = useCallback(() => {
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    setShowControls(true);
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (playing && !menuOpen && !qualityMenuOpen) setShowControls(false);
-    }, 3000);
-  }, [playing, menuOpen, qualityMenuOpen]);
-
-  useEffect(() => {
-    const onFs = () => setFullscreen(!!document.fullscreenElement);
-    document.addEventListener('fullscreenchange', onFs);
-    resetControlsTimeout();
-    return () => { if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current); document.removeEventListener('fullscreenchange', onFs); };
-  }, [resetControlsTimeout]);
-
-  const toggleMute = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    const newMuted = !v.muted;
-    v.muted = newMuted;
-    setMuted(newMuted);
-  };
-
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
-    } else {
-      document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
-    }
-  };
 
   const chooseLevel = (lvl) => {
     setLevel(lvl);

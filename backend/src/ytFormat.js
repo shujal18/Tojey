@@ -1,16 +1,15 @@
 /**
- * yt-dlp-backed direct stream resolver for Reels.
+ * yt-dlp-backed direct stream resolver + downloader.
  *
- * React Native plays each reel from DIRECT signed stream URLs (video-only mp4 +
- * m4a audio) instead of an anonymous YouTube <embed> session. Embeds get gated
- * when several devices behind one IP open Reels at the same time ("second device
- * just loads"); signed googlevideo URLs stream from any device/network, so
- * MULTIPLE devices can watch at once — like the YouTube app.
+ * Playback (web) uses the innertube layer first and only falls back here when
+ * that is gated. Downloads are most reliable through yt-dlp because it handles
+ * the current YouTube proof-of-origin / signature protections and can merge
+ * adaptive video+audio with ffmpeg in one step.
  *
- * The latest standalone yt-dlp binary is downloaded once into the OS tmp dir on
- * first use (Render has no system yt-dlp). Results are cached per videoId for a
- * few hours and extractions are single-flight and concurrency-capped, so a cold
- * feed only pays the extraction cost once per video.
+ * The standalone yt-dlp binary is refreshed on first use. A stale system binary
+ * (e.g. a distro/old Render image copy) cannot parse today's YouTube player
+ * responses and silently returns only storyboards, so we explicitly compare
+ * versions and download the latest release when the local one is too old.
  */
 
 const fs = require('fs');
@@ -23,18 +22,32 @@ const CACHE_TTL_MS = 3 * 60 * 60 * 1000;   // signed URLs live ~6h
 const EXTRACT_TIMEOUT_MS = 25000;
 const MAX_CONCURRENT = 2;
 
-// Render's datacenter IP is flagged by YouTube, so the default (web-embedded)
-// client answers "Sign in to confirm you're not a bot". Try progressively less
-// bot-gated clients; each is a fresh yt-dlp process. JS runtime (node) lets
-// yt-dlp solve YouTube's proof-of-origin token when the client needs it.
+// Any yt-dlp build from this year or later understands the current player.
+const MIN_YEAR = 2025;
+
+// Optional ffmpeg location for yt-dlp's own merging.
+let FFMPEG = null;
+try {
+  FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
+} catch (e) {
+  FFMPEG = null;
+}
+if (FFMPEG && !fs.existsSync(FFMPEG)) FFMPEG = null;
+if (!FFMPEG && fs.existsSync('/usr/bin/ffmpeg')) FFMPEG = '/usr/bin/ffmpeg';
+
+// Render's datacenter IP is sometimes flagged by YouTube, so try progressively
+// less bot-gated clients. Plain extraction (no args) is attempted first because
+// recent yt-dlp handles the default client well.
 const CLIENT_LADDER = [
+  null,
   'youtube:player_client=android_vr,ios,web_safari',
   'youtube:player_client=tv,web_safari',
   'youtube:player_client=default',
 ];
 
-const formatCache = new Map();   // videoId -> { title, video, audio, fetchedAt }
-const inflight = new Map();      // videoId -> Promise
+const formatCache = new Map();   // videoId -> { title, duration, formats, fetchedAt }
+const pickedCache = new Map();   // videoId -> { title, video, audio, fetchedAt }
+const inflight = new Map();
 let activeExtra = 0;
 const waiters = [];
 
@@ -49,35 +62,64 @@ function release() {
   if (next) { activeExtra += 1; next(); }
 }
 
-async function ensureBinary() {
-  if (process.env.YT_DLP_BIN && fs.existsSync(process.env.YT_DLP_BIN)) return process.env.YT_DLP_BIN;
-  if (fs.existsSync('/usr/bin/yt-dlp')) return '/usr/bin/yt-dlp';
-  if (fs.existsSync('/usr/local/bin/yt-dlp')) return '/usr/local/bin/yt-dlp';
-  if (fs.existsSync(YTDLP_BIN)) {
-    const st = fs.statSync(YTDLP_BIN);
-    if (Date.now() - st.mtimeMs < 30 * 24 * 60 * 60 * 1000) return YTDLP_BIN;
-  }
-  const tmp = `${YTDLP_BIN}.part`;
+function binaryYear(bin) {
+  return new Promise((resolve) => {
+    execFile(bin, ['--version'], { timeout: 5000 }, (err, stdout) => {
+      if (err) return resolve(0);
+      const m = /(\d{4})\.\d{2}\.\d{2}/.exec(String(stdout || ''));
+      resolve(m ? Number(m[1]) : 0);
+    });
+  });
+}
+
+async function downloadLatest(dest) {
+  const tmp = `${dest}.part`;
   await new Promise((resolve, reject) => {
     exec(
-      `mkdir -p "$(dirname '${YTDLP_BIN}')" && curl -fsSL -o '${tmp}' https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x '${tmp}' && mv -f '${tmp}' '${YTDLP_BIN}'`,
-      { timeout: 60000 },
+      `mkdir -p "$(dirname '${dest}')" && curl -fsSL -o '${tmp}' https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x '${tmp}' && mv -f '${tmp}' '${dest}'`,
+      { timeout: 90000 },
       (err) => (err ? reject(err) : resolve())
     );
   });
-  return YTDLP_BIN;
+}
+
+let binPromise = null;
+function ensureBinary() {
+  if (binPromise) return binPromise;
+  binPromise = (async () => {
+    const candidates = [
+      process.env.YT_DLP_BIN,
+      '/usr/local/bin/yt-dlp',
+      '/usr/bin/yt-dlp',
+    ].filter(Boolean);
+    for (const bin of candidates) {
+      if (!fs.existsSync(bin)) continue;
+      const year = await binaryYear(bin);
+      if (year >= MIN_YEAR) return bin;
+    }
+    // Fresh standalone copy we manage ourselves.
+    if (fs.existsSync(YTDLP_BIN)) {
+      const year = await binaryYear(YTDLP_BIN);
+      const st = fs.statSync(YTDLP_BIN);
+      if (year >= MIN_YEAR && Date.now() - st.mtimeMs < 14 * 24 * 60 * 60 * 1000) {
+        return YTDLP_BIN;
+      }
+    }
+    await downloadLatest(YTDLP_BIN);
+    return YTDLP_BIN;
+  })().catch((e) => { binPromise = null; throw e; });
+  return binPromise;
 }
 
 function runExtract(videoId, bin, clientArgs) {
   return new Promise((resolve, reject) => {
     const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
     if (clientArgs) args.push('--extractor-args', clientArgs);
-    // Try watch URL first for most videos
     args.push(`https://www.youtube.com/watch?v=${videoId}`);
     execFile(
       bin,
       args,
-      { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {
           const e = new Error(String((err.stderr || '').split('\n').filter(Boolean).slice(0, 4).join(' | ') || err.message).slice(0, 300));
@@ -96,7 +138,8 @@ function runExtract(videoId, bin, clientArgs) {
   });
 }
 
-async function extractWithLadder(videoId, bin) {
+async function resolveRaw(videoId) {
+  const bin = await ensureBinary();
   let lastErr = null;
   for (const clientArgs of CLIENT_LADDER) {
     try {
@@ -105,144 +148,107 @@ async function extractWithLadder(videoId, bin) {
       lastErr = e;
     }
   }
-  // Try without client args
-  try {
-    const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
-    args.push(`https://www.youtube.com/watch?v=${videoId}`);
-    const json = await new Promise((resolve, reject) => {
-      execFile(bin, args, { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-        if (err) {
-          const e = new Error(String((err.stderr || err.message)).slice(0, 300));
-          e.code = 'EXTRACT_FAIL';
-          return reject(e);
-        }
-        try { resolve(JSON.parse(stdout)); } catch (e) { reject(new Error('bad json')); }
-      });
-    });
-    return json;
-  } catch (e) {
-    // try shorts
-  }
   throw lastErr || new Error('extract failed');
 }
 
-const VIDEO_PREFERRED_IDS = ['298', '135', '134', '299', '302', '303', '243', '242'];
-const AUDIO_PREFERRED_IDS = ['140', '139', '251', '250'];
-
-function pickVideo(formats) {
-  const vids = (formats || []).filter(
-    (f) => f && f.url && f.protocol === 'https' && f.vcodec && f.vcodec !== 'none' && (!f.acodec || f.acodec === 'none')
-  );
-  for (const id of VIDEO_PREFERRED_IDS) {
-    const hit = vids.find((f) => String(f.format_id) === id && f.height && f.height >= 360);
-    if (hit) return hit;
-  }
-  const portrait = vids.filter((f) => f.width && f.height && f.width < f.height && f.height >= 360);
-  const h264 = portrait.filter((f) => String(f.vcodec).startsWith('avc1')).sort((a, b) => b.height - a.height);
-  if (h264.length) return h264.find((f) => f.height <= 720) || h264[0];
-  const vp9 = portrait.sort((a, b) => b.height - a.height);
-  if (vp9.length) return vp9.find((f) => f.height <= 1080) || vp9[0];
-
-  // Shorts often only expose a muxed (progressive) mp4 alongside storyboard
-  // formats, so fall back to the best muxed h264 source when there is no
-  // video-only/audio-only pair to combine.
-  const muxed = (formats || []).filter(
-    (f) => f && f.url && f.protocol === 'https' && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
-  );
-  const muxedH264 = muxed.filter((f) => String(f.vcodec).startsWith('avc1')).sort((a, b) => b.height - a.height);
-  return muxedH264.find((f) => f.height && f.height <= 720) || muxedH264[0] || null;
+function isHttpUrl(f) {
+  return f && f.url && (f.protocol === 'https' || f.protocol === 'http' || !f.protocol);
 }
 
-function pickAudio(formats) {
-  const aud = (formats || []).filter(
-    (f) => f && f.url && f.protocol === 'https' && (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none'
-  );
-  for (const id of AUDIO_PREFERRED_IDS) {
-    const hit = aud.find((f) => String(f.format_id) === id);
-    if (hit) return hit;
-  }
-  const m4a = aud.filter((f) => f.ext === 'm4a').sort((a, b) => (b.abr || 0) - (a.abr || 0));
-  if (m4a.length) return m4a[0];
-  return aud.sort((a, b) => (b.abr || 0) - (a.abr || 0))[0] || null;
+// Normalise a yt-dlp format object into the flat shape both the API and the
+// download picker consume.
+function normalizeFormat(f) {
+  if (!isHttpUrl(f)) return null;
+  // Skip storyboards and manifests that are not directly playable files.
+  if (f.ext === 'mhtml' || /storyboard/.test(f.format_note || '')) return null;
+  const vcodec = f.vcodec || 'none';
+  const acodec = f.acodec || 'none';
+  const hasVideo = vcodec !== 'none';
+  const hasAudio = acodec !== 'none';
+  if (!hasVideo && !hasAudio) return null;
+  return {
+    formatId: String(f.format_id),
+    ext: f.ext || (hasAudio && !hasVideo ? 'm4a' : 'mp4'),
+    url: f.url,
+    width: f.width || 0,
+    height: f.height || 0,
+    fps: f.fps || 0,
+    vcodec,
+    acodec,
+    hasVideo,
+    hasAudio,
+    filesize: Number(f.filesize || f.filesize_approx || 0),
+    abr: Number(f.abr || 0),
+    tbr: Number(f.tbr || 0),
+    protocol: f.protocol || 'https',
+  };
 }
 
-async function resolveOnce(videoId) {
-  const bin = await ensureBinary();
-  // Try watch page first
-  let json = null;
-  try {
-    json = await runExtractWatch(videoId, bin);
-  } catch (e) {
-    // try shorts
-    try {
-      json = await runExtract(videoId, bin);
-    } catch (e2) {
-      throw e2;
-    }
+async function getFormats(videoId) {
+  const hit = formatCache.get(videoId);
+  if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) {
+    return { cached: true, ...hit };
   }
-  const video = pickVideo(json.formats);
-  const audio = pickAudio(json.formats);
-  if (!video || !video.url) {
-    const e = new Error(
-      `no playable video format (formats=${(json.formats || []).length}, ids=${(json.formats || []).slice(0, 12).map((f) => f.format_id).join(',')})`
-    );
-    e.code = 'NO_VIDEO_FORMAT';
-    throw e;
-  }
+  const json = await resolveRaw(videoId);
+  const formats = (json.formats || []).map(normalizeFormat).filter(Boolean);
+  const entry = {
+    title: json.title || '',
+    duration: Number(json.duration) || 0,
+    formats,
+    fetchedAt: Date.now(),
+  };
+  if (formats.length) formatCache.set(videoId, entry);
+  return { cached: false, ...entry };
+}
+
+function toPicked(video, audio, json) {
   return {
     title: json.title || '',
     duration: json.duration || 0,
-    video: {
+    video: video ? {
       url: video.url,
       ext: video.ext || 'mp4',
       width: video.width || 0,
       height: video.height || 0,
       fps: video.fps || 0,
-      filesize: video.filesize || video.filesize_approx || 0,
-    },
+      filesize: video.filesize || 0,
+    } : { url: '' },
     audio: audio ? { url: audio.url, ext: audio.ext || '', filesize: audio.filesize || 0 } : { url: '' },
   };
 }
 
-function runExtractWatch(videoId, bin) {
-  return new Promise((resolve, reject) => {
-    const args = ['-J', '--no-playlist', '--skip-download', '--no-warnings'];
-    args.push(`https://www.youtube.com/watch?v=${videoId}`);
-    execFile(
-      bin,
-      args,
-      { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err) {
-          const e = new Error(String((err.stderr || '').split('\n').filter(Boolean).slice(0, 4).join(' | ') || err.message).slice(0, 300));
-          e.code = 'EXTRACT_FAIL';
-          return reject(e);
-        }
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (e) {
-          const er = new Error('bad extract json');
-          er.code = 'BAD_JSON';
-          reject(er);
-        }
-      }
-    );
-  });
-}
-
+// Legacy single-pick resolver (used by playback fallbacks). Prefers the highest
+// H.264 adaptive pair, then any portrait pair, then a muxed stream.
 async function getFormat(videoId) {
-  const hit = formatCache.get(videoId);
-  if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) {
-    return { cached: true, ...hit };
+  const picked = pickedCache.get(videoId);
+  if (picked && Date.now() - picked.fetchedAt < CACHE_TTL_MS) {
+    return { cached: true, ...picked };
   }
   if (inflight.has(videoId)) return inflight.get(videoId);
 
   const p = new Promise((resolve, reject) => {
     onceAvailable(async () => {
       try {
-        const data = await resolveOnce(videoId);
-        const entry = { ...data, fetchedAt: Date.now() };
-        formatCache.set(videoId, entry);
+        const { title, duration, formats } = await getFormats(videoId).catch(async () => {
+          const json = await resolveRaw(videoId);
+          return { title: json.title, duration: json.duration, formats: (json.formats || []).map(normalizeFormat).filter(Boolean) };
+        });
+        const vids = formats.filter((f) => f.hasVideo && !f.hasAudio);
+        const auds = formats.filter((f) => f.hasAudio && !f.hasVideo);
+        const muxed = formats.filter((f) => f.hasVideo && f.hasAudio);
+        const h264 = vids.filter((f) => /avc1/.test(f.vcodec)).sort((a, b) => b.height - a.height);
+        const video = h264[0] || vids.sort((a, b) => b.height - a.height)[0]
+          || muxed.filter((f) => /avc1/.test(f.vcodec)).sort((a, b) => b.height - a.height)[0]
+          || muxed[0] || null;
+        const audio = auds.filter((f) => f.ext === 'm4a').sort((a, b) => b.abr - a.abr)[0]
+          || auds.sort((a, b) => b.abr - a.abr)[0] || null;
+        if (!video || !video.url) {
+          const e = new Error(`no playable video format (formats=${formats.length})`);
+          e.code = 'NO_VIDEO_FORMAT';
+          throw e;
+        }
+        const data = { ...toPicked(video, audio, { title, duration }), fetchedAt: Date.now() };
+        pickedCache.set(videoId, data);
         resolve({ cached: false, ...data });
       } catch (err) {
         reject(err);
@@ -256,4 +262,66 @@ async function getFormat(videoId) {
   return p;
 }
 
-module.exports = { getFormat, YTDLP_BIN };
+// Download a specific yt-dlp format to `dest`. For a video-only format the
+// selector asks yt-dlp to merge the best audio in the same pass. `kind` is
+// 'audio' to force an audio-only file.
+async function downloadFormat(videoId, { formatId, kind } = {}, dest) {
+  const bin = await ensureBinary();
+  const binDir = path.dirname(dest);
+  fs.mkdirSync(binDir, { recursive: true });
+
+  let selector;
+  if (kind === 'audio') {
+    selector = 'bestaudio[ext=m4a]/bestaudio/best';
+  } else if (formatId) {
+    selector = `${formatId}+bestaudio[ext=m4a]/${formatId}+bestaudio/${formatId}/bestvideo+bestaudio/best`;
+  } else {
+    selector = 'bv*+ba/b';
+  }
+
+  const args = [
+    '-f', selector,
+    '--no-playlist',
+    '--no-warnings',
+    '--no-part',
+    '-o', dest,
+  ];
+  if (FFMPEG) args.push('--ffmpeg-location', FFMPEG);
+  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+
+  // YouTube occasionally answers a signed-URL request with a transient 403;
+  // a second attempt almost always succeeds. Clean any partial output first.
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+    try {
+      await new Promise((resolve, reject) => {
+        execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
+          if (err) {
+            const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
+            const e = new Error(msg);
+            e.code = 'DOWNLOAD_FAIL';
+            return reject(e);
+          }
+          resolve();
+        });
+      });
+      if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
+      throw new Error('download produced no file');
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+    }
+  }
+  const e = new Error(lastErr ? lastErr.message : 'download failed');
+  e.code = 'DOWNLOAD_FAIL';
+  throw e;
+}
+
+module.exports = {
+  getFormat,
+  getFormats,
+  downloadFormat,
+  normalizeFormat,
+  YTDLP_BIN,
+};

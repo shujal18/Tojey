@@ -834,56 +834,102 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
   try {
     const videoId = String(req.params.videoId || '');
     if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+
+    // For downloads we prefer yt-dlp: it is the only path that reliably resolves
+    // current signatures/proof-of-origin and merges adaptive tracks. For plain
+    // playback metadata we try innertube first (fast) and fall back to yt-dlp.
+    const preferYtdlp = req.query.download === '1' || req.query.probe === '1' || req.query.source === 'ytdlp';
     let streams = null;
-    // Try innertube first but very fast fallback to yt-dlp to avoid long waits
-    try {
-      streams = await Promise.race([
+    let usedYtdlp = false;
+
+    const getInnertube = async () => {
+      const s = await Promise.race([
         yt.playerStreams(videoId, req.query.refresh === 'true'),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 600)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500)),
       ]);
-      if (streams && streams.status === 'OK' && ((streams.formats && streams.formats.length > 0) || (streams.adaptiveFormats && streams.adaptiveFormats.length > 0))) {
-        // ok
-      } else {
+      if (!s || s.status !== 'OK' || (!(s.formats && s.formats.length) && !(s.adaptiveFormats && s.adaptiveFormats.length))) {
         throw new Error('unplayable');
       }
-    } catch (e) {
-      // try yt-dlp
-      try {
-        const yf = await ytFormat.getFormat(videoId);
-        const fmt = { itag: 'ytdlp-v', url: yf.video.url, hasVideo: true, hasAudio: false, mimeType: `video/${yf.video.ext || 'mp4'}`, codecs: 'avc1', bitrate: 0, contentLength: yf.video.filesize || 0, width: yf.video.width, height: yf.video.height };
-        const afmt = yf.audio && yf.audio.url ? { itag: 'ytdlp-a', url: yf.audio.url, hasVideo: false, hasAudio: true, mimeType: yf.audio.ext === 'webm' ? 'audio/webm' : 'audio/mp4', codecs: yf.audio.ext === 'webm' ? 'opus' : 'mp4a.40.2', bitrate: 0, contentLength: yf.audio.filesize || 0 } : null;
-        streams = {
-          videoId,
-          status: 'OK',
-          reason: '',
-          expiresInSeconds: 0,
-          hlsManifestUrl: '',
-          dashManifestUrl: '',
-          formats: afmt ? [{ itag: 'ytdlp-mux', url: '', hasVideo: true, hasAudio: true, mimeType: 'video/mp4' }] : [],
-          adaptiveFormats: afmt ? [fmt, afmt] : [fmt],
+      return s;
+    };
+
+    const getYtdlp = async () => {
+      const yf = await ytFormat.getFormats(videoId);
+      const prog = [];
+      const adaptive = [];
+      for (const f of yf.formats) {
+        const isM4a = f.ext === 'm4a' || /mp4a/.test(f.acodec || '');
+        const mimeType = f.hasVideo
+          ? (/webm/.test(f.ext) ? 'video/webm' : 'video/mp4')
+          : (isM4a ? 'audio/mp4' : 'audio/webm');
+        const entry = {
+          itag: `ytdlp:${f.formatId}`,
+          ytdlpFormatId: f.formatId,
+          url: f.url,
+          hasVideo: f.hasVideo,
+          hasAudio: f.hasAudio,
+          mimeType,
+          codecs: f.hasVideo ? (f.vcodec || '') : (f.acodec || ''),
+          bitrate: f.hasVideo ? Math.round((f.tbr || 0) * 1000) : Math.round((f.abr || 0) * 1000),
+          contentLength: f.filesize || 0,
+          width: f.width,
+          height: f.height,
+          fps: f.fps,
         };
-      } catch (e2) {
-        console.error('yt:streams fallback error', e2.message);
-        return res.status(502).json({ error: 'streams unavailable', detail: String(e.message).slice(0, 200) });
+        if (f.hasVideo && f.hasAudio) prog.push(entry);
+        else adaptive.push(entry);
+      }
+      if (!prog.length && !adaptive.length) throw new Error('no formats');
+      // Deduplicate progressive by height, preferring H.264.
+      const progByHeight = new Map();
+      for (const f of prog.sort((a, b) => /avc1/.test(b.codecs || '') - /avc1/.test(a.codecs || ''))) {
+        if (!progByHeight.has(f.height || 0)) progByHeight.set(f.height || 0, f);
+      }
+      return {
+        videoId,
+        status: 'OK',
+        reason: '',
+        expiresInSeconds: 0,
+        hlsManifestUrl: '',
+        dashManifestUrl: '',
+        formats: [...progByHeight.values()],
+        adaptiveFormats: adaptive,
+      };
+    };
+
+    if (preferYtdlp) {
+      try { streams = await getYtdlp(); usedYtdlp = true; }
+      catch (e) { try { streams = await getInnertube(); } catch (e2) { streams = null; } }
+    } else {
+      try { streams = await getInnertube(); }
+      catch (e) {
+        try { streams = await getYtdlp(); usedYtdlp = true; } catch (e2) { streams = null; }
       }
     }
+    if (!streams) {
+      return res.status(502).json({ error: 'streams unavailable', detail: 'no playable formats' });
+    }
+
     const strip = (f) => { const { url, ...rest } = f; return rest; };
     // The best audio-only track is what a video-only (HD) download would be
-    // remuxed with server-side; the client adds its size to each option so the
-    // "with audio" figures are accurate.
-    // Only AAC-in-MP4 audio can be remuxed into the MP4 delivered to the user.
+    // remuxed with; the client adds its size to each option so the "with audio"
+    // figures are accurate. Only AAC-in-MP4 audio can be remuxed into the MP4
+    // delivered to the user.
     let defaultAudio = streams.adaptiveFormats
       .filter((f) => f.hasAudio && !f.hasVideo && /mp4a/.test(f.codecs || f.mimeType || ''))
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-    if (!defaultAudio && streams.adaptiveFormats.find(f=>f.itag==='ytdlp-a')) {
-      defaultAudio = streams.adaptiveFormats.find(f=>f.itag==='ytdlp-a');
+    if (!defaultAudio) {
+      defaultAudio = streams.adaptiveFormats
+        .filter((f) => f.hasAudio && !f.hasVideo)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
     }
     // Opt-in gate probe (used by the download menu): YouTube serves some
     // adaptive files only up to a prefix without a PO token, in which case HD
     // remuxing falls back to the progressive stream. One 1-byte tail request
-    // tells us which case this video is.
+    // tells us which case this video is. yt-dlp's downloader handles the gate
+    // itself, so never mark those formats as gated.
     let gated = false;
-    if (req.query.probe === '1') {
+    if (req.query.probe === '1' && !usedYtdlp) {
       const top = streams.adaptiveFormats
         .filter((f) => f.hasVideo && !f.hasAudio && f.url && f.contentLength > 0)
         .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
@@ -908,7 +954,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
       videoId,
       status: streams.status,
       reason: streams.reason,
-      canMux: mux.available(),
+      canMux: usedYtdlp ? true : mux.available(),
       gated,
       defaultAudio: defaultAudio ? strip(defaultAudio) : null,
       formats: streams.formats.map(strip),
@@ -1107,92 +1153,47 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
 // IP-bound). The client token is threaded through the query so dash.js can fetch
 // this manifest with a plain <video> element (no Authorization header).
 app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
+  const videoId = String(req.params.videoId || '');
+  if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+  const kind = req.query.audio === '1' ? 'audio' : 'video';
+  let formatId = req.query.fmt ? String(req.query.fmt).slice(0, 24) : null;
+  if (!formatId && req.query.itag) {
+    const m = /^ytdlp:(.+)$/.exec(String(req.query.itag));
+    if (m) formatId = m[1].slice(0, 24);
+  }
+  const ext = kind === 'audio' ? 'm4a' : 'mp4';
+  const out = mux.tmpFile(`.${ext}`);
   try {
-    const videoId = String(req.params.videoId || '');
-    if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
-    const wantAudio = req.query.audio === '1';
-    let fmt = null;
-    try {
-      fmt = await Promise.race([
-        ytFormat.getFormat(videoId),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000)),
-      ]);
-    } catch (e) {
-      fmt = null;
-    }
-    if (wantAudio) {
-      if (fmt && fmt.audio && fmt.audio.url) {
-        try {
-          const out = mux.tmpFile('.m4a');
-          await mux.downloadToFile(fmt.audio.url, 0, out);
-          return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
-        } catch (e) {}
-      }
-      // fallback to best audio from streams
-      try {
-        let streams = await yt.playerStreams(videoId, false);
-        const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
-        const a = all.filter(x=>x.hasAudio && !x.hasVideo && /mp4a/.test(x.codecs||x.mimeType||'')).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0] || all.filter(x=>x.hasAudio && !x.hasVideo).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0];
-        if (a && a.url) {
-          const out = mux.tmpFile('.m4a');
-          await mux.downloadToFile(a.url, a.contentLength||0, out);
-          return streamDownloadFile(res, out, `tojey-${videoId}-audio.m4a`, 'audio/mp4');
-        }
-      } catch (e) {}
-      return res.status(502).json({ error: 'audio download unavailable' });
-    }
-    if (fmt && fmt.video && fmt.video.url && fmt.audio && fmt.audio.url) {
-      try {
-        const out = await mux.muxToFile(
-          { url: fmt.video.url, hasVideo: true, hasAudio: false, contentLength: 0, mimeType: 'video/mp4', codecs: 'avc1' },
-          { url: fmt.audio.url, hasAudio: true, hasVideo: false }
-        );
-        return streamDownloadFile(res, out, `tojey-${videoId}-best.mp4`, 'video/mp4');
-      } catch (e) {
-        try {
-          const out = mux.tmpFile('.mp4');
-          await mux.downloadToFile(fmt.video.url, 0, out);
-          return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
-        } catch (e2) {}
-      }
-    }
-    if (fmt && fmt.video && fmt.video.url) {
-      try {
-        const out = mux.tmpFile('.mp4');
-        await mux.downloadToFile(fmt.video.url, 0, out);
-        return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
-      } catch (e) {}
-    }
-    // try streams
+    // yt-dlp is the reliable downloader: it resolves current signature /
+    // proof-of-origin protections and merges adaptive video+audio with ffmpeg
+    // in the same pass.
+    await ytFormat.downloadFormat(videoId, { formatId, kind }, out);
+    const name = `tojey-${videoId}${kind === 'audio' ? '-audio' : ''}.${ext}`;
+    return streamDownloadFile(res, out, name, kind === 'audio' ? 'audio/mp4' : 'video/mp4');
+  } catch (e) {
+    console.error('yt:download error', e.code || '', String(e.message).slice(0, 200));
+    await mux.cleanup(out);
+    // Last resort: try the byte proxy for a single muxed stream.
     try {
       let streams = await yt.playerStreams(videoId, false);
       if (!streams || streams.status !== 'OK') streams = await yt.playerStreams(videoId, true);
       const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
-      const best = all.filter(x=>x.hasVideo && x.hasAudio).sort((x,y)=>(y.height||0)-(x.height||0))[0] || all.filter(x=>x.hasVideo).sort((x,y)=>(y.height||0)-(x.height||0))[0];
-      if (best && best.url) {
-        if (best.hasAudio) {
-          const out = mux.tmpFile('.mp4');
-          await mux.downloadToFile(best.url, best.contentLength||0, out);
-          return streamDownloadFile(res, out, `tojey-${videoId}.mp4`, 'video/mp4');
+      const best = all
+        .filter((x) => x.hasVideo && x.hasAudio && x.url)
+        .sort((x, y) => (y.height || 0) - (x.height || 0))[0];
+      if (best) {
+        const upstream = await fetch(best.url, { headers: { 'User-Agent': YT_UA, Accept: '*/*' } });
+        if (upstream.ok || upstream.status === 206) {
+          res.set('Content-Disposition', `attachment; filename="tojey-${videoId}.mp4"`);
+          res.set('Content-Type', 'video/mp4');
+          const nodeStream = Readable.fromWeb(upstream.body);
+          nodeStream.on('error', () => { try { res.destroy(); } catch (err) {} });
+          return nodeStream.pipe(res);
         }
+        try { await upstream.body?.cancel?.(); } catch (err) {}
       }
-      const ba = all.filter(x=>x.hasAudio && !x.hasVideo && /mp4a/.test(x.codecs||x.mimeType||'')).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0))[0];
-      const bv = all.filter(x=>x.hasVideo && !x.hasAudio).sort((x,y)=>(y.height||0)-(x.height||0))[0];
-      if (bv && ba && ba.url) {
-        try {
-          const out = await mux.muxToFile(bv, ba);
-          return streamDownloadFile(res, out, `tojey-${videoId}-muxed.mp4`, 'video/mp4');
-        } catch (e) {}
-      }
-      if (bv && bv.url) {
-        const out = mux.tmpFile('.mp4');
-        await mux.downloadToFile(bv.url, bv.contentLength||0, out);
-        return streamDownloadFile(res, out, `tojey-${videoId}-video.mp4`, 'video/mp4');
-      }
-    } catch (e) {}
-    return res.status(502).json({ error: 'download failed' });
-  } catch (e) {
-    res.status(502).json({ error: 'download failed', detail: String(e.message).slice(0, 120) });
+    } catch (e2) { /* ignore */ }
+    return res.status(502).json({ error: 'download failed', detail: String(e.message).slice(0, 200) });
   }
 });
 
