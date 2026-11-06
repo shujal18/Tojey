@@ -128,7 +128,12 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   useEffect(() => {
     let mounted = true;
-    fetch(`${API}/api/shorts/feed?category=trending`, { headers: authHeaders })
+    const seeds = getRecommendationSeeds(8);
+    const exclude = new Set([...getWatchedVideoIds(250), ...servedIdsRef.current]);
+    const q = [`category=trending`, `refresh=false`];
+    if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+    if (exclude.size) q.push(`exclude=${encodeURIComponent(JSON.stringify([...exclude].slice(-300)))}`);
+    fetch(`${API}/api/shorts/feed?${q.join('&')}`, { headers: authHeaders })
       .then((r) => r.json())
       .then((d) => { if (mounted && Array.isArray(d.items)) setShortsStrip(d.items.slice(0, 8)); })
       .catch(() => {});
@@ -328,17 +333,22 @@ function WatchModal({ item, token, onClose }) {
 
   const quickReactions = ['😂', '🔥', '❤️', '👍', '😮', '👏'];
 
+  const handleClose = useCallback(() => {
+    if (inRoom) wt.leaveRoom();
+    onClose();
+  }, [inRoom, wt.leaveRoom, onClose]);
+
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: 'rgba(8,5,14,0.72)', padding: 20,
-    }} onClick={onClose}>
+      background: 'rgba(8,5,14,0.72)', padding: 'clamp(8px, 2vw, 20px)',
+    }} className="wt-modal-overlay" onClick={handleClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
           display: 'flex', flexDirection: 'column', background: theme.background, borderRadius: 14, overflow: 'hidden',
-          width: '100%', maxWidth: 980, maxHeight: '92vh', boxShadow: theme.frameShadow,
-        }}
+          width: '100%', maxWidth: 980, maxHeight: 'clamp(88vh, 95vh, 100dvh)', boxShadow: theme.frameShadow,
+        }} className="wt-modal-card"
       >
         <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.panelHeader || theme.background, position: 'relative' }}>
           <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>
@@ -347,10 +357,11 @@ function WatchModal({ item, token, onClose }) {
             <div style={{ fontSize: 12, color: theme.textSecondary }}>{item.channelTitle}</div>
           </div>
 
-          {inRoom && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 16, background: theme.primaryLight || 'rgba(124,58,237,0.14)', color: theme.primary, fontSize: 12, fontWeight: 700 }}>
+            {inRoom && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 16, background: theme.primaryLight || 'rgba(124,58,237,0.14)', color: theme.primary, fontSize: 12, fontWeight: 700 }}
+              className="wt-partner-chip">
               <Users size={14} />
-              <span style={{ whiteSpace: 'nowrap' }}>{partnerName}{partnerOnline ? '' : ' (reconnecting…)'}</span>
+              <span className="wt-partner-label" style={{ whiteSpace: 'nowrap' }}>{partnerName}{partnerOnline ? '' : ' (reconnecting…)'}</span>
               <button
                 onClick={wt.leaveRoom}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, border: 'none', cursor: 'pointer', background: theme.primary, color: '#fff', borderRadius: 14, padding: '4px 10px', fontSize: 11, fontWeight: 700 }}

@@ -19,7 +19,18 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const [messages, setMessages] = useState([]); // in-room chat history
   const [bubble, setBubble] = useState(null); // latest reaction/message toast
   const bubbleTimerRef = useRef(null);
-  useEffect(() => () => { if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current); }, []);
+  const partnerLeftTimerRef = useRef(null);
+  const clearPartnerLeft = useCallback(() => {
+    if (partnerLeftTimerRef.current) {
+      clearTimeout(partnerLeftTimerRef.current);
+      partnerLeftTimerRef.current = null;
+    }
+    setPartnerLeft(null);
+  }, []);
+  useEffect(() => () => {
+    if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current);
+    if (partnerLeftTimerRef.current) clearTimeout(partnerLeftTimerRef.current);
+  }, []);
 
   const socketRef = useRef(socket);
   socketRef.current = socket;
@@ -94,6 +105,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     };
     const onRoomState = (st) => {
       if (!st || !st.roomId) return;
+      clearPartnerLeft();
       const stamped = { ...st, _recvAt: Date.now() };
       setRoom(stamped);
       setMessages(Array.isArray(st.messages) ? st.messages : []);
@@ -131,10 +143,20 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
       if (c && c.isReady && c.isReady() && !c.isEmbed && !c.isPaused()) c.pause();
       setRoom(null);
       controllerRef.current = null;
+      if (partnerLeftTimerRef.current) {
+        clearTimeout(partnerLeftTimerRef.current);
+        partnerLeftTimerRef.current = null;
+      }
       setPartnerLeft(payload || {});
       setNotice('');
       setMessages([]);
       setBubble(null);
+      // Let the banner/overlay show who left for a few seconds, then clear so
+      // the UI isn't permanently stuck on a "left the room" screen.
+      partnerLeftTimerRef.current = setTimeout(() => {
+        partnerLeftTimerRef.current = null;
+        setPartnerLeft(null);
+      }, 6000);
     };
 
     sk.on('wt:invite:new', onInviteNew);
@@ -285,6 +307,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const leaveRoom = useCallback(() => {
     const sk = socketRef.current;
     const r = roomRef.current;
+    clearPartnerLeft();
     if (sk && r) sk.emit('wt:leave', { roomId: r.roomId });
     setRoom(null);
     controllerRef.current = null;
@@ -310,7 +333,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     else if (action === 'seek') sk.emit('wt:seek', { roomId: r.roomId, position: pos });
   }, []);
 
-  const resetPartnerLeft = useCallback(() => setPartnerLeft(null), []);
+  const resetPartnerLeft = useCallback(() => clearPartnerLeft(), []);
 
   const value = {
     invite,

@@ -139,7 +139,7 @@ export default function HomeLayout() {
           <WatchTogetherBridge goSection={goSection} />
           <div
             style={{
-              height: '100vh',
+              height: '100dvh',
               width: '100%',
               display: 'flex',
               justifyContent: 'center',
@@ -152,18 +152,21 @@ export default function HomeLayout() {
               maxWidth: isDesktop ? 1600 : '100%',
               height: '100%',
               display: 'flex',
+              flexDirection: isDesktop ? 'row' : 'column',
               background: theme.background,
               boxShadow: isDesktop ? theme.frameShadow : 'none',
               overflow: 'hidden',
             }}>
-            <NavRail
-              section={section}
-              onSelect={goSection}
-              user={user}
-              onLogout={logout}
-            />
+            {isDesktop && (
+              <NavRail
+                section={section}
+                onSelect={goSection}
+                user={user}
+                onLogout={logout}
+              />
+            )}
 
-            <div style={{ flex: 1, display: 'flex', minWidth: 0, overflow: 'hidden' }}>
+            <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
               {section === 'chats' && (
                 <>
                   {(isDesktop || !openChat) && (
@@ -214,6 +217,10 @@ export default function HomeLayout() {
                 </div>
               )}
             </div>
+
+            {!isDesktop && section !== 'youtube' && section !== 'shorts' && (
+              <MobileNav section={section} onSelect={goSection} />
+            )}
           </div>
         </div>
 
@@ -382,6 +389,64 @@ function WatchTogetherBridge({ goSection }) {
         </div>
       )}
     </>
+  );
+}
+
+// Bottom tab bar used on phones so chats/settings stay reachable while the
+// YouTube and Shorts sections take over the whole screen.
+function MobileNav({ section, onSelect }) {
+  const { theme } = useTheme();
+  const { totalUnread } = useChat();
+  const items = [
+    { key: 'chats', label: 'Chats', icon: MessageCircle },
+    { key: 'youtube', label: 'YouTube', icon: Youtube },
+    { key: 'shorts', label: 'Shorts', icon: PlaySquare },
+    { key: 'settings', label: 'Settings', icon: SettingsIcon },
+  ];
+
+  return (
+    <div
+      style={{
+        width: '100%', flexShrink: 0, display: 'flex', alignItems: 'stretch',
+        background: theme.railBg || theme.background,
+        borderTop: `1px solid ${theme.border || theme.divider}`,
+        paddingTop: 4, paddingBottom: 'env(safe-area-inset-bottom)',
+        zIndex: 30,
+      }}
+    >
+      {items.map((it) => {
+        const active = section === it.key;
+        const Icon = it.icon;
+        return (
+          <button
+            key={it.key}
+            onClick={() => onSelect(it.key)}
+            style={{
+              flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', gap: 2, padding: '7px 0 6px',
+              color: active ? theme.primary : theme.textSecondary,
+              background: active ? theme.primaryLight : 'transparent',
+              borderRadius: 0,
+            }}
+          >
+            <Icon size={20} />
+            <span style={{ fontSize: 10, fontWeight: 700 }}>{it.label}</span>
+            {it.key === 'chats' && totalUnread && (
+              <span
+                style={{
+                  position: 'absolute', top: 4, right: 0, minWidth: 17, height: 17,
+                  padding: '0 4px', borderRadius: 9, background: theme.unreadBg,
+                  color: theme.unreadText, fontSize: 10, fontWeight: 700,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}
+              >
+                {totalUnread > 99 ? '99+' : totalUnread}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

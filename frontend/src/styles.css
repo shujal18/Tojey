@@ -152,3 +152,17 @@ input, textarea {
     font-size: 14px;
   }
 }
+
+/* Mobile alignment for Watch Together video modal */
+.wt-modal-overlay { padding: clamp(8px, 2vw, 20px); }
+.wt-modal-card { max-height: clamp(88vh, 95vh, 100dvh); }
+.wt-partner-label { white-space: nowrap; }
+
+@media (max-width: 560px) {
+  .wt-partner-chip { padding: 4px 6px !important; }
+  .wt-partner-label { display: none !important; }
+  .wt-modal-card { border-radius: 0 !important; max-height: 100dvh !important; }
+  .wt-modal-overlay { padding: 0 !important; }
+  html, body, #root { width: 100%; overflow-x: hidden; }
+  body { touch-action: manipulation; }
+}

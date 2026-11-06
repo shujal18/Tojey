@@ -13,7 +13,7 @@ import { VoiceBubble } from '../components/MessageBubble';
 import MediaViewer from '../components/MediaViewer';
 import DrawingCanvas from '../components/DrawingCanvas';
 import MediaPreview from '../components/MediaPreview';
-import { getChatColor } from '../theme';
+import { getChatColor, shadeColor } from '../theme';
 import { uploadFile, makeThumbnail, resolveUrl, formatBytes, isVideoMime, isImageMime } from '../services/upload';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -965,16 +965,22 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
           onContextMenu={(e) => onLongPress(e, message)}
           onDoubleClick={(e) => onLongPress(e, message)}
           style={{
-            background: isSent ? getChatColor() : '#1e2529',
-            color: isSent ? '#fff' : '#E8EAEC',
-            padding: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '7px 11px',
-            paddingLeft: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
-            paddingRight: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : undefined,
-            borderRadius: 14,
-            borderBottomRightRadius: isSent ? (grouped ? 6 : 4) : 14,
-            borderBottomLeftRadius: isSent ? 14 : (grouped ? 6 : 4),
-            border: isSent ? 'none' : '1px solid rgba(255,255,255,0.07)',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+            background: isSent
+              ? `linear-gradient(135deg, ${getChatColor()} 0%, ${shadeColor(getChatColor(), -26)} 100%)`
+              : theme.isDark
+              ? 'rgba(42, 39, 51, 0.94)'
+              : theme.receivedBubble,
+            color: isSent ? '#fff' : theme.receivedText,
+            padding: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '8px 12px',
+            borderRadius: 18,
+            borderBottomRightRadius: isSent ? (grouped ? 10 : 6) : 18,
+            borderBottomLeftRadius: isSent ? 18 : (grouped ? 10 : 6),
+            border: isSent ? '1px solid rgba(255,255,255,0.10)' : `1px solid ${theme.border}`,
+            boxShadow: isSent
+              ? '0 4px 14px rgba(0,0,0,0.18)'
+              : theme.isDark
+              ? '0 2px 8px rgba(0,0,0,0.30)'
+              : '0 2px 8px rgba(31,15,70,0.07)',
             animation: 'message-enter 0.25s ease',
             position: 'relative',
             userSelect: 'text',
@@ -1039,8 +1045,9 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
           <div style={{
             background: theme.primaryLight,
             borderRadius: 14, padding: '2px 8px',
-            marginTop: -8, position: 'relative',
-            fontSize: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+            marginTop: 6, display: 'inline-flex', gap: 2,
+            fontSize: 12, border: `1px solid ${theme.border}`,
+            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
           }}>
             {message.reactions.map((r, i) => (
               <span key={i} style={{ marginRight: 4 }}>{r.reaction}</span>

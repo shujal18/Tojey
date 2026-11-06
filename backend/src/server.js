@@ -1314,7 +1314,10 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
 // the browser streams through the same-egress byte proxy (googlevideo URLs are
 // IP-bound). The client token is threaded through the query so dash.js can fetch
 // this manifest with a plain <video> element (no Authorization header).
-app.get('/api/yt/download/:videoId', authMiddleware, async (req, res) => {
+// Downloads are opened as a plain browser navigation (a new tab / anchor), so
+// they cannot send an Authorization header. `mediaAuth` also accepts the signed
+// token from the query string, which is what the picker appends.
+app.get('/api/yt/download/:videoId', mediaAuth, async (req, res) => {
   const videoId = String(req.params.videoId || '');
   if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
   const kind = req.query.audio === '1' ? 'audio' : 'video';

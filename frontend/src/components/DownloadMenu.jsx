@@ -143,10 +143,10 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
 
   return (
     <div
-      onClick={onClose}
+      onClick={(e) => { e.stopPropagation(); if (onClose) onClose(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 80, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(8,5,14,0.6)', padding: 20,
+        background: 'rgba(8,5,14,0.6)', padding: 'clamp(8px, 2vw, 20px)',
       }}
     >
       <div
