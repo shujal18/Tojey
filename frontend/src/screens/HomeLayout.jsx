@@ -140,9 +140,11 @@ export default function HomeLayout() {
           <div
             style={{
               height: '100dvh',
+              minHeight: '100vh',
               width: '100%',
               display: 'flex',
-              justifyContent: 'center',
+              alignItems: 'stretch',
+              justifyContent: 'flex-start',
               background: theme.shellBg,
               ...shellVars,
             }}
@@ -150,6 +152,7 @@ export default function HomeLayout() {
             <div style={{
               width: '100%',
               maxWidth: isDesktop ? 1600 : '100%',
+              minHeight: '100%',
               height: '100%',
               display: 'flex',
               flexDirection: isDesktop ? 'row' : 'column',
@@ -412,6 +415,7 @@ function MobileNav({ section, onSelect }) {
         borderTop: `1px solid ${theme.border || theme.divider}`,
         paddingTop: 4, paddingBottom: 'env(safe-area-inset-bottom)',
         zIndex: 30,
+        marginTop: 'auto',
       }}
     >
       {items.map((it) => {
