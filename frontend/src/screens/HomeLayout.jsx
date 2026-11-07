@@ -55,9 +55,9 @@ export default function HomeLayout() {
   const { user, token, logout } = useAuth();
   const { theme } = useTheme();
   const isDesktop = useIsDesktop();
-  const showMobileNav = !isDesktop && section !== 'shorts' && !openChat;
   const [section, setSection] = useState('chats');
   const [openChat, setOpenChat] = useState(null);
+  const showMobileNav = !isDesktop && section !== 'shorts' && !openChat;
   const [socket, setSocket] = useState(null);
   const [shortsRefreshTick, setShortsRefreshTick] = useState(0);
   const [homeRefreshTick, setHomeRefreshTick] = useState(0);
@@ -140,7 +140,7 @@ export default function HomeLayout() {
           <WatchTogetherBridge goSection={goSection} />
           <div
             style={{
-              height: '100vh',
+              minHeight: '100vh',
               width: '100%',
               display: 'flex',
               alignItems: 'stretch',
@@ -152,13 +152,11 @@ export default function HomeLayout() {
             <div style={{
               width: '100%',
               maxWidth: isDesktop ? 1600 : '100%',
-              minHeight: '100%',
-              height: '100%',
-              display: 'flex',
-              flexDirection: isDesktop ? 'row' : 'column',
+              minHeight: '100vh',
               background: theme.background,
               boxShadow: isDesktop ? theme.frameShadow : 'none',
-              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: isDesktop ? 'row' : 'column',
             }}>
             {isDesktop && (
               <NavRail
