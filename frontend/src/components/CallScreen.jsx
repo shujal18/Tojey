@@ -28,37 +28,38 @@ export default function CallScreen() {
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef({ sx: 0, sy: 0, ox: 0, oy: 0 });
 
+  // Remote audio: keep video element muted=TRUE always (prevents black screen on
+  // attribute changes). Audio is enabled/disabled via the MediaStream track itself
+  // through toggleRemoteAudio (call.js sets track.enabled). soundUnlocked is only
+  // used for the "Tap for sound" hint overlay.
   const unlockSound = useCallback(() => {
     if (soundUnlocked) return;
     setSoundUnlocked(true);
+    toggleRemoteAudio(true);
     if (remoteRef.current) {
-      try {
-        remoteRef.current.muted = false;
-        remoteRef.current.play().catch(() => {});
-      } catch (e) {}
+      try { remoteRef.current.play().catch(() => {}); } catch (e) {}
     }
-  }, [soundUnlocked]);
-
-  const soundMuted = !remoteAudible || !soundUnlocked;
+  }, [soundUnlocked, toggleRemoteAudio]);
 
   const other = callMeta?.other || {};
   const name = other.display_name || other.username || '';
 
-  // Sync remote stream to the <video> element via both callback ref and effect,
-  // so the feed appears even if the stream arrives after the element mounts.
+  // Keep srcObject synced to the <video> element. muted is ALWAYS true so the
+  // attribute never changes (which would restart the video and cause black screen).
   useEffect(() => {
     if (remoteRef.current) {
       remoteRef.current.srcObject = remoteStream || null;
-      if (remoteStream) {
-        remoteRef.current.muted = soundMuted;
-        remoteRef.current.play().catch(() => {});
-      }
+      remoteRef.current.muted = true;
+      remoteRef.current.playsInline = true;
+      if (remoteStream) remoteRef.current.play().catch(() => {});
     }
-  }, [remoteStream, soundMuted]);
+  }, [remoteStream]);
 
   useEffect(() => {
     if (localRef.current) {
       localRef.current.srcObject = localStream || null;
+      localRef.current.muted = true;
+      localRef.current.playsInline = true;
       if (localStream) localRef.current.play().catch(() => {});
     }
   }, [localStream]);
@@ -79,16 +80,17 @@ export default function CallScreen() {
     remoteRef.current = el;
     if (el) {
       el.srcObject = remoteStream || null;
-      if (remoteStream) {
-        el.muted = soundMuted;
-        el.play().catch(() => {});
-      }
+      el.muted = true;
+      el.playsInline = true;
+      if (remoteStream) el.play().catch(() => {});
     }
   };
   const setLocal = (el) => {
     localRef.current = el;
     if (el) {
       el.srcObject = localStream || null;
+      el.muted = true;
+      el.playsInline = true;
       if (localStream) el.play().catch(() => {});
     }
   };
@@ -170,7 +172,7 @@ export default function CallScreen() {
               </div>
             )
           ) : remoteStream ? (
-            <video ref={setRemote} autoPlay playsInline muted={soundMuted} style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
               <Avatar size={48} />
@@ -225,18 +227,26 @@ export default function CallScreen() {
         <style>{`
           @keyframes callRing { 0%{transform:scale(1)} 25%{transform:scale(1.06)} 50%{transform:scale(1)} 75%{transform:scale(1.04)} 100%{transform:scale(1)} }
         `}</style>
-        <div style={{ display: 'flex', gap: 48, justifyContent: 'center', alignItems: 'center', paddingBottom: 8 }}>
+        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', alignItems: 'center', paddingBottom: 8 }}>
           <button onClick={declineCall} title="Decline" style={{
-            width: 64, height: 64, borderRadius: 32, background: theme.danger, color: '#fff',
+            width: 60, height: 60, borderRadius: 30, background: theme.danger, color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(229,57,53,0.5)',
           }}>
-            <PhoneOff size={26} style={{ transform: 'rotate(135deg)' }} />
+            <PhoneOff size={24} style={{ transform: 'rotate(135deg)' }} />
+          </button>
+          <button onClick={toggleRemoteAudio} title={remoteAudible ? 'Mute remote' : 'Unmute remote'} style={{
+            width: 56, height: 56, borderRadius: 28,
+            background: remoteAudible ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.35)',
+            color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: 'none', backdropFilter: 'blur(4px)',
+          }}>
+            {remoteAudible ? <Volume2 size={20} /> : <VolumeX size={20} />}
           </button>
           <button onClick={acceptCall} title="Accept" style={{
-            width: 64, height: 64, borderRadius: 32, background: '#00C853', color: '#fff',
+            width: 60, height: 60, borderRadius: 30, background: '#00C853', color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(0,200,83,0.5)',
           }}>
-            <PhoneOff size={26} />
+            <PhoneOff size={24} />
           </button>
         </div>
       </div>
@@ -306,10 +316,17 @@ export default function CallScreen() {
         {localMain ? (
           localStream && videoEnabled ? (
             <>
-              <video ref={setLocal} autoPlay playsInline muted style={{
-                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
-                background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
-              }} />
+              <video
+                key="local-main"
+                ref={setLocal}
+                autoPlay
+                playsInline
+                muted
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+                  background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
+                }}
+              />
               {sharing && (
                 <div style={{ position: 'absolute', top: 14, left: 14, zIndex: 2, display: 'flex', alignItems: 'center', gap: 5, background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, fontWeight: 700, borderRadius: 10, padding: '4px 8px' }}>
                   <VideoOff size={14} /> Screen
@@ -323,9 +340,16 @@ export default function CallScreen() {
           )
         ) : (
           remoteStream ? (
-            <video ref={setRemote} autoPlay playsInline muted={soundMuted} style={{
-              position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111', transform: 'scaleX(-1)',
-            }} />
+            <video
+              key="remote-main"
+              ref={setRemote}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111', transform: 'scaleX(-1)',
+              }}
+            />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div style={{ textAlign: 'center' }}>
@@ -339,7 +363,7 @@ export default function CallScreen() {
         )}
       </div>
 
-      {remoteStream && !soundUnlocked && (
+      {!mainIsLocal && remoteStream && !soundUnlocked && (
         <button onClick={unlockSound} style={{
           position: 'absolute', bottom: 110, right: 16, zIndex: 7,
           background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
@@ -368,7 +392,7 @@ export default function CallScreen() {
           {pipIsLocal ? (
             localStream ? (
               videoEnabled ? (
-                <video ref={setLocal} autoPlay playsInline muted style={{
+                <video key="local-pip" ref={setLocal} autoPlay playsInline muted style={{
                   width: '100%', height: '100%', objectFit: 'cover',
                   transform: sharing ? 'none' : 'scaleX(-1)',
                 }} />
@@ -384,7 +408,7 @@ export default function CallScreen() {
             )
           ) : (
             remoteStream && (
-              <video ref={setRemote} autoPlay playsInline muted={soundMuted} style={{
+              <video key="remote-pip" ref={setRemote} autoPlay playsInline muted style={{
                 width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', background: '#111',
               }} />
             )
