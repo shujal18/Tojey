@@ -573,8 +573,9 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       {/* Messages */}
       <div ref={listRef} style={{
         flex: 1, overflowY: 'auto',
-        padding: '12px 14px', paddingBottom: 100,
+        padding: '12px 14px', paddingBottom: 90,
         display: 'flex', flexDirection: 'column', gap: 4,
+        minHeight: 0,
       }}>
         {messages.length === 0 && (
           <div style={{ textAlign: 'center', marginTop: 40, color: theme.textSecondary }}>
@@ -725,7 +726,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         borderTop: `1px solid ${theme.border}`,
         padding: '10px 12px',
         paddingBottom: 14,
-        position: 'sticky', bottom: 0, zIndex: 100,
+        flexShrink: 0,
       }}>
         {showEmoji && (
           <div style={{ marginBottom: 8, borderRadius: 12, overflow: 'hidden' }}>
