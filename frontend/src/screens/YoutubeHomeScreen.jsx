@@ -172,7 +172,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: theme.background }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', overflowX: 'hidden', background: theme.background }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', background: theme.background }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 21, fontWeight: 900, color: theme.primary, letterSpacing: 0.2 }}>Tojey</div>
@@ -231,9 +231,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
                 <span style={{ fontSize: 16, fontWeight: 800, color: theme.text }}>Shorts</span>
                 <span style={{ fontSize: 12, color: theme.textSecondary }}>→ watch full screen</span>
               </div>
-              <div style={{ display: 'flex', gap: 8, padding: '0 14px', marginTop: 10 }}>
+              <div style={{ display: 'flex', gap: 8, padding: '0 14px', marginTop: 10, overflowX: 'auto', scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
+                <style>{'::-webkit-scrollbar{display:none}'}</style>
                 {shortsStrip.map((s) => (
-                  <img key={s.videoId} src={thumbnailUrlFor(s)} alt="short" style={{ width: 92, height: 126, borderRadius: 10, objectFit: 'cover', background: '#000' }} />
+                  <img key={s.videoId} src={thumbnailUrlFor(s)} alt="short" style={{ width: 92, height: 126, borderRadius: 10, objectFit: 'cover', background: '#000', flexShrink: 0 }} />
                 ))}
               </div>
             </button>

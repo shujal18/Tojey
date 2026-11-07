@@ -572,7 +572,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
 
   return (
     <div
-      style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#000', position: 'relative', overflow: 'hidden' }}
+      style={{ height: '100dvh', width: '100%', display: 'flex', flexDirection: 'column', background: '#000', position: 'relative', overflow: 'hidden', overflowX: 'hidden' }}
     >
       {loading && videos.length === 0 ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>

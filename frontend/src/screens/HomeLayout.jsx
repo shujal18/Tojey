@@ -218,7 +218,7 @@ export default function HomeLayout() {
               )}
             </div>
 
-            {!isDesktop && section !== 'youtube' && section !== 'shorts' && (
+            {!isDesktop && section !== 'shorts' && !openChat && (
               <MobileNav section={section} onSelect={goSection} />
             )}
           </div>
