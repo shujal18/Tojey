@@ -465,7 +465,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   return (
     <div style={{
-      minHeight: '100vh',
+      height: '100%',
       width: '100%',
       flex: 1,
       display: 'flex',
@@ -473,6 +473,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       background: wallpaper ? parseWallpaper(wallpaper, theme) : theme.panelBg,
       position: 'relative',
       overflow: 'hidden',
+      minWidth: 0,
     }}>
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5, pointerEvents: 'none' }}>
         <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />

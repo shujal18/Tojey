@@ -310,11 +310,11 @@ export default function CallScreen() {
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 4000,
-      background: '#0b0a12',
+      background: 'radial-gradient(circle at center, #1a152e 0%, #0b0a12 100%)',
       display: 'flex', flexDirection: 'column',
     }}>
       <div style={{ position: 'absolute', top: 44, left: 0, right: 0, textAlign: 'center', zIndex: 5, pointerEvents: 'none' }}>
-        <div style={{ color: '#fff', fontSize: 17, fontWeight: 700, textShadow: '0 1px 8px rgba(0,0,0,0.9)' }}>{name}</div>
+        <div style={{ color: '#fff', fontSize: 17, fontWeight: 700, textShadow: '0 1px 8px rgba(0,0,0,0.9)' }}>{name || 'Unknown'}</div>
         <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 14, marginTop: 3 }}>
           {state === 'connecting' ? 'Connecting…' : fmtTime()}
         </div>
@@ -325,7 +325,7 @@ export default function CallScreen() {
       <div
         onClick={localMain && !remoteStream ? swapViews : undefined}
         style={{
-          position: 'absolute', inset: 0, zIndex: 2, background: '#141221', overflow: 'hidden',
+          position: 'absolute', inset: 0, zIndex: 2, background: 'radial-gradient(circle at center, #2a2040 0%, #141221 100%)', overflow: 'hidden',
           cursor: localMain && !remoteStream ? 'pointer' : 'default',
         }}
       >
@@ -340,12 +340,17 @@ export default function CallScreen() {
                 muted
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
-                  background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
+                  background: '#141221', transform: sharing ? 'none' : 'scaleX(-1)',
                 }}
               />
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
-                <Avatar size={110} />
+                <div style={{ textAlign: 'center' }}>
+                  <Avatar size={140} />
+                  <div style={{ color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: 600, marginTop: 16 }}>
+                    {videoEnabled ? 'Your Camera' : 'Camera Off'}
+                  </div>
+                </div>
               </div>
             )}
             {sharing && (
@@ -356,16 +361,26 @@ export default function CallScreen() {
           </>
         ) : (
           remoteStream ? (
-            <video ref={setRemote} autoPlay playsInline muted style={{
-              position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#111', transform: 'scaleX(-1)',
-            }} />
+            <video
+              key="remote-main"
+              ref={setRemote}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#141221', transform: 'scaleX(-1)',
+              }}
+            />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div style={{ textAlign: 'center' }}>
-                <Avatar size={110} />
-                <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 14, marginTop: 16 }}>
+                <Avatar size={140} />
+                <div style={{ color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: 600, marginTop: 16 }}>
                   {state === 'connecting' ? 'Connecting…' : 'Waiting for video…'}
                 </div>
+                {state === 'connecting' && (
+                  <div style={{ marginTop: 12, width: 40, height: 40, border: '3px solid rgba(108,60,233,0.3)', borderTopColor: '#6C3CE9', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '12px auto 0' }} />
+                )}
               </div>
             </div>
           )

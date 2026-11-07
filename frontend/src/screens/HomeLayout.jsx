@@ -167,7 +167,7 @@ export default function HomeLayout() {
               />
             )}
 
-            <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, overflow: 'hidden', paddingBottom: showMobileNav ? 64 : 0 }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: isDesktop ? 'row' : 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', paddingBottom: showMobileNav ? 64 : 0 }}>
               {section === 'chats' && (
                 <>
                   {(isDesktop || !openChat) && (
