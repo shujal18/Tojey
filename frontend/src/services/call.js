@@ -87,9 +87,18 @@ export function createPeerConnection() {
   };
 
   pc.ontrack = (e) => {
-    const streams = e.streams && e.streams[0];
-    if (streams) remoteStream = streams;
-    if (callbacks.onRemoteStream) callbacks.onRemoteStream(streams || null);
+    // Build one persistent remote stream from the incoming tracks. Some browsers
+    // (notably iOS Safari) deliver an empty e.streams array, which previously
+    // left the remote video permanently blank.
+    if (!remoteStream) remoteStream = new MediaStream();
+    try {
+      const already = remoteStream.getTracks().some((t) => t.id === e.track.id);
+      if (!already) remoteStream.addTrack(e.track);
+    } catch (err) {
+      // Fall back to the signalled stream if the tracks can't be added.
+      if (e.streams && e.streams[0]) remoteStream = e.streams[0];
+    }
+    if (callbacks.onRemoteStream) callbacks.onRemoteStream(remoteStream);
   };
 
   const fireState = () => {

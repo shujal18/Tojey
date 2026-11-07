@@ -13,6 +13,7 @@ export default function CallScreen() {
   const {
     state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible,
     sharing, minimized, setMinimized, callError, acceptCall, declineCall, endCall, dismissError,
+    remoteCameraOn, remoteHasVideoTrack,
     toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
   } = useCall();
 
@@ -129,6 +130,10 @@ export default function CallScreen() {
   const localMain = mainIsLocal;
   const pipIsLocal = !localMain;
   const showPip = pipIsLocal ? true : !!remoteStream;
+  // Only treat the remote as a video feed when it actually sends a video track
+  // AND the peer hasn't turned their camera off. Otherwise show the avatar
+  // instead of a black rectangle (audio-only fallback / denied camera).
+  const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && remoteCameraOn);
 
   const fmtTime = () => {
     const m = Math.floor(elapsed / 60);
@@ -195,8 +200,8 @@ export default function CallScreen() {
         <div style={{ position: 'relative', width: '100%', height: 120, background: '#000' }}>
           {mainIsLocal ? (
             <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-          ) : remoteStream ? (
-            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+          ) : remoteHasVideo ? (
+            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
               <Avatar size={48} />
@@ -369,7 +374,7 @@ export default function CallScreen() {
             )}
           </>
         ) : (
-          remoteStream ? (
+          remoteHasVideo ? (
             <video
               key="remote-main"
               ref={setRemote}
@@ -377,7 +382,7 @@ export default function CallScreen() {
               playsInline
               muted
               style={{
-                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#141221', transform: 'scaleX(-1)',
+                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#141221',
               }}
             />
           ) : (
@@ -385,9 +390,9 @@ export default function CallScreen() {
               <div style={{ textAlign: 'center' }}>
                 <Avatar size={140} />
                 <div style={{ color: 'rgba(255,255,255,0.9)', fontSize: 16, fontWeight: 600, marginTop: 16 }}>
-                  {state === 'connecting' ? 'Connecting…' : 'Waiting for video…'}
+                  {remoteCameraOn === false ? 'Camera off' : (state === 'connecting' ? 'Connecting…' : 'Waiting for video…')}
                 </div>
-                {state === 'connecting' && (
+                {state === 'connecting' && remoteCameraOn !== false && (
                   <div style={{ marginTop: 12, width: 40, height: 40, border: '3px solid rgba(108,60,233,0.3)', borderTopColor: '#6C3CE9', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '12px auto 0' }} />
                 )}
               </div>
@@ -440,10 +445,14 @@ export default function CallScreen() {
               </div>
             )
           ) : (
-            remoteStream && (
+            remoteHasVideo ? (
               <video ref={setRemote} autoPlay playsInline muted style={{
-                width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', background: '#111',
+                width: '100%', height: '100%', objectFit: 'cover', background: '#111',
               }} />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e' }}>
+                <Avatar size={40} />
+              </div>
             )
           )}
         </div>

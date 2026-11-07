@@ -2268,6 +2268,16 @@ io.on('connection', async (socket) => {
       relayVideo('video-call:ice-candidate', target, { callId: id, candidate });
     });
 
+    // Camera on/off state (and audio-only fallback) so the peer can show an
+    // avatar instead of a black video rectangle.
+    socket.on('video-call:media-state', ({ targetUserId, callId, cameraOn }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:media-state', target, { callId: id, cameraOn: cameraOn !== false });
+    });
+
     socket.on('video-call:end', ({ targetUserId, callId }) => {
       const target = Number(targetUserId);
       if (!validTarget(target)) return;

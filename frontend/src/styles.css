@@ -13,6 +13,20 @@ html, body, #root {
   max-width: 100%;
 }
 
+/* Mobile app shell: pinned to the *visible* viewport. visualViewport updates
+   --app-vh/--app-vt on resize/scroll so the composer stays on screen above the
+   soft keyboard, with 100vh/100dvh fallbacks for older browsers/WebViews. */
+.app-viewport {
+  position: fixed;
+  top: var(--app-vt, 0px);
+  left: 0;
+  right: 0;
+  height: 100vh;
+  height: 100dvh;
+  height: var(--app-vh, 100dvh);
+  overflow: hidden;
+}
+
 body {
   overflow: hidden;
   transition: background 0.3s ease;

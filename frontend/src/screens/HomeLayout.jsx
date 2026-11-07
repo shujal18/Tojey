@@ -133,29 +133,65 @@ export default function HomeLayout() {
     '--tf-row-active': theme.rowActive,
   };
 
+  // Track the *visible* viewport (visualViewport) so the mobile shell always
+  // matches the area the user can actually see: address bar shown/hidden and
+  // soft keyboard open/closed. Browsers without dvh / interactive-widget
+  // support still get a correct pixel height via --app-vh.
+  useEffect(() => {
+    const root = document.documentElement;
+    const vv = window.visualViewport;
+    if (!vv) {
+      root.style.setProperty('--app-vh', `${window.innerHeight}px`);
+      root.style.setProperty('--app-vt', '0px');
+      return undefined;
+    }
+    let raf = 0;
+    const apply = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const h = Math.round(vv.height || window.innerHeight);
+        const t = Math.round(vv.offsetTop || 0);
+        root.style.setProperty('--app-vh', `${h}px`);
+        root.style.setProperty('--app-vt', `${t}px`);
+      });
+    };
+    apply();
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+    // iOS applies the keyboard geometry slightly after focus/blur.
+    const onFocusChange = () => setTimeout(apply, 250);
+    document.addEventListener('focusin', onFocusChange);
+    document.addEventListener('focusout', onFocusChange);
+    return () => {
+      cancelAnimationFrame(raf);
+      vv.removeEventListener('resize', apply);
+      vv.removeEventListener('scroll', apply);
+      document.removeEventListener('focusin', onFocusChange);
+      document.removeEventListener('focusout', onFocusChange);
+    };
+  }, []);
+
   return (
     <ChatProvider socket={socket} currentUser={currentUser} onOpenChat={handleOpenChat}>
       <CallProvider socket={socket} currentUser={currentUser}>
         <WatchTogetherProvider socket={socket} currentUser={currentUser}>
           <WatchTogetherBridge goSection={goSection} />
           <div
+            className={isDesktop ? undefined : 'app-viewport'}
             style={{
-              height: isDesktop ? 'auto' : '100dvh',
-              minHeight: isDesktop ? '100vh' : '100dvh',
+              ...(isDesktop ? { minHeight: '100vh' } : {}),
               width: '100%',
               display: 'flex',
               alignItems: 'stretch',
               justifyContent: 'flex-start',
               background: theme.shellBg,
-              overflow: isDesktop ? 'visible' : 'hidden',
               ...shellVars,
             }}
           >
             <div style={{
               width: '100%',
               maxWidth: isDesktop ? 1600 : '100%',
-              height: isDesktop ? 'auto' : '100dvh',
-              minHeight: isDesktop ? '100vh' : '100dvh',
+              ...(isDesktop ? { minHeight: '100vh' } : { height: '100%', minHeight: 0 }),
               background: theme.background,
               boxShadow: isDesktop ? theme.frameShadow : 'none',
               display: 'flex',

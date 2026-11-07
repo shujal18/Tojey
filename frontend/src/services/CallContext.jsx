@@ -15,6 +15,8 @@ export function CallProvider({ socket, currentUser, children }) {
   const [micMuted, setMicMutedState] = useState(false);
   const [videoEnabled, setVideoEnabledState] = useState(true);
   const [remoteAudible, setRemoteAudible] = useState(true);
+  const [remoteCameraOn, setRemoteCameraOn] = useState(true);
+  const [remoteHasVideoTrack, setRemoteHasVideoTrack] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [callError, setCallError] = useState(null);
@@ -44,6 +46,8 @@ export function CallProvider({ socket, currentUser, children }) {
     if (streamRef.current) streamRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
+    setRemoteHasVideoTrack(false);
+    setRemoteCameraOn(true);
     setMicMutedState(false);
     setVideoEnabledState(true);
     setRemoteAudible(true);
@@ -81,6 +85,21 @@ export function CallProvider({ socket, currentUser, children }) {
     updateState('failed');
   }, []);
 
+  // Tell the peer whether our camera is actually sending video, so their UI can
+  // show "Camera off" instead of a black rectangle (camera denied, audio-only
+  // fallback, or the user toggled the camera off).
+  const sendMediaState = useCallback((cameraOn) => {
+    const meta = metaRef.current;
+    const sk = socketRef.current;
+    const s = stateRef.current;
+    if (!sk || !meta || !meta.callId || s === 'idle') return;
+    const myId = currentUserRef.current?.id;
+    const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
+    if (peerId) {
+      sk.emit('video-call:media-state', { targetUserId: peerId, callId: meta.callId, cameraOn: !!cameraOn });
+    }
+  }, []);
+
   const endCall = useCallback((reason) => {
     const meta = metaRef.current;
     const s = stateRef.current;
@@ -109,6 +128,7 @@ export function CallProvider({ socket, currentUser, children }) {
       },
       onRemoteStream: (stream) => {
         setRemoteStream(stream);
+        setRemoteHasVideoTrack(!!(stream && stream.getVideoTracks().length > 0));
       },
       onConnectionState: (cs) => {
         // 'closed' is always initiated by our own teardown - ignore it. Only a
@@ -176,6 +196,7 @@ export function CallProvider({ socket, currentUser, children }) {
         if (peerId) socket.emit('video-call:answer', { targetUserId: peerId, callId: payload.callId, answer });
         clearTimers();
         updateState('active');
+        sendMediaState(stream.getVideoTracks().some((t) => t.enabled !== false));
       } catch (e) {
         failCall(e && e.message ? e.message : 'Could not access camera or microphone');
       }
@@ -206,6 +227,12 @@ export function CallProvider({ socket, currentUser, children }) {
       setTimeout(() => updateState('idle'), 700);
     };
 
+    const onMediaState = (payload) => {
+      if (!payload) return;
+      if (payload.callId && metaRef.current?.callId && payload.callId !== metaRef.current.callId) return;
+      setRemoteCameraOn(payload.cameraOn !== false);
+    };
+
     socket.on('video-call:invite', onInvite);
     socket.on('video-call:accept', onAccept);
     socket.on('video-call:reject', onReject);
@@ -213,6 +240,7 @@ export function CallProvider({ socket, currentUser, children }) {
     socket.on('video-call:answer', onAnswer);
     socket.on('video-call:ice-candidate', onCandidate);
     socket.on('video-call:end', onEnd);
+    socket.on('video-call:media-state', onMediaState);
 
     return () => {
       socket.off('video-call:invite', onInvite);
@@ -222,9 +250,10 @@ export function CallProvider({ socket, currentUser, children }) {
       socket.off('video-call:answer', onAnswer);
       socket.off('video-call:ice-candidate', onCandidate);
       socket.off('video-call:end', onEnd);
+      socket.off('video-call:media-state', onMediaState);
       call.clearCallbacks();
     };
-  }, [socket, cleanup, endCall, showToast, wireCallbacks]);
+  }, [socket, cleanup, endCall, showToast, wireCallbacks, sendMediaState]);
 
   const beginOutgoingConnection = useCallback(async () => {
     const meta = metaRef.current;
@@ -242,6 +271,7 @@ export function CallProvider({ socket, currentUser, children }) {
         sk.emit('video-call:offer', { targetUserId: meta.calleeId, callId: meta.callId, offer });
       }
       updateState('connecting');
+      sendMediaState(stream.getVideoTracks().some((t) => t.enabled !== false));
       if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
       connectTimerRef.current = setTimeout(() => {
         if (stateRef.current === 'connecting') {
@@ -301,10 +331,13 @@ export function CallProvider({ socket, currentUser, children }) {
   }, []);
 
   const toggleVideo = useCallback(() => {
-    const next = !call.isVideoEnabled();
+    const stream = call.getLocalStream();
+    const hasVideo = !!(stream && stream.getVideoTracks().length > 0);
+    const next = hasVideo ? !call.isVideoEnabled() : false;
     call.setVideoEnabled(next);
     setVideoEnabledState(next);
-  }, []);
+    sendMediaState(next && hasVideo);
+  }, [sendMediaState]);
 
   const toggleRemoteAudio = useCallback(() => {
     const next = !call.isRemoteAudioEnabled();
@@ -335,6 +368,7 @@ export function CallProvider({ socket, currentUser, children }) {
   return (
     <CallContext.Provider value={{
       state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible, sharing,
+      remoteCameraOn, remoteHasVideoTrack,
       minimized, setMinimized, callError, startCall, acceptCall, declineCall, endCall, dismissError,
       toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
     }}>

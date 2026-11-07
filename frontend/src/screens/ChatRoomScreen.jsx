@@ -576,7 +576,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
       {/* Messages */}
       <div ref={listRef} style={{
-        flex: '1 1 0%', overflowY: 'auto',
+        flex: '1 1 0%', overflowY: 'auto', overscrollBehavior: 'contain',
+        WebkitOverflowScrolling: 'touch',
         padding: '12px 14px', paddingBottom: 12,
         display: 'flex', flexDirection: 'column', gap: 4,
         minHeight: 0,
