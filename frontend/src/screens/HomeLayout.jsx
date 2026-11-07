@@ -177,9 +177,8 @@ export default function HomeLayout() {
         <WatchTogetherProvider socket={socket} currentUser={currentUser}>
           <WatchTogetherBridge goSection={goSection} />
           <div
-            className={isDesktop ? undefined : 'app-viewport'}
+            className="app-viewport"
             style={{
-              ...(isDesktop ? { minHeight: '100vh' } : {}),
               width: '100%',
               display: 'flex',
               alignItems: 'stretch',
@@ -191,7 +190,8 @@ export default function HomeLayout() {
             <div style={{
               width: '100%',
               maxWidth: isDesktop ? 1600 : '100%',
-              ...(isDesktop ? { minHeight: '100vh' } : { height: '100%', minHeight: 0 }),
+              height: '100%',
+              minHeight: 0,
               background: theme.background,
               boxShadow: isDesktop ? theme.frameShadow : 'none',
               display: 'flex',

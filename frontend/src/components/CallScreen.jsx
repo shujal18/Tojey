@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { PhoneOff, Mic, MicOff, Video, VideoOff, Minimize2, Maximize2, Menu, Volume2, VolumeX } from 'lucide-react';
+import { PhoneOff, Phone, Mic, MicOff, Video, VideoOff, Minimize2, Maximize2, Menu, Volume2, VolumeX, RefreshCw, Monitor } from 'lucide-react';
 import { useCall } from '../services/CallContext';
 import { useTheme } from '../theme/ThemeContext';
 import { resolveUrl } from '../services/upload';
@@ -19,8 +19,9 @@ export default function CallScreen() {
 
   const remoteRef = useRef(null);
   const localRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const [elapsed, setElapsed] = useState(0);
-  const [soundUnlocked, setSoundUnlocked] = useState(false);
+  const [soundBlocked, setSoundBlocked] = useState(false);
   const [mainIsLocal, setMainIsLocal] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
 
@@ -57,19 +58,46 @@ export default function CallScreen() {
   const [pipPos, setPipPos] = useState({ x: 20, y: 20 });
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef({ sx: 0, sy: 0, ox: 0, oy: 0 });
+  const pipMovedRef = useRef(false);
 
-  // Remote audio: keep video element muted=TRUE always (prevents black screen on
-  // attribute changes). Audio is enabled/disabled via the MediaStream track itself
-  // through toggleRemoteAudio (call.js sets track.enabled). soundUnlocked is only
-  // used for the "Tap for sound" hint overlay.
-  const unlockSound = useCallback(() => {
-    if (soundUnlocked) return;
-    setSoundUnlocked(true);
-    toggleRemoteAudio(true);
-    if (remoteRef.current) {
-      try { remoteRef.current.play().catch(() => {}); } catch (e) {}
+  // Remote audio: the video element is ALWAYS muted (a muted media element
+  // outputs no sound at all, which is why remote audio was completely silent
+  // before). Playback happens through a dedicated <audio> element so the mute
+  // buttons and "Tap for sound" behave as labelled.
+  const remoteAudibleRef = useRef(remoteAudible);
+  remoteAudibleRef.current = remoteAudible;
+
+  const setRemoteAudioEl = useCallback((el) => {
+    remoteAudioRef.current = el;
+    if (!el) return;
+    el.srcObject = remoteStreamRef.current || null;
+    el.muted = !remoteAudibleRef.current;
+    if (remoteStreamRef.current && remoteAudibleRef.current) {
+      const p = el.play();
+      if (p && p.then) p.then(() => setSoundBlocked(false)).catch(() => setSoundBlocked(true));
     }
-  }, [soundUnlocked, toggleRemoteAudio]);
+  }, []);
+
+  useEffect(() => {
+    const el = remoteAudioRef.current;
+    if (!el) return;
+    if (el.srcObject !== (remoteStream || null)) el.srcObject = remoteStream || null;
+    if (!remoteStream) { setSoundBlocked(false); return; }
+    el.muted = !remoteAudible;
+    if (!remoteAudible) { setSoundBlocked(false); return; }
+    const p = el.play();
+    if (p && p.then) p.then(() => setSoundBlocked(false)).catch(() => setSoundBlocked(true));
+  }, [remoteStream, remoteAudible, state]);
+
+  useEffect(() => { setSoundBlocked(false); }, [callMeta && callMeta.callId]);
+
+  const unlockSound = useCallback(() => {
+    const el = remoteAudioRef.current;
+    if (!el) return;
+    el.muted = false;
+    const p = el.play();
+    if (p && p.then) p.then(() => setSoundBlocked(false)).catch(() => setSoundBlocked(true));
+  }, []);
 
   const other = callMeta?.other || {};
   const name = other.display_name || other.username || '';
@@ -170,6 +198,7 @@ export default function CallScreen() {
   // ---- Draggable minimized (PIP) call bubble ----
   const onPipDown = (e) => {
     e.preventDefault();
+    pipMovedRef.current = false;
     setDragging(true);
     dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pipPos.x, oy: pipPos.y };
   };
@@ -177,6 +206,7 @@ export default function CallScreen() {
     if (!dragging) return;
     const dx = e.clientX - dragRef.current.sx;
     const dy = e.clientY - dragRef.current.sy;
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) pipMovedRef.current = true;
     const nx = Math.min(Math.max(0, dragRef.current.ox + dx), (window.innerWidth || 320) - 280);
     const ny = Math.min(Math.max(0, dragRef.current.oy + dy), (window.innerHeight || 480) - 170);
     setPipPos({ x: nx, y: ny });
@@ -197,6 +227,7 @@ export default function CallScreen() {
         onPointerUp={onPipUp}
         onPointerCancel={onPipUp}
       >
+        <audio ref={setRemoteAudioEl} autoPlay playsInline style={{ display: 'none' }} />
         <div style={{ position: 'relative', width: '100%', height: 120, background: '#000' }}>
           {mainIsLocal ? (
             <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
@@ -207,7 +238,7 @@ export default function CallScreen() {
               <Avatar size={48} />
             </div>
           )}
-          {!mainIsLocal && remoteStream && !soundUnlocked && (
+          {soundBlocked && (
             <button onClick={unlockSound} style={{
               position: 'absolute', bottom: 8, right: 8, zIndex: 3,
               background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
@@ -261,7 +292,7 @@ export default function CallScreen() {
             width: 60, height: 60, borderRadius: 30, background: theme.danger, color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(229,57,53,0.5)',
           }}>
-            <PhoneOff size={24} style={{ transform: 'rotate(135deg)' }} />
+            <PhoneOff size={24} />
           </button>
           <button onClick={toggleRemoteAudio} title={remoteAudible ? 'Mute remote' : 'Unmute remote'} style={{
             width: 56, height: 56, borderRadius: 28,
@@ -275,7 +306,7 @@ export default function CallScreen() {
             width: 60, height: 60, borderRadius: 30, background: '#00C853', color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(0,200,83,0.5)',
           }}>
-            <PhoneOff size={24} />
+            <Phone size={24} />
           </button>
         </div>
       </div>
@@ -327,6 +358,7 @@ export default function CallScreen() {
       background: 'radial-gradient(circle at center, #1a152e 0%, #0b0a12 100%)',
       display: 'flex', flexDirection: 'column',
     }}>
+      <audio ref={setRemoteAudioEl} autoPlay playsInline style={{ display: 'none' }} />
       <div style={{ position: 'absolute', top: 44, left: 0, right: 0, textAlign: 'center', zIndex: 5, pointerEvents: 'none' }}>
         <div style={{ color: '#fff', fontSize: 17, fontWeight: 700, textShadow: '0 1px 8px rgba(0,0,0,0.9)' }}>{name || 'Unknown'}</div>
         <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 14, marginTop: 3 }}>
@@ -401,7 +433,7 @@ export default function CallScreen() {
         )}
       </div>
 
-      {!mainIsLocal && remoteStream && !soundUnlocked && (
+      {soundBlocked && (
         <button onClick={unlockSound} style={{
           position: 'absolute', bottom: 110, right: 16, zIndex: 7,
           background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
@@ -419,6 +451,7 @@ export default function CallScreen() {
           onPointerMove={onPipMove}
           onPointerUp={onPipUp}
           onPointerCancel={onPipUp}
+          onClick={() => { if (!pipMovedRef.current && remoteStream) swapViews(); }}
           style={{
             position: 'absolute', left: pipPos.x, top: pipPos.y, zIndex: 5,
             width: 92, height: 128, borderRadius: 12, overflow: 'hidden',
@@ -466,13 +499,14 @@ export default function CallScreen() {
       }}>
         <ControlBtn onClick={endCall} icon={<PhoneOff size={22} />} label="End call" danger />
         <ControlBtn onClick={toggleVideo} icon={videoEnabled ? <Video size={22} /> : <VideoOff size={22} />} label={videoEnabled ? 'Camera off' : 'Camera on'} />
-        <ControlBtn onClick={toggleRemoteAudio} icon={remoteAudible ? <Volume2 size={22} /> : <VolumeX size={22} />} active={!remoteAudible} label="Mute remote" />
+        <ControlBtn onClick={toggleRemoteAudio} icon={remoteAudible ? <Volume2 size={22} /> : <VolumeX size={22} />} active={!remoteAudible} label={remoteAudible ? 'Mute remote' : 'Unmute remote'} />
         <ControlBtn onClick={toggleMic} icon={micMuted ? <MicOff size={22} /> : <Mic size={22} />} label={micMuted ? 'Unmute' : 'Mute'} />
 
         {/* More options (3-dot) */}
         <div style={{ position: 'relative' }}>
           <button
             onClick={() => setMoreOpen((o) => !o)}
+            title="More options"
             style={{
               width: 44, height: 44, borderRadius: 22,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -493,13 +527,13 @@ export default function CallScreen() {
                 onClick={() => { setMoreOpen(false); toggleScreenShare(); }}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 12px', border: 'none', background: 'none', color: sharing ? theme.primary : '#fff', fontSize: 13, cursor: 'pointer', borderRadius: 8 }}
               >
-                <VideoOff size={16} /> {sharing ? 'Stop Screen Share' : 'Share Screen'}
+                <Monitor size={16} /> {sharing ? 'Stop Screen Share' : 'Share Screen'}
               </button>
               <button
                 onClick={() => { setMoreOpen(false); flipCamera(); }}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 12px', border: 'none', background: 'none', color: '#fff', fontSize: 13, cursor: 'pointer', borderRadius: 8 }}
               >
-                <VideoOff size={16} /> Flip Camera
+                <RefreshCw size={16} /> Flip Camera
               </button>
               <button
                 onClick={() => { setMoreOpen(false); setMinimized(true); }}

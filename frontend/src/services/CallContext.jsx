@@ -212,6 +212,46 @@ export function CallProvider({ socket, currentUser, children }) {
       } catch (e) {}
     };
 
+    // Mid-call camera enable: start a WebRTC renegotiation so the newly acquired
+    // camera media is delivered to the peer (required when the call started
+    // audio-only and we swapped in a camera track).
+    const onRenegotiationOffer = async (payload) => {
+      const s = stateRef.current;
+      if (s !== 'outgoing' && s !== 'connecting' && s !== 'active') return;
+      const meta = metaRef.current;
+      if (!meta || !meta.callId) return;
+      if (payload.callId && payload.callId !== meta.callId) return;
+      const sk = socketRef.current;
+      if (!sk) return;
+      try {
+        const answer = await call.acceptOffer(payload.offer);
+        const myId = currentUserRef.current?.id;
+        const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
+        sk.emit('video-call:answer', { targetUserId: peerId, callId: meta.callId, answer });
+      } catch (e) {
+        failCall(e && e.message ? e.message : 'Renegotiation failed');
+      }
+    };
+
+    const onRenegotiate = async (payload) => {
+      const s = stateRef.current;
+      if (s !== 'outgoing' && s !== 'connecting' && s !== 'active') return;
+      const meta = metaRef.current;
+      if (!meta || !meta.callId) return;
+      if (payload.callId && payload.callId !== meta.callId) return;
+      const sk = socketRef.current;
+      if (!sk) return;
+      try {
+        const offer = await call.createOffer();
+        await call.applyLocalOffer(offer);
+        const myId = currentUserRef.current?.id;
+        const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
+        sk.emit('video-call:renegotiate', { targetUserId: peerId, callId: meta.callId, offer });
+      } catch (e) {
+        failCall(e && e.message ? e.message : 'Renegotiation failed');
+      }
+    };
+
     const onCandidate = (payload) => {
       if (payload.candidate && stateRef.current !== 'idle') {
         call.handleRemoteCandidate(payload.candidate).catch(() => {});
@@ -238,6 +278,7 @@ export function CallProvider({ socket, currentUser, children }) {
     socket.on('video-call:reject', onReject);
     socket.on('video-call:offer', onOffer);
     socket.on('video-call:answer', onAnswer);
+    socket.on('video-call:renegotiate', onRenegotiationOffer);
     socket.on('video-call:ice-candidate', onCandidate);
     socket.on('video-call:end', onEnd);
     socket.on('video-call:media-state', onMediaState);
@@ -248,6 +289,7 @@ export function CallProvider({ socket, currentUser, children }) {
       socket.off('video-call:reject', onReject);
       socket.off('video-call:offer', onOffer);
       socket.off('video-call:answer', onAnswer);
+      socket.off('video-call:renegotiate', onRenegotiationOffer);
       socket.off('video-call:ice-candidate', onCandidate);
       socket.off('video-call:end', onEnd);
       socket.off('video-call:media-state', onMediaState);
@@ -330,14 +372,47 @@ export function CallProvider({ socket, currentUser, children }) {
     setMicMutedState(next);
   }, []);
 
-  const toggleVideo = useCallback(() => {
+  const toggleVideo = useCallback(async () => {
     const stream = call.getLocalStream();
     const hasVideo = !!(stream && stream.getVideoTracks().length > 0);
-    const next = hasVideo ? !call.isVideoEnabled() : false;
-    call.setVideoEnabled(next);
-    setVideoEnabledState(next);
-    sendMediaState(next && hasVideo);
-  }, [sendMediaState]);
+    const currentlyOn = hasVideo && call.isVideoEnabled();
+    if (currentlyOn) {
+      call.setVideoEnabled(false);
+      setVideoEnabledState(false);
+      sendMediaState(false);
+      return;
+    }
+    if (!hasVideo) {
+      // The call started audio-only (camera denied/unavailable). Try to acquire
+      // the camera now and attach it to the existing video sender.
+      try {
+        await call.startCameraTrack();
+        const updated = call.getLocalStream();
+        setLocalStream(updated ? new MediaStream(updated.getTracks()) : null);
+        setVideoEnabledState(true);
+        sendMediaState(true);
+        // Camera media changed mid-call; renegotiate so the peer receives the
+        // new frames over the (now send-receive) video m-line.
+        try {
+          const offer = await call.createOffer();
+          const meta = metaRef.current;
+          const s = stateRef.current;
+          const sk = socketRef.current;
+          if (sk && meta && meta.callId && s && s !== 'idle') {
+            const myId = currentUserRef.current?.id;
+            const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
+            sk.emit('video-call:renegotiate', { targetUserId: peerId, callId: meta.callId, offer });
+          }
+        } catch (e2) {}
+      } catch (e) {
+        showToast('Camera unavailable - check browser permissions');
+      }
+      return;
+    }
+    call.setVideoEnabled(true);
+    setVideoEnabledState(true);
+    sendMediaState(true);
+  }, [sendMediaState, showToast]);
 
   const toggleRemoteAudio = useCallback(() => {
     const next = !call.isRemoteAudioEnabled();
@@ -361,9 +436,13 @@ export function CallProvider({ socket, currentUser, children }) {
 
   const flipCamera = useCallback(async () => {
     try {
-      await call.flipCamera();
-    } catch (e) {}
-  }, []);
+      const updated = await call.flipCamera();
+      if (updated) setLocalStream(new MediaStream(updated.getTracks()));
+      showToast('Camera switched');
+    } catch (e) {
+      showToast('Could not switch camera');
+    }
+  }, [showToast]);
 
   return (
     <CallContext.Provider value={{

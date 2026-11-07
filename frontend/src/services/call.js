@@ -17,6 +17,7 @@ let pc = null;
 let localStream = null;
 let screenStream = null;
 let remoteStream = null;
+let pendingCandidates = [];
 let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
@@ -78,6 +79,23 @@ export async function startLocalStream() {
   return localStream;
 }
 
+// Audio-only fallback (camera denied / unavailable) still needs a video m-line
+// with send direction so later "Camera on" can swap a real camera in without a
+// full renegotiation (and so peers receive a stream object that carries video).
+function makePlaceholderVideoTrack() {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    const stream = canvas.captureStream(30);
+    const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (track) track.enabled = true;
+    return track || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 export function createPeerConnection() {
   if (pc) cleanupCallButKeepStream();
   pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -98,6 +116,8 @@ export function createPeerConnection() {
       // Fall back to the signalled stream if the tracks can't be added.
       if (e.streams && e.streams[0]) remoteStream = e.streams[0];
     }
+    // Respect the user's remote-audio choice for tracks that arrive later.
+    if (e.track.kind === 'audio') e.track.enabled = remoteAudioEnabled;
     if (callbacks.onRemoteStream) callbacks.onRemoteStream(remoteStream);
   };
 
@@ -113,6 +133,10 @@ export function createPeerConnection() {
     localStream.getTracks().forEach(t => {
       if (!kinds.has(t.kind)) pc.addTrack(t, localStream);
     });
+    if (localStream.getVideoTracks().length === 0) {
+      const placeholder = makePlaceholderVideoTrack();
+      if (placeholder) pc.addTrack(placeholder, new MediaStream([placeholder]));
+    }
   }
   return pc;
 }
@@ -127,6 +151,7 @@ export async function createOffer() {
 export async function acceptOffer(offer) {
   if (!pc) throw new Error('No peer connection');
   await pc.setRemoteDescription(offer);
+  await flushPendingCandidates();
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   return pc.localDescription;
@@ -135,24 +160,101 @@ export async function acceptOffer(offer) {
 export async function handleRemoteAnswer(answer) {
   if (!pc) return;
   await pc.setRemoteDescription(answer);
+  await flushPendingCandidates();
+}
+
+// Candidates can arrive before the remote description is applied (the callee's
+// ICE gathering may beat the answer over the socket). Queue instead of dropping,
+// otherwise mobile/NAT calls connect audio-less or fail entirely.
+async function flushPendingCandidates() {
+  if (!pc || !pc.remoteDescription || !pendingCandidates.length) return;
+  const queued = pendingCandidates;
+  pendingCandidates = [];
+  for (const candidate of queued) {
+    try { await pc.addIceCandidate(candidate); } catch (e) {}
+  }
 }
 
 export async function handleRemoteCandidate(candidate) {
   if (!pc) return;
+  if (!pc.remoteDescription) {
+    pendingCandidates.push(candidate);
+    return;
+  }
   try {
     await pc.addIceCandidate(candidate);
-  } catch (e) {}
+  } catch (e) {
+    pendingCandidates.push(candidate);
+  }
 }
 
-// Browsers can't switch cameras without re-requesting; try constraints where supported.
+function findVideoSender() {
+  if (!pc) return null;
+  const direct = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+  if (direct) return direct;
+  const transceiver = pc.getTransceivers().find((t) =>
+    t.sender
+    && (!t.sender.track || t.sender.track.kind === 'video')
+    && t.receiver && t.receiver.track && t.receiver.track.kind === 'video');
+  return transceiver ? transceiver.sender : null;
+}
+
+// Acquire a camera track for a call that started audio-only (camera denied or
+// unavailable) and attach it to the existing video sender.
+export async function startCameraTrack() {
+  if (!localStream) throw new Error('No local stream');
+  const existing = localStream.getVideoTracks()[0];
+  if (existing) {
+    existing.enabled = true;
+    return existing;
+  }
+  const camStream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: videoFacing,
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 30 },
+    },
+  });
+  const track = camStream.getVideoTracks()[0];
+  if (!track) throw new Error('Camera unavailable');
+  localStream.addTrack(track);
+  if (pc) {
+    const sender = findVideoSender();
+    if (sender) await sender.replaceTrack(track);
+    else pc.addTrack(track, localStream);
+  }
+  return track;
+}
+
+// Browsers usually ignore facingMode updates, so re-request the camera and swap
+// the sender's track (no renegotiation needed).
 export async function flipCamera() {
-  if (!localStream) return;
-  const track = localStream.getVideoTracks()[0];
-  if (!track) return;
-  videoFacing = videoFacing === 'user' ? 'environment' : 'user';
-  try {
-    await track.applyConstraints({ facingMode: videoFacing });
-  } catch (e) {}
+  if (!localStream) return null;
+  const current = localStream.getVideoTracks()[0];
+  if (!current) return startCameraTrack();
+  const nextFacing = videoFacing === 'user' ? 'environment' : 'user';
+  const camStream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: nextFacing,
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 30 },
+    },
+  });
+  const track = camStream.getVideoTracks()[0];
+  if (!track) throw new Error('Camera unavailable');
+  if (pc) {
+    const sender = findVideoSender();
+    if (sender) await sender.replaceTrack(track);
+  }
+  try { localStream.removeTrack(current); } catch (e) {}
+  try { current.stop(); } catch (e) {}
+  localStream.addTrack(track);
+  videoFacing = nextFacing;
+  return localStream;
 }
 
 export function isScreenSharing() { return !!screenStream; }
@@ -207,6 +309,7 @@ function cleanupCallButKeepStream() {
     pc = null;
   }
   remoteStream = null;
+  pendingCandidates = [];
   remoteAudioEnabled = true;
 }
 

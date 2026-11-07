@@ -2252,6 +2252,14 @@ io.on('connection', async (socket) => {
       relayVideo('video-call:offer', target, { callId: id, offer });
     });
 
+    socket.on('video-call:renegotiate', ({ targetUserId, callId, offer }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id || !offer) return;
+      relayVideo('video-call:renegotiate', target, { callId: id, offer });
+    });
+
     socket.on('video-call:answer', ({ targetUserId, callId, answer }) => {
       const target = Number(targetUserId);
       if (!validTarget(target)) return;
