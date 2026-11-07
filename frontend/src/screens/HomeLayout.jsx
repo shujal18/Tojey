@@ -55,6 +55,7 @@ export default function HomeLayout() {
   const { user, token, logout } = useAuth();
   const { theme } = useTheme();
   const isDesktop = useIsDesktop();
+  const showMobileNav = !isDesktop && section !== 'shorts' && !openChat;
   const [section, setSection] = useState('chats');
   const [openChat, setOpenChat] = useState(null);
   const [socket, setSocket] = useState(null);
@@ -139,8 +140,7 @@ export default function HomeLayout() {
           <WatchTogetherBridge goSection={goSection} />
           <div
             style={{
-              height: '100dvh',
-              minHeight: '100vh',
+              height: '100vh',
               width: '100%',
               display: 'flex',
               alignItems: 'stretch',
@@ -169,7 +169,7 @@ export default function HomeLayout() {
               />
             )}
 
-            <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, overflow: 'hidden', paddingBottom: showMobileNav ? 64 : 0 }}>
               {section === 'chats' && (
                 <>
                   {(isDesktop || !openChat) && (
@@ -221,7 +221,7 @@ export default function HomeLayout() {
               )}
             </div>
 
-            {!isDesktop && section !== 'shorts' && !openChat && (
+            {showMobileNav && (
               <MobileNav section={section} onSelect={goSection} />
             )}
           </div>
@@ -415,7 +415,7 @@ function MobileNav({ section, onSelect }) {
         borderTop: `1px solid ${theme.border || theme.divider}`,
         paddingTop: 4, paddingBottom: 'env(safe-area-inset-bottom)',
         zIndex: 30,
-        marginTop: 'auto',
+        position: 'fixed', bottom: 0, left: 0, right: 0,
       }}
     >
       {items.map((it) => {
