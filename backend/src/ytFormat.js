@@ -66,7 +66,10 @@ function resolveCookiePath() {
       const kv = part.split('=');
       if (kv.length < 2) continue;
       const name = kv.shift().trim();
-      const value = kv.join('=').trim();
+      let value = kv.join('=').trim();
+      // Values pasted from a browser's Network tab are URL-encoded; decode them
+      // so yt-dlp sends the real cookie value to YouTube.
+      try { value = decodeURIComponent(value); } catch (e) { /* keep raw */ }
       if (!name) continue;
       lines.push('.youtube.com\tTRUE\t/\tTRUE\t0\t' + name + '\t' + value);
     }
