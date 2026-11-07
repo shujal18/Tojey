@@ -228,9 +228,9 @@ export default function CallScreen() {
     return (
       <div style={{
         position: 'fixed', inset: 0, zIndex: 4000,
-        background: 'rgba(10,9,16,0.92)',
+        background: 'rgba(10,9,16,0.75)',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        backdropFilter: 'blur(10px)',
+        backdropFilter: 'blur(8px)',
       }}>
         <div style={{ textAlign: 'center', paddingBottom: 20 }}>
           <div style={{ display: 'inline-block', animation: 'callRing 1.6s infinite ease-in-out' }}>
