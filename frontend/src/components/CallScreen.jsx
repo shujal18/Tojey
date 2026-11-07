@@ -331,11 +331,18 @@ export default function CallScreen() {
       >
         {localMain ? (
           <>
-            {videoEnabled ? (
-              <video ref={setLocal} autoPlay playsInline muted style={{
-                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
-                background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
-              }} />
+            {localStream && videoEnabled ? (
+              <video
+                key="local-main"
+                ref={setLocal}
+                autoPlay
+                playsInline
+                muted
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+                  background: '#111', transform: sharing ? 'none' : 'scaleX(-1)',
+                }}
+              />
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
                 <Avatar size={110} />

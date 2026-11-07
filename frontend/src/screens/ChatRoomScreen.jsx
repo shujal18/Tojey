@@ -215,6 +215,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setText('');
     setReplyingTo(null);
     setShowEmoji(false);
+    // Hide mobile keyboard after sending
+    if (messageInputRef.current) messageInputRef.current.blur();
   };
 
   // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----
@@ -463,7 +465,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   return (
     <div style={{
-      height: '100%',
+      minHeight: '100vh',
       width: '100%',
       flex: 1,
       display: 'flex',
