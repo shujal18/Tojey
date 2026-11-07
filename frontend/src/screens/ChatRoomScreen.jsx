@@ -465,9 +465,9 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   return (
     <div style={{
-      height: '100%',
       width: '100%',
-      flex: 1,
+      flex: '1 1 0%',
+      minHeight: 0,
       display: 'flex',
       flexDirection: 'column',
       background: wallpaper ? parseWallpaper(wallpaper, theme) : theme.panelBg,
@@ -488,6 +488,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         backdropFilter: 'blur(8px)',
         borderBottom: `1px solid ${theme.border}`,
         zIndex: 6,
+        flexShrink: 0,
       }}>
         <button onClick={onBack} style={{ color: wallpaper ? '#fff' : theme.text, padding: 6, marginRight: 4 }}>
           <ArrowLeft size={22} />
@@ -575,8 +576,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
       {/* Messages */}
       <div ref={listRef} style={{
-        flex: 1, overflowY: 'auto',
-        padding: '12px 14px', paddingBottom: 90,
+        flex: '1 1 0%', overflowY: 'auto',
+        padding: '12px 14px', paddingBottom: 12,
         display: 'flex', flexDirection: 'column', gap: 4,
         minHeight: 0,
       }}>
@@ -728,7 +729,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         background: theme.composerBg,
         borderTop: `1px solid ${theme.border}`,
         padding: '10px 12px',
-        paddingBottom: 14,
+        paddingBottom: 'calc(14px + env(safe-area-inset-bottom))',
         flexShrink: 0,
       }}>
         {showEmoji && (

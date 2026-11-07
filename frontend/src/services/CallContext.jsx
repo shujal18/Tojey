@@ -17,6 +17,7 @@ export function CallProvider({ socket, currentUser, children }) {
   const [remoteAudible, setRemoteAudible] = useState(true);
   const [sharing, setSharing] = useState(false);
   const [minimized, setMinimized] = useState(false);
+  const [callError, setCallError] = useState(null);
   const [incomingAfterOpen, setIncomingAfterOpen] = useState(null);
 
   const socketRef = useRef(socket);
@@ -27,6 +28,14 @@ export function CallProvider({ socket, currentUser, children }) {
   currentUserRef.current = currentUser;
   const streamRef = useRef(null);
   const noAnswerTimerRef = useRef(null);
+  const connectTimerRef = useRef(null);
+
+  const clearTimers = () => {
+    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+    if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+    noAnswerTimerRef.current = null;
+    connectTimerRef.current = null;
+  };
 
   const updateState = (s) => { stateRef.current = s; setState(s); };
   const updateMeta = (m) => { metaRef.current = m; setCallMeta(m); };
@@ -43,17 +52,40 @@ export function CallProvider({ socket, currentUser, children }) {
 
   const cleanup = useCallback((opts = {}) => {
     const { silentToast = false } = opts;
-    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+    clearTimers();
     call.cleanupCall();
     clearStreams();
     updateMeta(null);
+    setCallError(null);
     if (!silentToast) updateState('idle');
+  }, []);
+
+  const dismissError = useCallback(() => {
+    setCallError(null);
+    cleanup();
+  }, [cleanup]);
+
+  const failCall = useCallback((message) => {
+    const meta = metaRef.current;
+    const s = stateRef.current;
+    clearTimers();
+    const sk = socketRef.current;
+    if (sk && meta && meta.callId && s !== 'idle') {
+      const myId = currentUserRef.current?.id;
+      const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
+      if (peerId) sk.emit('video-call:end', { targetUserId: peerId, callId: meta.callId });
+    }
+    call.cleanupCall();
+    clearStreams();
+    setCallError(message || 'Could not start the call');
+    updateState('failed');
   }, []);
 
   const endCall = useCallback((reason) => {
     const meta = metaRef.current;
     const s = stateRef.current;
     if (!meta || s === 'idle') return;
+    clearTimers();
     const peerId = (s === 'outgoing' || s === 'active' || s === 'connecting') ? meta.calleeId : meta.callerId;
     const sk = socketRef.current;
     if (sk && peerId && meta.callId) {
@@ -79,15 +111,17 @@ export function CallProvider({ socket, currentUser, children }) {
         setRemoteStream(stream);
       },
       onConnectionState: (cs) => {
-        if (cs === 'failed' || cs === 'closed') {
+        // 'closed' is always initiated by our own teardown - ignore it. Only a
+        // genuine ICE/peer failure should surface an explanation instead of the
+        // call screen silently vanishing.
+        if (cs === 'failed') {
           if (stateRef.current === 'active' || stateRef.current === 'connecting') {
-            showToast('Call ended');
-            endCall();
+            failCall('Connection failed — your network may block peer-to-peer calls');
           }
         }
       },
     });
-  }, [endCall, showToast]);
+  }, [endCall, failCall, showToast]);
 
   useEffect(() => {
     if (!socket) return;
@@ -134,15 +168,16 @@ export function CallProvider({ socket, currentUser, children }) {
         const stream = await call.startLocalStream();
         streamRef.current = stream;
         setLocalStream(stream);
+        setVideoEnabledState(stream.getVideoTracks().length > 0);
         wireCallbacks();
         call.createPeerConnection();
         const answer = await call.acceptOffer(payload.offer);
         const peerId = metaRef.current?.callerId;
         if (peerId) socket.emit('video-call:answer', { targetUserId: peerId, callId: payload.callId, answer });
+        clearTimers();
         updateState('active');
       } catch (e) {
-        showToast('Could not start call');
-        cleanup();
+        failCall(e && e.message ? e.message : 'Could not access camera or microphone');
       }
     };
 
@@ -151,6 +186,7 @@ export function CallProvider({ socket, currentUser, children }) {
       if (s !== 'outgoing' && s !== 'connecting' && s !== 'active') return;
       try {
         await call.handleRemoteAnswer(payload.answer);
+        clearTimers();
         updateState('active');
       } catch (e) {}
     };
@@ -163,6 +199,7 @@ export function CallProvider({ socket, currentUser, children }) {
 
     const onEnd = (payload) => {
       if (stateRef.current === 'idle') return;
+      clearTimers();
       updateState('ended');
       call.cleanupCall();
       clearStreams();
@@ -196,6 +233,7 @@ export function CallProvider({ socket, currentUser, children }) {
       const stream = await call.startLocalStream();
       streamRef.current = stream;
       setLocalStream(stream);
+      setVideoEnabledState(stream.getVideoTracks().length > 0);
       wireCallbacks();
       call.createPeerConnection();
       const offer = await call.createOffer();
@@ -204,11 +242,16 @@ export function CallProvider({ socket, currentUser, children }) {
         sk.emit('video-call:offer', { targetUserId: meta.calleeId, callId: meta.callId, offer });
       }
       updateState('connecting');
+      if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = setTimeout(() => {
+        if (stateRef.current === 'connecting') {
+          failCall('Could not connect — check your network');
+        }
+      }, 25000);
     } catch (e) {
-      showToast('Could not access the camera');
-      cleanup();
+      failCall(e && e.message ? e.message : 'Could not access camera or microphone');
     }
-  }, [cleanup, showToast, wireCallbacks]);
+  }, [failCall, wireCallbacks]);
 
   const startCall = useCallback((otherUser) => {
     if (stateRef.current !== 'idle' || !socketRef.current) return;
@@ -235,7 +278,13 @@ export function CallProvider({ socket, currentUser, children }) {
     if (!meta || !socketRef.current) return;
     updateState('connecting');
     socketRef.current.emit('video-call:accept', { targetUserId: meta.callerId, callId: meta.callId });
-  }, []);
+    if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+    connectTimerRef.current = setTimeout(() => {
+      if (stateRef.current === 'connecting') {
+        failCall('Could not connect — the other side did not respond');
+      }
+    }, 25000);
+  }, [failCall]);
 
   const declineCall = useCallback(() => {
     const meta = metaRef.current;
@@ -286,7 +335,7 @@ export function CallProvider({ socket, currentUser, children }) {
   return (
     <CallContext.Provider value={{
       state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible, sharing,
-      minimized, setMinimized, startCall, acceptCall, declineCall, endCall,
+      minimized, setMinimized, callError, startCall, acceptCall, declineCall, endCall, dismissError,
       toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
     }}>
       {children}

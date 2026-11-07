@@ -66,9 +66,16 @@ export function hasActiveCall() {
 
 export async function startLocalStream() {
   if (localStream) return localStream;
-  const stream = await navigator.mediaDevices.getUserMedia(LOCAL_CONSTRAINTS);
-  localStream = stream;
-  return stream;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Camera and microphone need a secure (HTTPS) connection');
+  }
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia(LOCAL_CONSTRAINTS);
+  } catch (e) {
+    // Camera unavailable/denied: fall back to audio-only so the call can still work.
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+  return localStream;
 }
 
 export function createPeerConnection() {

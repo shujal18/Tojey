@@ -140,19 +140,22 @@ export default function HomeLayout() {
           <WatchTogetherBridge goSection={goSection} />
           <div
             style={{
-              minHeight: '100vh',
+              height: isDesktop ? 'auto' : '100dvh',
+              minHeight: isDesktop ? '100vh' : '100dvh',
               width: '100%',
               display: 'flex',
               alignItems: 'stretch',
               justifyContent: 'flex-start',
               background: theme.shellBg,
+              overflow: isDesktop ? 'visible' : 'hidden',
               ...shellVars,
             }}
           >
             <div style={{
               width: '100%',
               maxWidth: isDesktop ? 1600 : '100%',
-              minHeight: '100vh',
+              height: isDesktop ? 'auto' : '100dvh',
+              minHeight: isDesktop ? '100vh' : '100dvh',
               background: theme.background,
               boxShadow: isDesktop ? theme.frameShadow : 'none',
               display: 'flex',
@@ -174,7 +177,7 @@ export default function HomeLayout() {
                     <ChatListPane isDesktop={isDesktop} onOpenChat={handleOpenChat} />
                   )}
                   {(isDesktop || openChat) && (
-                    <div style={{ flex: 1, display: 'flex', minWidth: 0, overflow: 'hidden' }}>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
                       {openChat ? (
                         <ChatRoomScreen
                           otherUser={openChat}

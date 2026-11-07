@@ -12,7 +12,7 @@ export default function CallScreen() {
   const { theme } = useTheme();
   const {
     state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible,
-    sharing, minimized, setMinimized, acceptCall, declineCall, endCall,
+    sharing, minimized, setMinimized, callError, acceptCall, declineCall, endCall, dismissError,
     toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
   } = useCall();
 
@@ -23,11 +23,34 @@ export default function CallScreen() {
   const [mainIsLocal, setMainIsLocal] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
 
-  // Track which stream is currently attached to each video element so we never
-  // reassign srcObject to the same stream (reassignment restarts the pipeline ->
-  // black screen / flicker).
-  const remoteAttachedRef = useRef(null);
-  const localAttachedRef = useRef(null);
+  // Current streams mirrored into refs so the stable ref callbacks can attach
+  // without being recreated every render (recreated refs made React detach and
+  // reattach on every render -> srcObject reassigned every second by the timer ->
+  // video pipeline restart / black screen).
+  const remoteStreamRef = useRef(remoteStream);
+  remoteStreamRef.current = remoteStream;
+  const localStreamRef = useRef(localStream);
+  localStreamRef.current = localStream;
+
+  const attachStream = (el, stream) => {
+    if (!el) return;
+    if (el.srcObject === (stream || null)) return;
+    el.srcObject = stream || null;
+    el.muted = true;
+    el.playsInline = true;
+    if (stream) el.play().catch(() => {});
+    else el.pause();
+  };
+
+  const setRemote = useCallback((el) => {
+    remoteRef.current = el;
+    attachStream(el, remoteStreamRef.current);
+  }, []);
+
+  const setLocal = useCallback((el) => {
+    localRef.current = el;
+    attachStream(el, localStreamRef.current);
+  }, []);
 
   // Minimized (PIP) draggable bubble position
   const [pipPos, setPipPos] = useState({ x: 20, y: 20 });
@@ -50,38 +73,14 @@ export default function CallScreen() {
   const other = callMeta?.other || {};
   const name = other.display_name || other.username || '';
 
-  // Attach remote stream once, never reassign unless the stream object actually
-  // changes. Prevents pipeline restart / black screen.
+  // Attach streams to whichever element is currently mounted. The ref callbacks
+  // handle mount; these handle stream arrival/change.
   useEffect(() => {
-    const el = remoteRef.current;
-    if (!el) return;
-    if (remoteAttachedRef.current === remoteStream) return;
-    remoteAttachedRef.current = remoteStream;
-    el.srcObject = remoteStream || null;
-    el.muted = true;
-    el.playsInline = true;
-    if (remoteStream) {
-      el.play().catch((e) => console.warn('remote play failed', e));
-    } else {
-      el.pause();
-    }
+    attachStream(remoteRef.current, remoteStream);
   }, [remoteStream]);
 
-  // Attach local stream once, never reassign unless the stream object actually
-  // changes. Prevents pipeline restart / flicker.
   useEffect(() => {
-    const el = localRef.current;
-    if (!el) return;
-    if (localAttachedRef.current === localStream) return;
-    localAttachedRef.current = localStream;
-    el.srcObject = localStream || null;
-    el.muted = true;
-    el.playsInline = true;
-    if (localStream) {
-      el.play().catch((e) => console.warn('local play failed', e));
-    } else {
-      el.pause();
-    }
+    attachStream(localRef.current, localStream);
   }, [localStream]);
 
   useEffect(() => {
@@ -91,30 +90,40 @@ export default function CallScreen() {
   }, [state]);
 
   useEffect(() => {
-    if (state === 'idle' || state === 'ended') setMinimized(false);
+    if (state === 'idle' || state === 'ended' || state === 'failed') setMinimized(false);
   }, [state, setMinimized]);
 
   if (state === 'idle') return null;
 
-  const setRemote = (el) => {
-    remoteRef.current = el;
-    // Re-attach stream to the new element if we already have one
-    if (remoteStream) {
-      el.srcObject = remoteStream;
-      el.muted = true;
-      el.playsInline = true;
-      el.play().catch(() => {});
-    }
-  };
-  const setLocal = (el) => {
-    localRef.current = el;
-    if (localStream) {
-      el.srcObject = localStream;
-      el.muted = true;
-      el.playsInline = true;
-      el.play().catch(() => {});
-    }
-  };
+  // ---- Failed (media/connection error) ----
+  if (state === 'failed') {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 4000,
+        background: 'radial-gradient(circle at center, #1a152e 0%, #0b0a12 100%)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        padding: 24,
+      }}>
+        <div style={{
+          width: 76, height: 76, borderRadius: 38, background: 'rgba(229,57,53,0.16)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20,
+        }}>
+          <PhoneOff size={32} color={theme.danger || '#e53935'} />
+        </div>
+        <div style={{ color: '#fff', fontSize: 20, fontWeight: 700 }}>Call ended</div>
+        <div style={{ color: 'rgba(255,255,255,0.72)', fontSize: 14, marginTop: 10, textAlign: 'center', maxWidth: 340, lineHeight: 1.5 }}>
+          {callError || 'The call could not be started.'}
+        </div>
+        <button onClick={dismissError} style={{
+          marginTop: 28, padding: '12px 34px', borderRadius: 24,
+          background: theme.primary || '#6C3CE9', color: '#fff',
+          fontWeight: 700, fontSize: 14, border: 'none', cursor: 'pointer',
+        }}>
+          Close
+        </button>
+      </div>
+    );
+  }
 
   const swapViews = () => setMainIsLocal((v) => !v);
   const localMain = mainIsLocal;
