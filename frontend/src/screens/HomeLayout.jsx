@@ -57,7 +57,7 @@ export default function HomeLayout() {
   const isDesktop = useIsDesktop();
   const [section, setSection] = useState('chats');
   const [openChat, setOpenChat] = useState(null);
-  const showMobileNav = !isDesktop && section !== 'shorts' && !openChat;
+  const showMobileNav = !isDesktop && section !== 'shorts' && section !== 'youtube' && !openChat;
   const [socket, setSocket] = useState(null);
   const [shortsRefreshTick, setShortsRefreshTick] = useState(0);
   const [homeRefreshTick, setHomeRefreshTick] = useState(0);
