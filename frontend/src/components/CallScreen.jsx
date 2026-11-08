@@ -243,11 +243,11 @@ export default function CallScreen() {
         onPointerCancel={onPipUp}
       >
         <audio ref={setRemoteAudioEl} autoPlay playsInline style={{ display: 'none' }} />
-        <div style={{ position: 'relative', width: '100%', height: 120, background: '#000' }}>
+        <div style={{ position: 'relative', width: '100%', height: 120, background: 'transparent' }}>
           {mainIsLocal ? (
             <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'none' }} />
           ) : showRemoteVideo ? (
-            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
               <Avatar size={48} />
