@@ -244,10 +244,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
             {category === 'recommended' ? 'Recommended for you' : `${FALLBACK_CATEGORIES.find((c) => c.id === category)?.label || ''} videos`}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '0 8px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, padding: '0 8px' }}>
             {videos.map((v) => (
               <div key={v.videoId} data-yt-card={v.videoId} style={{ cursor: 'pointer' }} onClick={() => { addWatchHistory(v); setWatch(v); }}>
-                <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
+                <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', borderRadius: 12, overflow: 'hidden', background: '#000', minWidth: 0 }}>
                   <img src={thumbnailUrlFor(v)} alt={v.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   <div style={{ position: 'absolute', right: 6, bottom: 6, background: 'rgba(16,11,26,0.85)', borderRadius: 4, padding: '1px 5px', fontSize: 10, color: '#fff', fontWeight: 700 }}>
                     {fmtDuration(v.durationSeconds)}
