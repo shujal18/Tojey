@@ -24,6 +24,7 @@ export default function CallScreen() {
   const [soundBlocked, setSoundBlocked] = useState(false);
   const [mainIsLocal, setMainIsLocal] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [remoteVideoReady, setRemoteVideoReady] = useState(false);
 
   // Current streams mirrored into refs so the stable ref callbacks can attach
   // without being recreated every render (recreated refs made React detach and
