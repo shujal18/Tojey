@@ -126,17 +126,22 @@ export default function YoutubePlayer({
   const [volume, setVolume] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const controlsTimeoutRef = useRef(null);
+const [playbackRate, setPlaybackRate] = useState(1);
+   const [availableCaptions, setAvailableCaptions] = useState([]);
+   const [selectedCaption, setSelectedCaption] = useState(null);
+   const [miniPlayerOpen, setMiniPlayerOpen] = useState(false);
+   const [isSeeking, setIsSeeking] = useState(false);
+   const controlsTimeoutRef = useRef(null);
   const containerRef = useRef(null);
 
-  const resetControlsTimeout = useCallback(() => {
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    setShowControls(true);
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (playing && !menuOpen && !qualityMenuOpen) setShowControls(false);
-    }, 3000);
-  }, [playing, menuOpen, qualityMenuOpen]);
+const resetControlsTimeout = useCallback(() => {
+     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+     setShowControls(true);
+     setIsSeeking(false);
+     controlsTimeoutRef.current = setTimeout(() => {
+       if (playing && !qualityMenuOpen && !isSeeking) setShowControls(false);
+     }, 3000);
+   }, [playing, qualityMenuOpen, isSeeking]);
 
   const toggleMute = useCallback(() => {
     const v = videoRef.current;
@@ -442,6 +447,14 @@ export default function YoutubePlayer({
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (useEmbed || state !== 'ready') return;
+      if (
+        document.activeElement &&
+        (document.activeElement.tagName === 'INPUT' ||
+          document.activeElement.tagName === 'TEXTAREA' ||
+          document.activeElement.isContentEditable)
+      ) {
+        return;
+      }
       if (e.key === ' ' || e.key === 'k') {
         e.preventDefault();
         const v = videoRef.current;
@@ -456,17 +469,33 @@ export default function YoutubePlayer({
         e.preventDefault();
         const v = videoRef.current;
         if (v) v.currentTime = Math.max(0, v.currentTime - 10);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v) { const newVol = Math.min(1, (v.volume || 0) + 0.1); v.volume = newVol; setVolume(newVol); }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v) { const newVol = Math.max(0, (v.volume || 0) - 0.1); v.volume = newVol; setVolume(newVol); }
       } else if (e.key === 'f') {
         e.preventDefault();
         toggleFullscreen();
       } else if (e.key === 'm') {
         e.preventDefault();
         toggleMute();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        if (document.fullscreenElement) document.exitFullscreen();
+      } else if (e.key === 'c') {
+        e.preventDefault();
+        if (availableCaptions.length) {
+          setSelectedCaption(selectedCaption === null ? availableCaptions[0].lang : null);
+        }
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [useEmbed, state]);
+  }, [useEmbed, state, availableCaptions, selectedCaption]);
 
   const chooseLevel = (lvl) => {
     setLevel(lvl);
@@ -583,6 +612,7 @@ export default function YoutubePlayer({
                 step="0.1"
                 value={currentTime}
                 onChange={(e) => {
+                  setIsSeeking(true);
                   const v = videoRef.current;
                   if (v) v.currentTime = parseFloat(e.target.value);
                   resetControlsTimeout();
@@ -605,6 +635,19 @@ export default function YoutubePlayer({
               <button onClick={toggleMute} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
                 {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
               </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12 }}>
+                <button onClick={() => { const v = videoRef.current; if (v) { const newRate = playbackRate >= 2 ? 1 : playbackRate + 0.25; setPlaybackRate(newRate); if (v.playbackRate !== newRate) v.playbackRate = newRate; } resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 3, fontSize: 11 }}>
+                  {playbackRate >= 1 ? '×' + playbackRate.toFixed(1) : playbackRate.toFixed(2)+'×'}
+                </button>
+                <span style={{ fontSize: 11, color: '#888' }}>Speed</span>
+              </div>
+              {availableCaptions.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12 }}>
+                  <button onClick={() => setSelectedCaption(selectedCaption === null ? availableCaptions[0].lang : null)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 3, fontSize: 11 }}>
+                    {selectedCaption ? selectedCaption.lang : 'CC'}
+                  </button>
+                </div>
+              )}
               <div style={{ position: 'relative' }}>
                 <button onClick={() => { setQualityMenuOpen(!qualityMenuOpen); resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                   <Settings size={18} />
@@ -621,13 +664,54 @@ export default function YoutubePlayer({
                   </div>
                 )}
               </div>
-              <button onClick={toggleFullscreen} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
-                {fullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button onClick={() => setMiniPlayerOpen(!miniPlayerOpen)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                  <Play size={18} />
+                </button>
+                <button onClick={toggleFullscreen} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
+                  {fullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+                </button>
+              </div>
             </div>
           </div>
         </>
       )}
     </div>
   );
+
+  {miniPlayerOpen && (
+    <div
+      style={{
+        position: 'fixed',
+        bottom: 24,
+        right: 24,
+        width: 180,
+        height: 120,
+        background: '#000',
+        borderRadius: 8,
+        overflow: 'hidden',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+        zIndex: 1000,
+      }}
+      onClick={() => {
+        const v = videoRef.current;
+        if (v) {
+          if (v.pictureInPictureEnabled) {
+            v.requestPictureInPicture().catch(() => {});
+          } else {
+            setShowControls(false);
+          }
+        }
+      }}
+    >
+      <video
+        ref={videoRef}
+        src={src}
+        muted={muted}
+        playsInline
+        autoPlay
+        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+      />
+    </div>
+  )}
 }

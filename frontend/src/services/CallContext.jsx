@@ -243,7 +243,6 @@ export function CallProvider({ socket, currentUser, children }) {
       if (!sk) return;
       try {
         const offer = await call.createOffer();
-        await call.applyLocalOffer(offer);
         const myId = currentUserRef.current?.id;
         const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
         sk.emit('video-call:renegotiate', { targetUserId: peerId, callId: meta.callId, offer });
