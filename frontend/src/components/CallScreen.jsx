@@ -25,6 +25,8 @@ export default function CallScreen() {
   const [mainIsLocal, setMainIsLocal] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [remoteVideoReady, setRemoteVideoReady] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({x:0, y:0});
 
   // Current streams mirrored into refs so the stable ref callbacks can attach
   // without being recreated every render (recreated refs made React detach and
@@ -234,7 +236,7 @@ export default function CallScreen() {
         style={{
           position: 'fixed', left: pipPos.x, top: pipPos.y, zIndex: 4200,
           width: 280, height: 170, borderRadius: 16, overflow: 'hidden',
-          background: 'rgba(11,10,18,0.8)', boxShadow: '0 10px 40px rgba(0,0,0,0.55)',
+          background: 'transparent', boxShadow: 'none',
           border: `1px solid ${theme.primary}`, touchAction: 'none',
         }}
         onPointerDown={onPipDown}
@@ -273,7 +275,7 @@ export default function CallScreen() {
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: '#141221', alignItems: 'center' }}>
           <button onClick={() => setMinimized(false)} style={{ color: '#fff', padding: 6 }}><Maximize2 size={18} /></button>
           <button onClick={endCall} style={{
-            color: '#fff', padding: 8, borderRadius: 20, background: theme.danger,
+            color: '#fff', padding: 8, borderRadius: 20, background: 'transparent',
             width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
             <PhoneOff size={16} />
@@ -343,7 +345,7 @@ export default function CallScreen() {
           <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 15, marginTop: 6 }}>Ringing…</div>
         </div>
         <button onClick={endCall} style={{
-          width: 64, height: 64, borderRadius: 32, background: theme.danger, color: '#fff',
+          width: 64, height: 64, borderRadius: 32, background: "transparent", color: '#fff',
           display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 20px rgba(229,57,53,0.5)',
         }}>
           <PhoneOff size={26} />

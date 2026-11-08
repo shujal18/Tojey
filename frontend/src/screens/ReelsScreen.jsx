@@ -749,7 +749,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                 )}
 
                 {/* Bottom scrim + caption: gradient only where the text sits. */}
-                {overlayVideoId && (
+                false {overlayVideoId && ({overlayVideoId && ( (
                   <>
                     <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 170, zIndex: 5, pointerEvents: 'none', background: 'linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0))' }} />
                     <div style={{ position: 'absolute', left: 16, right: 16, bottom: 18, zIndex: 6, pointerEvents: 'none' }}>
@@ -789,7 +789,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 132, zIndex: 44, pointerEvents: 'none', background: 'linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0))' }} />
             )}
 
-            {videos.length > 0 && categories.length > 0 && (
+            false {videos.length > 0 && categories.length > 0 && ({videos.length > 0 && categories.length > 0 && ( (
               <div
                 style={{
                   position: 'absolute', top: 14, left: onBack ? 60 : 12, right: 12,
