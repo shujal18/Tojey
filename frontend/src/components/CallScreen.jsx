@@ -234,7 +234,7 @@ export default function CallScreen() {
         style={{
           position: 'fixed', left: pipPos.x, top: pipPos.y, zIndex: 4200,
           width: 280, height: 170, borderRadius: 16, overflow: 'hidden',
-          background: '#0b0a12', boxShadow: '0 10px 40px rgba(0,0,0,0.55)',
+          background: 'rgba(11,10,18,0.8)', boxShadow: '0 10px 40px rgba(0,0,0,0.55)',
           border: `1px solid ${theme.primary}`, touchAction: 'none',
         }}
         onPointerDown={onPipDown}
@@ -245,7 +245,7 @@ export default function CallScreen() {
         <audio ref={setRemoteAudioEl} autoPlay playsInline style={{ display: 'none' }} />
         <div style={{ position: 'relative', width: '100%', height: 120, background: '#000' }}>
           {mainIsLocal ? (
-            <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+            <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'none' }} />
           ) : showRemoteVideo ? (
             <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
@@ -401,7 +401,7 @@ export default function CallScreen() {
                 muted
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
-                  background: '#141221', transform: sharing ? 'none' : 'scaleX(-1)',
+                  background: '#141221', transform: 'none',
                 }}
               />
             ) : (
@@ -480,7 +480,7 @@ export default function CallScreen() {
               videoEnabled ? (
                 <video ref={setLocal} autoPlay playsInline muted style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  transform: sharing ? 'none' : 'scaleX(-1)',
+                  transform: 'none',
                 }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
