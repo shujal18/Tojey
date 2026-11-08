@@ -215,8 +215,8 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setText('');
     setReplyingTo(null);
     setShowEmoji(false);
-    // Hide mobile keyboard after sending
-    if (messageInputRef.current) messageInputRef.current.blur();
+    // Hide mobile keyboard after sending – do it after the state update
+    setTimeout(() => messageInputRef.current?.blur(), 0);
   };
 
   // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----

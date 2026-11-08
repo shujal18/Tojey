@@ -18,10 +18,12 @@ let localStream = null;
 let screenStream = null;
 let remoteStream = null;
 let pendingCandidates = [];
+let addedCandidates = new Set();
 let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
 let videoFacing = 'user';
+let originalVideoTrack = null;   // NEW: remember the camera track before screen share
 
 export function applyCallbacks(cb) {
   callbacks = cb || {};
@@ -171,18 +173,24 @@ async function flushPendingCandidates() {
   const queued = pendingCandidates;
   pendingCandidates = [];
   for (const candidate of queued) {
-    try { await pc.addIceCandidate(candidate); } catch (e) {}
+    try {
+      await pc.addIceCandidate(candidate);
+      addedCandidates.add(`${candidate.sdpMid}:${candidate.sdpMLineIndex}`);
+    } catch (e) {}
   }
 }
 
 export async function handleRemoteCandidate(candidate) {
   if (!pc) return;
+  const key = `${candidate.sdpMid}:${candidate.sdpMLineIndex}`;
+  if (addedCandidates.has(key)) return;          // dup‑guard
   if (!pc.remoteDescription) {
     pendingCandidates.push(candidate);
     return;
   }
   try {
     await pc.addIceCandidate(candidate);
+    addedCandidates.add(key);
   } catch (e) {
     pendingCandidates.push(candidate);
   }
@@ -263,6 +271,10 @@ export async function startScreenShare() {
   if (!pc || !localStream) throw new Error('Start the camera call first');
   if (screenStream) return screenStream;
 
+  // NEW: remember the current camera track so we can restore it later
+  const existingSender = pc.getSenders().find(s => !!s.track && s.track.kind === 'video');
+  originalVideoTrack = existingSender?.track;
+
   const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
   const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
   if (!track) {
@@ -289,6 +301,14 @@ export async function stopScreenShare() {
   try {
     if (videoSender && camTrack) await videoSender.replaceTrack(camTrack);
   } catch (e) {}
+  // NEW: restore the original camera track if it was saved
+  if (originalVideoTrack) {
+    try {
+      const sender = pc.getSenders().find(s => !!s.track && s.track.kind === 'video');
+      if (sender) await sender.replaceTrack(originalVideoTrack);
+    } catch (e) {}
+    originalVideoTrack = null;
+  }
   try {
     if (screenStream && screenStream.getTracks) screenStream.getTracks().forEach(t => t.stop());
   } catch (e) {}

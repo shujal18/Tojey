@@ -105,7 +105,8 @@ export function CallProvider({ socket, currentUser, children }) {
     const s = stateRef.current;
     if (!meta || s === 'idle') return;
     clearTimers();
-    const peerId = (s === 'outgoing' || s === 'active' || s === 'connecting') ? meta.calleeId : meta.callerId;
+    const myId = currentUserRef.current?.id;
+    const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
     const sk = socketRef.current;
     if (sk && peerId && meta.callId) {
       sk.emit('video-call:end', { targetUserId: peerId, callId: meta.callId });
@@ -123,7 +124,8 @@ export function CallProvider({ socket, currentUser, children }) {
       onIceCandidate: (candidate) => {
         const meta = metaRef.current;
         if (!meta || !meta.callId) return;
-        const peerId = stateRef.current === 'outgoing' || stateRef.current === 'active' ? meta.calleeId : meta.callerId;
+        const myId = currentUserRef.current?.id;
+        const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
         sk.emit('video-call:ice-candidate', { targetUserId: peerId, callId: meta.callId, candidate });
       },
       onRemoteStream: (stream) => {
@@ -224,6 +226,7 @@ export function CallProvider({ socket, currentUser, children }) {
       const sk = socketRef.current;
       if (!sk) return;
       try {
+        await call.flushPendingCandidates();
         const answer = await call.acceptOffer(payload.offer);
         const myId = currentUserRef.current?.id;
         const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
@@ -242,6 +245,7 @@ export function CallProvider({ socket, currentUser, children }) {
       const sk = socketRef.current;
       if (!sk) return;
       try {
+        await call.flushPendingCandidates();
         const offer = await call.createOffer();
         const myId = currentUserRef.current?.id;
         const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
@@ -269,7 +273,7 @@ export function CallProvider({ socket, currentUser, children }) {
     const onMediaState = (payload) => {
       if (!payload) return;
       if (payload.callId && metaRef.current?.callId && payload.callId !== metaRef.current.callId) return;
-      setRemoteCameraOn(payload.cameraOn !== false);
+      setRemoteCameraOn(payload.cameraOn !== false || !(remoteStream?.getVideoTracks().length === 0));
     };
 
     socket.on('video-call:invite', onInvite);

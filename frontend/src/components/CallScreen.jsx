@@ -122,6 +122,18 @@ export default function CallScreen() {
     if (state === 'idle' || state === 'ended' || state === 'failed') setMinimized(false);
   }, [state, setMinimized]);
 
+  useEffect(() => {
+    const el = remoteRef.current;
+    if (!el) return;
+    const check = () => {
+      if (el.videoWidth > 0 && el.videoHeight > 0) setRemoteVideoReady(true);
+      else setRemoteVideoReady(false);
+    };
+    check();
+    const raf = requestAnimationFrame(check);
+    return () => cancelAnimationFrame(raf);
+  }, [remoteStream]);
+
   if (state === 'idle') return null;
 
   // ---- Failed (media/connection error) ----
@@ -162,6 +174,8 @@ export default function CallScreen() {
   // AND the peer hasn't turned their camera off. Otherwise show the avatar
   // instead of a black rectangle (audio-only fallback / denied camera).
   const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && remoteCameraOn);
+  // After the first paint, if videoWidth/Height > 0 we know frames are decoding.
+  const showRemoteVideo = remoteVideoReady || remoteHasVideo;
 
   const fmtTime = () => {
     const m = Math.floor(elapsed / 60);
@@ -231,7 +245,7 @@ export default function CallScreen() {
         <div style={{ position: 'relative', width: '100%', height: 120, background: '#000' }}>
           {mainIsLocal ? (
             <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-          ) : remoteHasVideo ? (
+          ) : showRemoteVideo ? (
             <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
@@ -406,7 +420,7 @@ export default function CallScreen() {
             )}
           </>
         ) : (
-          remoteHasVideo ? (
+          showRemoteVideo ? (
             <video
               key="remote-main"
               ref={setRemote}
@@ -478,7 +492,7 @@ export default function CallScreen() {
               </div>
             )
           ) : (
-            remoteHasVideo ? (
+            showRemoteVideo ? (
               <video ref={setRemote} autoPlay playsInline muted style={{
                 width: '100%', height: '100%', objectFit: 'cover', background: '#111',
               }} />
