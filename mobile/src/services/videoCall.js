@@ -32,6 +32,8 @@ let pc = null;
 let localStream = null;
 let screenStream = null;
 let remoteStream = null;
+let pendingCandidates = [];
+let addedCandidates = new Set();
 let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
@@ -149,6 +151,8 @@ export async function startLocalStream() {
 
 export function createPeerConnection() {
   if (pc) cleanupCall();
+  pendingCandidates = [];
+  addedCandidates = new Set();
   pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
   pc.onicecandidate = (e) => {
@@ -188,6 +192,7 @@ export async function createOffer() {
 export async function acceptOffer(offer) {
   if (!pc) throw new Error('No peer connection');
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  await flushPendingCandidates();
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   return pc.localDescription;
@@ -196,14 +201,37 @@ export async function acceptOffer(offer) {
 export async function handleRemoteAnswer(answer) {
   if (!pc) return;
   await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  await flushPendingCandidates();
+}
+
+// Candidates can arrive before the remote description is applied (the callee's
+// ICE gathering may beat the answer over the socket). Queue instead of dropping,
+// otherwise mobile/NAT calls connect audio-less or fail entirely.
+export async function flushPendingCandidates() {
+  if (!pc || !pc.remoteDescription || !pendingCandidates.length) return;
+  const queued = pendingCandidates;
+  pendingCandidates = [];
+  for (const candidate of queued) {
+    try {
+      await pc.addIceCandidate(candidate);
+      addedCandidates.add(`${candidate.sdpMid}:${candidate.sdpMLineIndex}`);
+    } catch (e) {}
+  }
 }
 
 export async function handleRemoteCandidate(candidate) {
   if (!pc) return;
+  const key = `${candidate.sdpMid}:${candidate.sdpMLineIndex}`;
+  if (addedCandidates.has(key)) return;          // dup-guard
+  if (!pc.remoteDescription) {
+    pendingCandidates.push(candidate);
+    return;
+  }
   try {
     await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    addedCandidates.add(key);
   } catch (e) {
-    console.warn('addIceCandidate failed', e && e.message);
+    pendingCandidates.push(candidate);
   }
 }
 
@@ -311,6 +339,8 @@ export function cleanupCall() {
     pc = null;
   }
   remoteStream = null;
+  pendingCandidates = [];
+  addedCandidates = new Set();
   micMuted = false;
   remoteAudioEnabled = true;
 }
