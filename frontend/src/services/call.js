@@ -168,7 +168,7 @@ export async function handleRemoteAnswer(answer) {
 // Candidates can arrive before the remote description is applied (the callee's
 // ICE gathering may beat the answer over the socket). Queue instead of dropping,
 // otherwise mobile/NAT calls connect audio-less or fail entirely.
-async function flushPendingCandidates() {
+export async function flushPendingCandidates() {
   if (!pc || !pc.remoteDescription || !pendingCandidates.length) return;
   const queued = pendingCandidates;
   pendingCandidates = [];
