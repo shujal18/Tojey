@@ -15,9 +15,20 @@ export function mediaProxyUrl(videoId, token, itag = 'best') {
   return `${SERVER_URL}/api/yt/media/${encodeURIComponent(videoId)}?itag=${encodeURIComponent(itag)}&token=${t}`;
 }
 
+// Adaptive (video-only + audio-only) DASH manifest. The backend builds the MPD
+// from the same innertube formats as the web player; its segment BaseURLs point
+// back at the byte proxy, so ExoPlayer never talks to googlevideo directly.
+export function dashProxyUrl(videoId, token) {
+  const t = encodeURIComponent(token || '');
+  return `${SERVER_URL}/api/yt/dash/${encodeURIComponent(videoId)}?token=${t}`;
+}
+
 async function fetchStreams(videoId, token) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 25000);
+  // Metadata is an optimisation, not a hard dependency: the proxy accepts
+  // itag=best and resolves the format itself. Keep this short so a slow
+  // innertube/yt-dlp probe never leaves the player stuck on a spinner.
+  const timer = setTimeout(() => ac.abort(), 10000);
   try {
     const res = await fetch(`${SERVER_URL}/api/yt/streams/${encodeURIComponent(videoId)}`, {
       headers: { Authorization: `Bearer ${token || ''}` },

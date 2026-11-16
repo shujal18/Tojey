@@ -1,6 +1,7 @@
-// LibreTube-style player modal: device-resolved streams (react-native-video)
-// with quality/speed/audio-only, backend metadata (RYD + SponsorBlock), chapters,
-// related videos, watch history and save/playlist/subscribe actions.
+// Native player modal: backend-proxied DASH (adaptive HD + AAC) with the same
+// muxed progressive proxy as a fallback, quality/speed/audio-only controls,
+// backend metadata (RYD + SponsorBlock), chapters, related videos, watch
+// history and save/playlist/subscribe actions.
 //
 // Playback is native only. This modal previously fell back to a YouTube embed
 // WebView when a stream failed, which surfaced the iframe player's error 153
@@ -17,7 +18,7 @@ import { Icon } from '../components/AppIcon';
 import Toast from '../components/Toast';
 import { fs } from '../utils/size';
 import { thumbUrl } from '../services/downloadsStore';
-import { getProxyPlayback } from '../services/ytPlayback';
+import { getProxyPlayback, dashProxyUrl } from '../services/ytPlayback';
 import { useWatchTogether } from '../services/WatchTogetherContext';
 import { pipSupported, enterPip } from '../services/pip';
 import makeYoutubeApi from '../services/youtubeApi';
@@ -60,6 +61,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [pip, setPip] = useState(false);
   const [pipOk, setPipOk] = useState(false);
   const [nextVideo, setNextVideo] = useState(null);
+  const [useDash, setUseDash] = useState(true);
   const nextTimerRef = useRef(null);
   const [wtText, setWtText] = useState('');
   const [wtRate, setWtRate] = useState(null);
@@ -127,18 +129,23 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setSpeed(1);
     setPlayError(null);
     setAudioOnly(false);
+    setUseDash(true);
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
     addHistory(v).catch(() => {});
-    Promise.all([
-      api.video(v.videoId).catch(() => null),
-      getProxyPlayback(v.videoId, token, { maxHeight: 720 }).catch(() => null),
-    ]).then(([i, s]) => {
-      setInfo(i);
-      setStream(s);
-      if (i && i.lengthSeconds) setDur(i.lengthSeconds);
-      setLoading(false);
-    });
+    // Playback must not wait for metadata: /api/yt/streams can take several
+    // seconds on a cold backend, while metadata is still fetched in parallel.
+    // getProxyPlayback falls back to itag=best, so the player can start even if
+    // the metadata request fails entirely.
+    getProxyPlayback(v.videoId, token, { maxHeight: 720 })
+      .then((s) => { setStream(s); setLoading(false); })
+      .catch(() => setLoading(false));
+    api.video(v.videoId)
+      .then((i) => {
+        setInfo(i);
+        if (i && i.lengthSeconds) setDur(i.lengthSeconds);
+      })
+      .catch(() => {});
   };
 
   useEffect(() => {
@@ -149,6 +156,9 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const selectQuality = async (height) => {
     if (height === maxHeight || loading) return;
     setStreaming(true);
+    // The quality picker deals in progressive (muxed) tracks. Selecting a
+    // height switches off DASH so the requested cap is actually enforced.
+    setUseDash(false);
     try {
       const s = await getProxyPlayback(cur.videoId, token, { maxHeight: height });
       if (s) {
@@ -262,6 +272,13 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const dlColor = (st) => (!st ? theme.text : st.status === 'done' ? theme.primary : st.status === 'error' ? theme.danger : theme.textSecondary);
 
   const streamSrc = (audioOnly ? stream?.audioUrl : stream?.videoUrl) || stream?.videoUrl;
+  // Prefer the adaptive manifest (HD video + separate audio, same as web).
+  // If Media3 rejects it, onError below falls back to the muxed progressive
+  // proxy without surfacing an error or interrupting Watch Together sync.
+  const dashSrc = dashProxyUrl(cur.videoId, token);
+  const usingDash = useDash && !audioOnly;
+  const sourceUri = usingDash ? dashSrc : streamSrc;
+  const sourceType = usingDash ? 'mpd' : 'mp4';
 
   // Expose a controller to the Watch Together provider. Only local playback
   // state is driven imperatively; seeking/rate changes are buffered with a
@@ -351,10 +368,11 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                 <Text style={{ color: '#fff', fontWeight: '700', fontSize: fs(14) }}>Retry</Text>
               </TouchableOpacity>
             </View>
-          ) : stream && streamSrc ? (
+          ) : stream && sourceUri ? (
             <Video
               ref={videoRef}
-              source={{ uri: streamSrc }}
+              key={sourceUri}
+              source={{ uri: sourceUri, type: sourceType }}
               style={styles.video}
               paused={!playing}
               resizeMode="contain"
@@ -364,11 +382,18 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               onSeek={onSeek}
               onPlaybackStateChanged={onPlaybackStateChanged}
               onEnd={handleEnd}
-              onError={(p) => setPlayError(
-                p && p.error
-                  ? `Playback error ${p.error.code}${p.error.message ? `: ${p.error.message}` : ''}`
-                  : 'Playback failed'
-              )}
+              onError={(p) => {
+                if (usingDash && streamSrc) {
+                  setUseDash(false);
+                  setPlayError(null);
+                  return;
+                }
+                setPlayError(
+                  p && p.error
+                    ? `Playback error ${p.error.code}${p.error.message ? `: ${p.error.message}` : ''}`
+                    : 'Playback failed'
+                );
+              }}
               rate={inRoom && wtRate != null ? wtRate : speed}
               playInBackground={audioOnly || pip}
               ignoreSilentSwitch="ignore"
