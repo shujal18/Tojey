@@ -8,15 +8,17 @@
 // the actual error and offers a retry.
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, Modal, Image, ScrollView, FlatList,
+  View, Text, TouchableOpacity, TextInput, Modal, Image, ScrollView, FlatList,
   StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native';
 import Video from 'react-native-video';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
+import Toast from '../components/Toast';
 import { fs } from '../utils/size';
 import { thumbUrl } from '../services/downloadsStore';
-import { getStreams } from '../services/innertube';
+import { getProxyPlayback } from '../services/ytPlayback';
+import { useWatchTogether } from '../services/WatchTogetherContext';
 import { pipSupported, enterPip } from '../services/pip';
 import makeYoutubeApi from '../services/youtubeApi';
 import {
@@ -37,6 +39,7 @@ function fmt(sec) {
 
 export default function YoutubePlayerModal({ item: initial, authHeaders, token, onClose, onOpenChannel, onOpenPlaylist, onDownload, dlMap }) {
   const { theme } = useTheme();
+  const wt = useWatchTogether();
   const [cur, setCur] = useState(initial);
   const videoRef = useRef(null);
 
@@ -58,6 +61,37 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [pipOk, setPipOk] = useState(false);
   const [nextVideo, setNextVideo] = useState(null);
   const nextTimerRef = useRef(null);
+  const [wtText, setWtText] = useState('');
+  const [wtRate, setWtRate] = useState(null);
+  const suppressRef = useRef(0);
+  const playingRef = useRef(playing);
+  const posRef = useRef(0);
+  const inRoomRef = useRef(false);
+  const isHostRef = useRef(false);
+  const roomVideoRef = useRef(null);
+  const wtChatRef = useRef(null);
+
+  const roomVideoId = wt.room && wt.room.videoId;
+  const inRoom = !!(roomVideoId && roomVideoId === cur.videoId);
+  const isHost = !!wt.isHost;
+  const isGuest = inRoom && !isHost;
+  const partnerName = (wt.partner && wt.partner.displayName) || 'Friend';
+
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => {
+    inRoomRef.current = inRoom;
+    isHostRef.current = isHost;
+    roomVideoRef.current = roomVideoId;
+  }, [inRoom, isHost, roomVideoId]);
+  useEffect(() => { if (!inRoom) setWtRate(null); }, [inRoom]);
+  useEffect(() => { if (inRoom) setAudioOnly(false); }, [inRoom]);
+  useEffect(() => {
+    if (!inRoom || !wtChatRef.current) return;
+    const t = setTimeout(() => {
+      if (wtChatRef.current) wtChatRef.current.scrollToEnd({ animated: true });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [inRoom, wt.messages.length]);
 
   useEffect(() => {
     pipSupported().then(setPipOk).catch(() => {});
@@ -79,6 +113,10 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const api = makeYoutubeApi(token);
 
   const loadVideo = (v) => {
+    // Choosing a different video while sharing a room leaves that room first.
+    if (inRoomRef.current && roomVideoRef.current && roomVideoRef.current !== v.videoId) {
+      wt.leaveRoom();
+    }
     setCur(v);
     setLoading(true);
     setInfo(null);
@@ -94,7 +132,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     addHistory(v).catch(() => {});
     Promise.all([
       api.video(v.videoId).catch(() => null),
-      getStreams(v.videoId, { maxHeight: 720 }).catch(() => null),
+      getProxyPlayback(v.videoId, token, { maxHeight: 720 }).catch(() => null),
     ]).then(([i, s]) => {
       setInfo(i);
       setStream(s);
@@ -112,7 +150,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     if (height === maxHeight || loading) return;
     setStreaming(true);
     try {
-      const s = await getStreams(cur.videoId, { maxHeight: height });
+      const s = await getProxyPlayback(cur.videoId, token, { maxHeight: height });
       if (s) {
         setMaxHeight(height);
         setStream(s);
@@ -123,7 +161,10 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   const onProgress = (p) => {
     const t = p.currentTime || 0;
+    posRef.current = t;
     setPos(t);
+    // Guests never seek locally: the host owns playback in a shared room.
+    if (inRoomRef.current && !isHostRef.current) return;
     const segs = info?.sponsorSegments || [];
     for (const seg of segs) {
       if (t >= seg.start && t < seg.end) {
@@ -131,6 +172,30 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
         return;
       }
     }
+  };
+
+  // Keep our paused state in sync with the native player and report genuine
+  // host gestures to the authoritative room.
+  const onPlaybackStateChanged = (e) => {
+    if (!e || e.isSeeking) return;
+    if (Date.now() < suppressRef.current) return;
+    // Guests are entirely room-driven: ignore any local/native state change so
+    // a headset or hardware key cannot desync the shared session.
+    if (inRoomRef.current && !isHostRef.current) return;
+    const nowPlaying = !!e.isPlaying;
+    setPlaying(nowPlaying);
+    if (inRoomRef.current && isHostRef.current) {
+      wt.reportLocal(nowPlaying ? 'play' : 'pause', posRef.current);
+    }
+  };
+
+  const onSeek = (e) => {
+    if (Date.now() < suppressRef.current) return;
+    if (inRoomRef.current && !isHostRef.current) return;
+    const t = Number(e && (e.currentTime != null ? e.currentTime : e.seekTime)) || 0;
+    posRef.current = t;
+    setPos(t);
+    if (inRoomRef.current && isHostRef.current) wt.reportLocal('seek', t);
   };
 
   const cancelNext = () => {
@@ -141,6 +206,8 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   const handleEnd = () => {
     setPlaying(false);
+    // Shared rooms do not auto-advance; the host decides what happens next.
+    if (inRoomRef.current) return;
     const rel = (info?.related || []).find((r) => r && r.videoId && r.type !== 'channel' && r.type !== 'playlist');
     if (!rel || !cur.videoId) return;
     setNextVideo(rel);
@@ -196,15 +263,64 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   const streamSrc = (audioOnly ? stream?.audioUrl : stream?.videoUrl) || stream?.videoUrl;
 
+  // Expose a controller to the Watch Together provider. Only local playback
+  // state is driven imperatively; seeking/rate changes are buffered with a
+  // suppression window so room-applied changes cannot echo back as gestures.
+  const registerController = wt.registerController;
+  useEffect(() => {
+    if (!streamSrc) {
+      registerController(null);
+      return undefined;
+    }
+    registerController({
+      isReady: () => true,
+      getTime: () => posRef.current,
+      isPaused: () => !playingRef.current,
+      play: () => { suppressRef.current = Date.now() + 900; setPlaying(true); },
+      pause: () => { suppressRef.current = Date.now() + 900; setPlaying(false); },
+      seek: (t) => {
+        suppressRef.current = Date.now() + 1500;
+        const target = Math.max(0, Number(t) || 0);
+        try { if (videoRef.current) videoRef.current.seek(target); } catch (e) {}
+        posRef.current = target;
+        setPos(target);
+      },
+      setRate: (r) => {
+        suppressRef.current = Date.now() + 900;
+        setWtRate(Number(r) || 1);
+      },
+    });
+    return () => registerController(null);
+  }, [streamSrc, cur.videoId, registerController]);
+
+  const handleClose = () => {
+    if (inRoomRef.current) wt.leaveRoom();
+    if (onClose) onClose();
+  };
+
+  const toggleWatchTogether = () => {
+    if (inRoom) {
+      wt.leaveRoom();
+      return;
+    }
+    wt.sendInvite({ videoId: cur.videoId, title: info?.title || cur.title });
+  };
+
+  const sendWtMessage = () => {
+    const text = wtText;
+    setWtText('');
+    if (text && text.trim()) wt.sendMessage(text);
+  };
+
   return (
-    <Modal visible transparent={false} animationType="slide" onRequestClose={onClose}>
+    <Modal visible transparent={false} animationType="slide" onRequestClose={handleClose}>
       <View style={[styles.root, { backgroundColor: theme.background }]}>
         <View style={[styles.header, { backgroundColor: theme.background }]}>
-          <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
+          <TouchableOpacity onPress={handleClose} style={styles.headerBtn}>
             <Icon name="chevron-down" size={24} color={theme.text} />
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: theme.textSecondary }]} numberOfLines={1}>
-            Now playing
+            {inRoom ? `Watching with ${partnerName}` : 'Now playing'}
           </Text>
           <View style={{ width: 30, alignItems: 'flex-end' }}>
             {pipOk && (
@@ -242,16 +358,18 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               style={styles.video}
               paused={!playing}
               resizeMode="contain"
-              controls
+              controls={!isGuest}
               onLoad={(m) => { if (m.duration) setDur(m.duration); }}
               onProgress={onProgress}
+              onSeek={onSeek}
+              onPlaybackStateChanged={onPlaybackStateChanged}
               onEnd={handleEnd}
               onError={(p) => setPlayError(
                 p && p.error
                   ? `Playback error ${p.error.code}${p.error.message ? `: ${p.error.message}` : ''}`
                   : 'Playback failed'
               )}
-              rate={speed}
+              rate={inRoom && wtRate != null ? wtRate : speed}
               playInBackground={audioOnly || pip}
               ignoreSilentSwitch="ignore"
               mixWithOthers="inherit"
@@ -266,6 +384,58 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           {streaming && (
             <View style={styles.streamingBadge}>
               <ActivityIndicator color="#fff" size="small" />
+            </View>
+          )}
+          {inRoom && !!wt.bubble && (
+            <View style={styles.wtBubble} pointerEvents="none">
+              {wt.bubble.kind === 'reaction' ? (
+                <Text style={{ fontSize: fs(18), lineHeight: fs(22) }}>{wt.bubble.emoji}</Text>
+              ) : null}
+              <Text style={styles.wtBubbleText} numberOfLines={1}>
+                <Text style={{ fontWeight: '800' }}>
+                  {(wt.bubble.by && wt.bubble.by.displayName) || 'Friend'}
+                </Text>
+                {wt.bubble.kind === 'message' ? `: ${wt.bubble.text}` : ' reacted'}
+              </Text>
+            </View>
+          )}
+          {isGuest && (
+            <View style={styles.wtGuestChip} pointerEvents="none">
+              <Icon name="lock-closed" size={11} color="#fff" />
+              <Text style={styles.wtGuestText}>Host controls playback</Text>
+            </View>
+          )}
+          {!inRoom && wt.outgoing && wt.outgoing.videoId === cur.videoId && (
+            <View style={styles.wtWaiting} pointerEvents="none">
+              <ActivityIndicator color="#fff" size="small" />
+              <Text style={styles.wtWaitingText} numberOfLines={1}>
+                Waiting for {wt.outgoing.toName} to join…
+              </Text>
+            </View>
+          )}
+          {!!wt.partnerLeft && wt.partnerLeft.videoId === cur.videoId && (
+            <View style={styles.wtLeftOverlay}>
+              <Text style={styles.wtLeftTitle}>
+                {(wt.partnerLeft.by && wt.partnerLeft.by.displayName) || 'Your friend'} left the room.
+              </Text>
+              <Text style={styles.wtLeftSub}>Your video is paused.</Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                <TouchableOpacity
+                  onPress={() => { wt.resetPartnerLeft(); wt.leaveRoom(); }}
+                  style={[styles.wtLeftBtn, { backgroundColor: theme.primary }]}
+                >
+                  <Text style={styles.wtLeftBtnText}>Watch alone</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    wt.resetPartnerLeft();
+                    wt.sendInvite({ videoId: cur.videoId, title: info?.title || cur.title });
+                  }}
+                  style={[styles.wtLeftBtn, styles.wtLeftGhost]}
+                >
+                  <Text style={styles.wtLeftBtnText}>Start new session</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         </View>
@@ -284,7 +454,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           </TouchableOpacity>
         )}
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <ScrollView contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
           <View style={styles.titleBlock}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Text style={[styles.title, { color: theme.text, flex: 1 }]} numberOfLines={2}>
@@ -313,7 +483,21 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               {info?.ryd?.dislikes ? <Text style={[styles.meta, { color: theme.textSecondary }]}>👎 {info.ryd.dislikes.toLocaleString()}</Text> : null}
             </View>
 
+            {inRoom && (
+              <View style={[styles.wtChip, { backgroundColor: theme.primaryLight }]}>
+                <Icon name="people" size={13} color={theme.primary} />
+                <Text style={[styles.wtChipText, { color: theme.primary }]} numberOfLines={1}>
+                  {partnerName}
+                  {wt.room && wt.room.partnerOnline === false ? ' (reconnecting…)' : ''}
+                </Text>
+              </View>
+            )}
+
             <View style={styles.toolRow}>
+              <TouchableOpacity style={styles.toolBtn} onPress={toggleWatchTogether} disabled={!cur.videoId}>
+                <Icon name={inRoom ? 'people' : 'people-outline'} size={20} color={inRoom ? theme.primary : theme.text} />
+                <Text style={[styles.toolText, { color: inRoom ? theme.primary : theme.text }]}>{inRoom ? 'Leave' : 'Watch'}</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={styles.toolBtn} onPress={() => setShowDl(!showDl)}>
                 <Icon name={dlState && dlState.status === 'done' ? 'checkmark-circle' : 'download-outline'} size={20} color={theme.text} />
                 <Text style={[styles.toolText, { color: theme.text }]}>Download</Text>
@@ -330,11 +514,72 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                 <Icon name="list-outline" size={20} color={theme.text} />
                 <Text style={[styles.toolText, { color: theme.text }]}>Playlist</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.toolBtn} onPress={() => setAudioOnly(!audioOnly)} disabled={!stream?.audioUrl}>
-                <Icon name="headset-outline" size={20} color={audioOnly ? theme.primary : theme.text} />
-                <Text style={[styles.toolText, { color: theme.text }]}>Audio</Text>
+              <TouchableOpacity style={styles.toolBtn} onPress={() => setAudioOnly(!audioOnly)} disabled={!stream?.audioUrl || inRoom}>
+                <Icon name="headset-outline" size={20} color={audioOnly ? theme.primary : (inRoom ? theme.textSecondary : theme.text)} />
+                <Text style={[styles.toolText, { color: inRoom ? theme.textSecondary : theme.text }]}>Audio</Text>
               </TouchableOpacity>
             </View>
+
+            {inRoom && (
+              <View style={[styles.wtPanel, { backgroundColor: theme.inputBg }]}>
+                <View style={styles.wtPanelHead}>
+                  <Text style={[styles.wtPanelTitle, { color: theme.text }]}>Watch together</Text>
+                  <TouchableOpacity onPress={wt.leaveRoom}>
+                    <Text style={[styles.wtLeaveText, { color: theme.danger }]}>Leave</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.wtReactions}>
+                  {['😂', '🔥', '❤️', '👍', '😮', '👏'].map((emoji) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      onPress={() => wt.sendReaction(emoji)}
+                      style={styles.wtReactionBtn}
+                    >
+                      <Text style={{ fontSize: fs(20) }}>{emoji}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <ScrollView
+                  ref={wtChatRef}
+                  style={styles.wtChatList}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                >
+                  {wt.messages.length ? wt.messages.map((m) => (
+                    <Text key={m.id} style={[styles.wtChatMsg, { color: theme.text }]}>
+                      <Text style={{ color: theme.primary, fontWeight: '800' }}>
+                        {(m.by && m.by.displayName) || 'Friend'}
+                      </Text>
+                      {': '}{m.text}
+                    </Text>
+                  )) : (
+                    <Text style={[styles.wtChatEmpty, { color: theme.textSecondary }]}>
+                      No messages yet. Say hi!
+                    </Text>
+                  )}
+                </ScrollView>
+                <View style={styles.wtChatRow}>
+                  <TextInput
+                    value={wtText}
+                    onChangeText={setWtText}
+                    maxLength={500}
+                    placeholder="Message…"
+                    placeholderTextColor={theme.textSecondary}
+                    returnKeyType="send"
+                    onSubmitEditing={sendWtMessage}
+                    style={[styles.wtInput, { color: theme.text, backgroundColor: theme.card, borderColor: theme.border }]}
+                  />
+                  <TouchableOpacity onPress={sendWtMessage} style={[styles.wtSend, { backgroundColor: theme.primary }]}>
+                    <Icon name="send" size={15} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+                {isGuest && (
+                  <Text style={[styles.wtHostNote, { color: theme.textSecondary }]}>
+                    Only the host controls playback.
+                  </Text>
+                )}
+              </View>
+            )}
 
             {showPlaylist && (
               <View style={[styles.playlistPanel, { backgroundColor: theme.inputBg }]}>
@@ -484,6 +729,43 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             )}
           </View>
         </ScrollView>
+
+        {!!wt.invite && (
+          <View style={styles.wtInviteOverlay}>
+            <View style={[styles.wtInviteCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Icon name="people" size={18} color={theme.primary} />
+                <Text style={[styles.wtInviteTitle, { color: theme.text }]} numberOfLines={2}>
+                  <Text style={{ color: theme.primary, fontWeight: '800' }}>
+                    {(wt.invite.from && wt.invite.from.displayName) || 'Friend'}
+                  </Text>
+                  {' '}invited you to watch together
+                </Text>
+              </View>
+              {!!wt.invite.title && (
+                <Text style={[styles.wtInviteSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                  {wt.invite.title}
+                </Text>
+              )}
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                <TouchableOpacity
+                  onPress={() => wt.respondInvite(true)}
+                  style={[styles.wtInviteBtn, { backgroundColor: theme.primary }]}
+                >
+                  <Text style={styles.wtInviteAccept}>Accept</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => wt.respondInvite(false)}
+                  style={[styles.wtInviteBtn, styles.wtInviteGhost, { borderColor: theme.border }]}
+                >
+                  <Text style={[styles.wtInviteDecline, { color: theme.text }]}>Decline</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+
+        <Toast message={wt.notice} bottom={96} />
       </View>
     </Modal>
   );
@@ -515,7 +797,7 @@ const styles = StyleSheet.create({
   channel: { fontSize: fs(14), fontWeight: '700', marginTop: 8 },
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 },
   meta: { fontSize: fs(12) },
-  toolRow: { flexDirection: 'row', marginTop: 14, gap: 18 },
+  toolRow: { flexDirection: 'row', marginTop: 14, gap: 14 },
   toolBtn: { alignItems: 'center', gap: 3, minWidth: 40 },
   toolText: { fontSize: fs(11), fontWeight: '600' },
   playlistPanel: { borderRadius: 12, padding: 12, marginTop: 12 },
@@ -542,4 +824,132 @@ const styles = StyleSheet.create({
   relDur: { position: 'absolute', right: 4, bottom: 4, backgroundColor: 'rgba(16,11,26,0.85)', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1 },
   relPlayBadge: { position: 'absolute', right: 4, bottom: 4, backgroundColor: 'rgba(16,11,26,0.7)', borderRadius: 10, width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
   relAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#000' },
+  wtChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    borderRadius: 14,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    marginTop: 8,
+  },
+  wtChipText: { fontSize: fs(11), fontWeight: '800' },
+  wtBubble: {
+    position: 'absolute',
+    top: 10,
+    left: 24,
+    right: 24,
+    zIndex: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.85)',
+  },
+  wtBubbleText: { color: '#fff', fontSize: fs(12), flexShrink: 1 },
+  wtGuestChip: {
+    position: 'absolute',
+    left: 10,
+    bottom: 10,
+    zIndex: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  wtGuestText: { color: '#fff', fontSize: fs(10), fontWeight: '700' },
+  wtWaiting: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    bottom: 12,
+    zIndex: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  wtWaitingText: { color: '#fff', fontSize: fs(12), fontWeight: '700' },
+  wtLeftOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
+    backgroundColor: 'rgba(8,5,14,0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  wtLeftTitle: { color: '#fff', fontSize: fs(15), fontWeight: '800', textAlign: 'center' },
+  wtLeftSub: { color: 'rgba(255,255,255,0.7)', fontSize: fs(12), marginTop: 4 },
+  wtLeftBtn: { borderRadius: 20, paddingHorizontal: 16, paddingVertical: 9 },
+  wtLeftBtnText: { color: '#fff', fontSize: fs(13), fontWeight: '700' },
+  wtLeftGhost: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.45)' },
+  wtPanel: { borderRadius: 12, padding: 12, marginTop: 12 },
+  wtPanelHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  wtPanelTitle: { fontSize: fs(13), fontWeight: '800' },
+  wtLeaveText: { fontSize: fs(12), fontWeight: '800' },
+  wtReactions: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
+  wtReactionBtn: { paddingHorizontal: 5, paddingVertical: 3, borderRadius: 10 },
+  wtChatList: { maxHeight: 150, marginBottom: 8 },
+  wtChatMsg: { fontSize: fs(12), lineHeight: 17, marginBottom: 4 },
+  wtChatEmpty: { fontSize: fs(12) },
+  wtChatRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  wtInput: {
+    flex: 1,
+    minWidth: 0,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    fontSize: fs(12),
+  },
+  wtSend: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  wtHostNote: { fontSize: fs(11), marginTop: 8 },
+  wtInviteOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 30,
+    elevation: 30,
+    backgroundColor: 'rgba(8,5,14,0.62)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  wtInviteCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
+  },
+  wtInviteTitle: { fontSize: fs(14), lineHeight: 20, flexShrink: 1 },
+  wtInviteSub: { fontSize: fs(12), marginTop: 8 },
+  wtInviteBtn: { borderRadius: 18, paddingHorizontal: 16, paddingVertical: 8 },
+  wtInviteAccept: { color: '#fff', fontSize: fs(13), fontWeight: '800' },
+  wtInviteDecline: { fontSize: fs(13), fontWeight: '700' },
+  wtInviteGhost: { borderWidth: 1 },
 });

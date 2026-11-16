@@ -20,7 +20,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { SERVER_URL } from '../config';
-import { getShortStream } from '../services/innertube';
+import { mediaProxyUrl } from '../services/ytPlayback';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -250,11 +250,12 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     saveSeen(user.id, seenSetRef.current);
   }, [user.id]);
 
-  // ---- stream resolution (on-device, via innertube) ---------------------------
+  // ---- stream resolution (backend byte proxy) --------------------------------
   //
-  // Resolved from the phone rather than from Render: YouTube bot-flags datacenter
-  // IPs, so asking from the device's own network is what makes streams playable.
-  // No third-party proxy, no video bytes through the backend.
+  // Same path as the web player: the backend resolves signatures with
+  // PO-token-free clients and streams a muxed (video+audio) progressive source
+  // through /api/yt/media. The old on-device ANDROID-client extraction needs a
+  // PO token and returned video-only tracks, so clips failed or were silent.
 
   const resolveFor = useCallback((item, opts = {}) => {
     if (!item || !item.videoId || !validateVideoId(item.videoId)) return Promise.resolve(null);
@@ -268,37 +269,33 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     }
     const inflight = opts.retry ? null : inflightStreamRef.current.get(id);
     if (inflight) return inflight;
-    const p = getShortStream(id, { attempts: opts.retry ? 2 : 3 })
-      .then((data) => {
-        if (!data || !data.url) throw new Error('no playable source');
-        const entry = {
-          source: { url: data.url, kind: data.kind || 'progressive', height: data.height || 0 },
-        };
-        const cache = streamCacheRef.current;
-        cache.delete(id);
-        cache.set(id, entry);
-        if (cache.size > MAX_STREAM_CACHE) {
-          const first = cache.keys().next().value;
-          if (first) cache.delete(first);
-        }
-        setResolved((prev) => {
-          const next = new Map(prev);
-          next.set(id, entry);
-          return next;
-        });
-        return entry;
-      })
-      .catch((e) => {
-        console.log('[Reels] stream resolve failed', id, e && e.message ? e.message : '');
-        failedStreamsRef.current.add(id);
-        return null;
+    const base = mediaProxyUrl(id, token, 'best');
+    // A retry busts the player's source URL so react-native-video reloads and
+    // the proxy re-resolves a freshly-signed upstream stream.
+    const src = opts.retry ? `${base}&_=${Date.now()}` : base;
+    const p = Promise.resolve({
+      source: { url: src, kind: 'progressive', height: 0 },
+    }).then((entry) => {
+      const cache = streamCacheRef.current;
+      cache.delete(id);
+      cache.set(id, entry);
+      if (cache.size > MAX_STREAM_CACHE) {
+        const first = cache.keys().next().value;
+        if (first) cache.delete(first);
+      }
+      setResolved((prev) => {
+        const next = new Map(prev);
+        next.set(id, entry);
+        return next;
       });
+      return entry;
+    });
     if (!opts.retry) {
       inflightStreamRef.current.set(id, p);
       p.finally(() => inflightStreamRef.current.delete(id)).catch(() => {});
     }
     return p;
-  }, []);
+  }, [token]);
 
   const primeWindow = useCallback((index) => {
     const list = videosRef.current;

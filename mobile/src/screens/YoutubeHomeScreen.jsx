@@ -28,7 +28,7 @@ const FALLBACK_CATEGORIES = [
   { id: 'news', label: 'News' },
 ];
 
-export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts }) {
+export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('trending');
   const [videos, setVideos] = useState([]);
@@ -49,6 +49,24 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [channelRoute, setChannelRoute] = useState(null);
   const [playlistRoute, setPlaylistRoute] = useState(null);
   const [watch, setWatch] = useState(null);
+  const lastInitialWatchRef = useRef(null);
+
+  // Open a video requested by the Watch Together room exactly once.
+  useEffect(() => {
+    if (!initialWatch || !initialWatch.videoId) return;
+    if (lastInitialWatchRef.current === initialWatch.key) return;
+    lastInitialWatchRef.current = initialWatch.key;
+    setView('home');
+    setWatch({
+      videoId: initialWatch.videoId,
+      title: initialWatch.title || 'Watch together',
+      channelTitle: '',
+      channelId: '',
+      thumbnailUrl: '',
+    });
+    if (onInitialWatchConsumed) onInitialWatchConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialWatch]);
 
   const authHeaders = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token]);
 

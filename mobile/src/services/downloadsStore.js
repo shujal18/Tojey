@@ -8,7 +8,12 @@
 
 import RNFetchBlob from 'rn-fetch-blob';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getStreams } from './innertube';
+import { getProxyPlayback } from './ytPlayback';
+
+// The downloader streams through the same backend byte proxy as playback, so it
+// needs the signed auth token. App.jsx calls setAuthToken on login/boot.
+let authToken = '';
+export function setAuthToken(t) { authToken = t || ''; }
 
 const MANIFEST_KEY = 'tojey_downloads_v1';
 const DIR = `${RNFetchBlob.fs.dirs.DocumentDir}/tojey-downloads/`;
@@ -134,14 +139,16 @@ export async function enqueue(video, opts = {}) {
     try {
       await RNFetchBlob.fs.mkdir(DIR).catch(() => {});
       update(entry, { status: 'resolving' });
-      const streams = await getStreams(video.videoId, { maxHeight: 480 });
+      const streams = await getProxyPlayback(video.videoId, authToken, { maxHeight: 480 });
       if (kind === 'audio' && !streams.audioUrl) throw new Error('no audio stream url');
       if (kind === 'video' && !streams.videoUrl) throw new Error('no stream url');
       console.log('[Download] resolved', video.videoId, kind, 'audio', !!streams.audioUrl);
       update(entry, { status: 'downloading', progress: 0, channel: streams.channel || entry.channel });
 
       const videoPath = kind === 'video' ? `${DIR}${video.videoId}_v.mp4` : null;
-      const audioPath = kind === 'audio' ? `${DIR}${video.videoId}_a_audio.m4a` : (streams.audioUrl ? `${DIR}${video.videoId}_a.m4a` : null);
+      // The proxied video stream is muxed (audio included), so only the explicit
+      // audio-only download writes a separate track.
+      const audioPath = kind === 'audio' ? `${DIR}${video.videoId}_a_audio.m4a` : null;
 
 // googlevideo rejects open-ended Range (bytes=0-) with a 403, and each
       // signed ticket serves only a limited number of bytes (here ~3MiB) before
@@ -230,7 +237,7 @@ export async function enqueue(video, opts = {}) {
       if (kind === 'video') {
         console.log('[Download] video start ...');
         const refreshVideo = async () => {
-          const s = await getStreams(video.videoId, { maxHeight: 480 });
+          const s = await getProxyPlayback(video.videoId, authToken, { maxHeight: 480 });
           if (!s.videoUrl) throw new Error('no stream url');
           return s.videoUrl;
         };
@@ -244,7 +251,7 @@ export async function enqueue(video, opts = {}) {
       if (audioPath) {
         console.log('[Download] audio start ...');
         const refreshAudio = async () => {
-          const s = await getStreams(video.videoId, { maxHeight: 480 });
+          const s = await getProxyPlayback(video.videoId, authToken, { maxHeight: 480 });
           if (!s.audioUrl) throw new Error('no audio url');
           return s.audioUrl;
         };

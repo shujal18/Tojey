@@ -6,8 +6,11 @@ import { loadSession, logout, fetchUsers } from './src/services/auth';
 import { connect, disconnect, getSocket } from './src/services/socket';
 import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
+import { setAuthToken } from './src/services/downloadsStore';
 import { Icon } from './src/components/AppIcon';
 import IncomingBanner, { messagePreviewText } from './src/components/IncomingBanner';
+import WatchTogetherBanner from './src/components/WatchTogetherBanner';
+import { WatchTogetherProvider } from './src/services/WatchTogetherContext';
 import { getNotifPrefs } from './src/services/notifications';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
@@ -50,6 +53,7 @@ function Shell() {
   // while the app is OPEN. Shown when a message arrives for a conversation that is not
   // currently open - independent of FCM so it works on every device / OEM.
   const [incomingBanner, setIncomingBanner] = useState(null);
+  const [watchRequest, setWatchRequest] = useState(null);
 
   // Reference kept fresh so notification listeners (registered once) can always navigate.
   const openFromNotifRef = useRef(null);
@@ -130,13 +134,28 @@ function Shell() {
 
   const handleLogin = (user, token) => {
     setSession({ user, token });
+    setAuthToken(token);
     setSocket(connect(token));
     startPush(token).catch(() => {});
     maybeStartKeepAlive().catch(() => {});
   };
 
+  // A Watch Together room became active (invitation accepted or reconnect):
+  // leave any chat/settings view and ask HomeScreen to open the room's video.
+  const handleWatchVideo = useCallback((room) => {
+    if (!room || !room.videoId) return;
+    setActiveChat(null);
+    setShowSettings(false);
+    setWatchRequest({
+      key: `${room.roomId}:${room.videoId}:${Date.now()}`,
+      videoId: room.videoId,
+      title: room.title || '',
+    });
+  }, []);
+
   const handleLogout = async () => {
     await logout();
+    setAuthToken('');
     disconnect();
     stopPush();
     stopKeepAlive();
@@ -157,6 +176,7 @@ function Shell() {
         if (!mounted) return;
         setSession(s);
         if (s) {
+          setAuthToken(s.token);
           setSocket(connect(s.token));
           startPush(s.token).catch(() => {});
           maybeStartKeepAlive().catch(() => {});
@@ -535,6 +555,8 @@ function Shell() {
             }}
             onOpenSettings={() => setShowSettings(true)}
             activeChatId={activeChat?.id}
+            watchRequest={watchRequest}
+            onWatchRequestHandled={() => setWatchRequest(null)}
           />
         </SafeAreaView>
       </>
@@ -542,23 +564,26 @@ function Shell() {
   }
 
   return (
-    <View style={{ flex: 1 }}>
-      {content}
-      {booted && !showLockScreen && !!session && (
-        <IncomingBanner
-          data={incomingBanner}
-          onPress={openBanner}
-          onDismiss={() => setIncomingBanner(null)}
-        />
-      )}
-      {showBatteryGuide && (
-        <View
-          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, zIndex: 50, elevation: 20 }}
-        >
-          <BatteryGuideScreen onClose={() => setShowBatteryGuide(false)} />
-        </View>
-      )}
-    </View>
+    <WatchTogetherProvider socket={socket} currentUser={session.user}>
+      <View style={{ flex: 1 }}>
+        {content}
+        {booted && !showLockScreen && !!session && (
+          <IncomingBanner
+            data={incomingBanner}
+            onPress={openBanner}
+            onDismiss={() => setIncomingBanner(null)}
+          />
+        )}
+        {!showLockScreen && <WatchTogetherBanner onOpenVideo={handleWatchVideo} />}
+        {showBatteryGuide && (
+          <View
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, zIndex: 50, elevation: 20 }}
+          >
+            <BatteryGuideScreen onClose={() => setShowBatteryGuide(false)} />
+          </View>
+        )}
+      </View>
+    </WatchTogetherProvider>
   );
 }
 

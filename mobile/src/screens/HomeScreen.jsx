@@ -17,9 +17,19 @@ import YoutubeHomeScreen from './YoutubeHomeScreen';
 import DownloadsScreen from './DownloadsScreen';
 import BottomTabBar from '../components/BottomTabBar';
 
-export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId }) {
+export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
+  const [pendingWatch, setPendingWatch] = useState(null);
+  // A Watch Together room became active: consume the one-shot request, switch to
+  // the YouTube surface, and let the player open the shared video.
+  useEffect(() => {
+    if (!watchRequest || !watchRequest.key) return;
+    setPendingWatch(watchRequest);
+    setTab('home');
+    if (onWatchRequestHandled) onWatchRequestHandled();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchRequest && watchRequest.key]);
   const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
   const [homeRefreshTick, setHomeRefreshTick] = useState(0);
   const [users, setUsers] = useState([]);
@@ -381,6 +391,8 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
           onOpenChats={() => setTab('chats')}
           onOpenSettings={onOpenSettings}
           onChangeToShorts={() => setTab('shorts')}
+          initialWatch={pendingWatch}
+          onInitialWatchConsumed={() => setPendingWatch(null)}
         />
       )}
 
