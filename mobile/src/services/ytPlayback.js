@@ -8,26 +8,23 @@
 // react-native-video <Video> can play. Device-side innertube extraction is not
 // used anymore: the old ANDROID client needs a PO token and only yielded
 // video-only tracks, so videos failed or played silent.
-import { SERVER_URL } from '../config';
+//import { SERVER_URL } from '../config';
 
+// ---------------------------------------------------
+// Returns a URL that the <Video> component can use directly.
+// ---------------------------------------------------
 export function mediaProxyUrl(videoId, token, itag = 'best') {
   const t = encodeURIComponent(token || '');
   return `${SERVER_URL}/api/yt/media/${encodeURIComponent(videoId)}?itag=${encodeURIComponent(itag)}&token=${t}`;
 }
 
-// Adaptive (video-only + audio-only) DASH manifest. The backend builds the MPD
-// from the same innertube formats as the web player; its segment BaseURLs point
-// back at the byte proxy, so ExoPlayer never talks to googlevideo directly.
-export function dashProxyUrl(videoId, token) {
-  const t = encodeURIComponent(token || '');
-  return `${SERVER_URL}/api/yt/dash/${encodeURIComponent(videoId)}?token=${t}`;
-}
-
+// ---------------------------------------------------
+// Ask the backend for the list of available formats.
+// Timeout reduced to 10 s so a slow backend never leaves the player stuck on a spinner.
+// ---------------------------------------------------
 async function fetchStreams(videoId, token) {
   const ac = new AbortController();
-  // Metadata is an optimisation, not a hard dependency: the proxy accepts
-  // itag=best and resolves the format itself. Keep this short so a slow
-  // innertube/yt-dlp probe never leaves the player stuck on a spinner.
+  // 10 s is enough for innertube/yt‑dlp probe.
   const timer = setTimeout(() => ac.abort(), 10000);
   try {
     const res = await fetch(`${SERVER_URL}/api/yt/streams/${encodeURIComponent(videoId)}`, {
@@ -41,33 +38,28 @@ async function fetchStreams(videoId, token) {
   }
 }
 
-// Returns { videoId, videoUrl, audioUrl, height, itag }. `videoUrl` is always a
-// playable muxed progressive source; `audioUrl` (optional) is the best
-// audio-only track for the audio-only mode. Never throws — on metadata failure
-// it still hands back the generic `itag=best` proxy URL so playback can try.
+// ---------------------------------------------------
+// Final shape returned to the player.
+// ---------------------------------------------------
 export async function getProxyPlayback(videoId, token, opts = {}) {
-  const maxHeight = opts.maxHeight || 720;
+  const maxHeight = opts.maxHeight || 720;          // keep the same UI cap
   try {
     const data = await fetchStreams(videoId, token);
     const muxed = (data.formats || []).filter((f) => f && f.hasVideo && f.hasAudio);
-    const withinCap = muxed
-      .filter((f) => !f.height || f.height <= maxHeight)
-      .sort((a, b) => (b.height || 0) - (a.height || 0));
+    const withinCap = muxed.filter((f) => !f.height || f.height <= maxHeight);
     const pick = withinCap[0] || muxed.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
     const itag = pick && pick.itag != null ? pick.itag : 'best';
-    const audio = data.defaultAudio;
     return {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, itag),
-      audioUrl: audio && audio.itag != null ? mediaProxyUrl(videoId, token, audio.itag) : null,
       height: (pick && pick.height) || 0,
       itag,
     };
   } catch (e) {
+    // Never throw – hand back a usable URL so the player never gets stuck.
     return {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, 'best'),
-      audioUrl: null,
       height: 0,
       itag: 'best',
     };
