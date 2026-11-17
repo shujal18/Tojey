@@ -179,14 +179,12 @@ export default function CallScreen() {
   const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && (remoteCameraOn || remoteScreenSharing));
   // After the first paint, if videoWidth/Height > 0 we know frames are decoding.
   const showRemoteVideo = remoteVideoReady || remoteHasVideo;
-  // Cameras are mirrored selfie-style on BOTH ends. A shared screen is never
-  // mirrored and uses `contain` so the viewer sees the entire display, exactly
-  // as the host shared it (letterbox bars instead of cropping).
+  // Cameras are shown exactly as captured (unmirrored), preserving the original
+  // frame. A shared screen is also unmirrored and uses `contain` so the viewer
+  // sees the entire display exactly as the host shared it (no cropping).
   const localIsScreen = !!sharing;
   const remoteTrackLabel = (remoteStream?.getVideoTracks?.()[0]?.label || '').toLowerCase();
   const remoteIsScreen = !!remoteScreenSharing || /screen|display|monitor|window|tab|capture/.test(remoteTrackLabel);
-  const localMirror = videoEnabled && !localIsScreen;
-  const remoteMirror = showRemoteVideo && !remoteIsScreen;
   const localFit = localIsScreen ? 'contain' : 'cover';
   const remoteFit = remoteIsScreen ? 'contain' : 'cover';
 
@@ -261,7 +259,6 @@ export default function CallScreen() {
           <video ref={setRemote} autoPlay playsInline muted style={{
             position: 'absolute', inset: 0, width: '100%', height: '100%',
             objectFit: remoteFit, background: '#000',
-            transform: remoteMirror ? 'scaleX(-1)' : 'none',
           }} />
         ) : (
           <div style={{
@@ -442,7 +439,6 @@ export default function CallScreen() {
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: localFit,
                   background: localIsScreen ? '#000' : '#141221',
-                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }}
               />
             ) : (
@@ -471,8 +467,7 @@ export default function CallScreen() {
               muted
               style={{
                 position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: remoteFit, background: remoteIsScreen ? '#000' : '#141221',
-                transform: remoteMirror ? 'scaleX(-1)' : 'none',
-              }}
+                }}
             />
           ) : (
             <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -522,7 +517,6 @@ export default function CallScreen() {
               videoEnabled ? (
                 <video ref={setLocal} autoPlay playsInline muted style={{
                   width: '100%', height: '100%', objectFit: localFit,
-                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
@@ -539,8 +533,7 @@ export default function CallScreen() {
               <video ref={setRemote} autoPlay playsInline muted style={{
                 width: '100%', height: '100%', objectFit: remoteFit,
                 background: remoteIsScreen ? '#000' : '#111',
-                transform: remoteMirror ? 'scaleX(-1)' : 'none',
-              }} />
+                }} />
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e' }}>
                 <Avatar size={40} />
