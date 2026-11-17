@@ -3,14 +3,22 @@
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
+const CAMERA_VIDEO = {
+  facingMode: 'user',
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+  frameRate: { ideal: 30, max: 60 },
+};
+
+const SCREEN_VIDEO = {
+  width: { ideal: 1920 },
+  height: { ideal: 1080 },
+  frameRate: { ideal: 60, max: 60 },
+};
+
 const LOCAL_CONSTRAINTS = {
   audio: true,
-  video: {
-    facingMode: 'user',
-    width: { ideal: 640 },
-    height: { ideal: 480 },
-    frameRate: { ideal: 30 },
-  },
+  video: { ...CAMERA_VIDEO },
 };
 
 let pc = null;
@@ -85,6 +93,40 @@ export async function startLocalStream() {
 // Audio-only fallback (camera denied / unavailable) still needs a video m-line
 // with send direction so later "Camera on" can swap a real camera in without a
 // full renegotiation (and so peers receive a stream object that carries video).
+// Prefer smooth motion over resolution. WebRTC otherwise drops frames first
+// when bandwidth/CPU is tight, which makes shared video unwatchable.
+async function applyVideoEncoding(isScreen = false) {
+  if (!pc) return;
+  const sender = findVideoSender();
+  if (!sender) return;
+  const maxBitrate = isScreen ? 5000000 : 2000000;
+  const maxFramerate = isScreen ? 60 : 30;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.degradationPreference = 'maintain-framerate';
+    params.encodings.forEach((enc) => {
+      enc.maxBitrate = maxBitrate;
+      enc.maxFramerate = maxFramerate;
+      enc.scaleResolutionDownBy = 1;
+      enc.degradationPreference = 'maintain-framerate';
+    });
+    await sender.setParameters(params);
+  } catch (e) {
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.encodings.forEach((enc) => {
+        enc.maxBitrate = maxBitrate;
+        enc.maxFramerate = maxFramerate;
+      });
+      await sender.setParameters(params);
+    } catch (e2) {}
+  }
+  const track = sender.track;
+  if (track && 'contentHint' in track) track.contentHint = 'motion';
+}
+
 function makePlaceholderVideoTrack() {
   try {
     const canvas = document.createElement('canvas');
@@ -141,6 +183,7 @@ export function createPeerConnection() {
       if (placeholder) pc.addTrack(placeholder, new MediaStream([placeholder]));
     }
   }
+  applyVideoEncoding(false);
   return pc;
 }
 
@@ -219,12 +262,7 @@ export async function startCameraTrack() {
   }
   const camStream = await navigator.mediaDevices.getUserMedia({
     audio: false,
-    video: {
-      facingMode: videoFacing,
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      frameRate: { ideal: 30 },
-    },
+    video: { ...CAMERA_VIDEO, facingMode: videoFacing },
   });
   const track = camStream.getVideoTracks()[0];
   if (!track) throw new Error('Camera unavailable');
@@ -233,6 +271,7 @@ export async function startCameraTrack() {
     const sender = findVideoSender();
     if (sender) await sender.replaceTrack(track);
     else pc.addTrack(track, localStream);
+    await applyVideoEncoding(false);
   }
   return track;
 }
@@ -246,18 +285,14 @@ export async function flipCamera() {
   const nextFacing = videoFacing === 'user' ? 'environment' : 'user';
   const camStream = await navigator.mediaDevices.getUserMedia({
     audio: false,
-    video: {
-      facingMode: nextFacing,
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      frameRate: { ideal: 30 },
-    },
+    video: { ...CAMERA_VIDEO, facingMode: nextFacing },
   });
   const track = camStream.getVideoTracks()[0];
   if (!track) throw new Error('Camera unavailable');
   if (pc) {
     const sender = findVideoSender();
     if (sender) await sender.replaceTrack(track);
+    await applyVideoEncoding(false);
   }
   try { localStream.removeTrack(current); } catch (e) {}
   try { current.stop(); } catch (e) {}
@@ -276,7 +311,7 @@ export async function startScreenShare() {
   const existingSender = pc.getSenders().find(s => !!s.track && s.track.kind === 'video');
   originalVideoTrack = existingSender?.track;
 
-  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: SCREEN_VIDEO, audio: false });
   const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
   if (!track) {
     try { if (stream && stream.getTracks) stream.getTracks().forEach(t => t.stop()); } catch (e) {}
@@ -289,8 +324,10 @@ export async function startScreenShare() {
     throw new Error('Video sender is not ready');
   }
 
+  try { await track.applyConstraints(SCREEN_VIDEO); } catch (e) {}
   await videoSender.replaceTrack(track);
   screenStream = stream;
+  await applyVideoEncoding(true);
   stream.getVideoTracks()[0].onended = () => { stopScreenShare(); };
   return screenStream;
 }
@@ -310,6 +347,7 @@ export async function stopScreenShare() {
     } catch (e) {}
     originalVideoTrack = null;
   }
+  await applyVideoEncoding(false);
   try {
     if (screenStream && screenStream.getTracks) screenStream.getTracks().forEach(t => t.stop());
   } catch (e) {}
