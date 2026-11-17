@@ -202,6 +202,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       window.__socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
       setEditing(null);
       setText('');
+      messageInputRef.current?.focus();
       return;
     }
     const _tempId = Date.now();
@@ -215,8 +216,9 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     setText('');
     setReplyingTo(null);
     setShowEmoji(false);
-    // Hide mobile keyboard after sending – do it after the state update
-    setTimeout(() => messageInputRef.current?.blur(), 0);
+    // Keep the composer focused after sending so the mobile keyboard stays up
+    // and the user can keep typing without tapping the field again.
+    messageInputRef.current?.focus();
   };
 
   // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----

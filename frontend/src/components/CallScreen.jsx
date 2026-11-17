@@ -236,7 +236,7 @@ export default function CallScreen() {
         style={{
           position: 'fixed', left: pipPos.x, top: pipPos.y, zIndex: 4200,
           width: 280, height: 170, borderRadius: 16, overflow: 'hidden',
-          background: 'transparent', boxShadow: 'none',
+          background: '#141221', boxShadow: '0 8px 28px rgba(0,0,0,0.45)',
           border: `1px solid ${theme.primary}`, touchAction: 'none',
         }}
         onPointerDown={onPipDown}
@@ -245,39 +245,66 @@ export default function CallScreen() {
         onPointerCancel={onPipUp}
       >
         <audio ref={setRemoteAudioEl} autoPlay playsInline style={{ display: 'none' }} />
-        <div style={{ position: 'relative', width: '100%', height: 120, background: 'transparent' }}>
-          {mainIsLocal ? (
-            <video ref={setLocal} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'none' }} />
-          ) : showRemoteVideo ? (
-            <video ref={setRemote} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-          ) : (
-            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#141221' }}>
-              <Avatar size={48} />
-            </div>
-          )}
-          {soundBlocked && (
-            <button onClick={unlockSound} style={{
-              position: 'absolute', bottom: 8, right: 8, zIndex: 3,
-              background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
-              borderRadius: 14, padding: '4px 8px', fontSize: 10, cursor: 'pointer',
-            }}>
-              🔊 Tap for sound
-            </button>
-          )}
+        {/* The remote camera fills the whole bubble. Controls are overlaid so
+            there is no dark strip/line taking space away from the video. */}
+        {showRemoteVideo ? (
+          <video ref={setRemote} autoPlay playsInline muted style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: 'cover', background: '#141221',
+          }} />
+        ) : (
           <div style={{
-            position: 'absolute', top: 6, left: 8,
-            color: '#fff', fontSize: 12, fontWeight: 700,
-            textShadow: '0 1px 6px rgba(0,0,0,0.9)',
+            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'linear-gradient(135deg, #2a2040 0%, #141221 100%)',
           }}>
-            {name}
+            <Avatar size={64} />
           </div>
+        )}
+        <div style={{
+          position: 'absolute', top: 8, left: 10,
+          color: '#fff', fontSize: 12, fontWeight: 700,
+          textShadow: '0 1px 6px rgba(0,0,0,0.9)', pointerEvents: 'none',
+        }}>
+          {name}
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: '#141221', alignItems: 'center' }}>
-          <button onClick={() => setMinimized(false)} style={{ color: '#fff', padding: 6 }}><Maximize2 size={18} /></button>
-          <button onClick={endCall} style={{
-            color: '#fff', padding: 8, borderRadius: 20, background: 'transparent',
-            width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        {soundBlocked && (
+          <button onClick={unlockSound} style={{
+            position: 'absolute', top: 6, right: 8, zIndex: 3,
+            background: 'rgba(0,0,0,0.65)', color: '#fff', border: 'none',
+            borderRadius: 14, padding: '4px 8px', fontSize: 10, cursor: 'pointer',
           }}>
+            🔊 Sound
+          </button>
+        )}
+        <div style={{
+          position: 'absolute', left: 8, right: 8, bottom: 8, zIndex: 3,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          pointerEvents: 'none',
+        }}>
+          <button
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => setMinimized(false)}
+            title="Expand call"
+            style={{
+              pointerEvents: 'auto', width: 34, height: 34, borderRadius: 17,
+              background: 'rgba(0,0,0,0.5)', color: '#fff', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1px solid rgba(255,255,255,0.22)', backdropFilter: 'blur(4px)',
+            }}
+          >
+            <Maximize2 size={17} />
+          </button>
+          <button
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={endCall}
+            title="End call"
+            style={{
+              pointerEvents: 'auto', width: 34, height: 34, borderRadius: 17,
+              background: theme.danger || '#e53935', color: '#fff', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: 'none', boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+            }}
+          >
             <PhoneOff size={16} />
           </button>
         </div>
