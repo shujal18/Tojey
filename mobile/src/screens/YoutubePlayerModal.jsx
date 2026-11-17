@@ -61,7 +61,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [pip, setPip] = useState(false);
   const [pipOk, setPipOk] = useState(false);
   const [nextVideo, setNextVideo] = useState(null);
-  const [useDash, setUseDash] = useState(true);
+  const [useDash, setUseDash] = useState(false);
   const nextTimerRef = useRef(null);
   const [wtText, setWtText] = useState('');
   const [wtRate, setWtRate] = useState(null);
@@ -129,7 +129,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setSpeed(1);
     setPlayError(null);
     setAudioOnly(false);
-    setUseDash(true);
+    setUseDash(false);
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
     addHistory(v).catch(() => {});

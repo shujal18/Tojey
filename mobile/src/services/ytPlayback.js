@@ -1,30 +1,30 @@
-// Backend-proxied YouTube playback — the same path the web player uses.
+// Playback source resolution shared by the Android player and downloads.
 //
-// The web client never touches googlevideo directly: it asks the backend for
-// stream metadata (/api/yt/streams) and then streams bytes through the
-// same-egress proxy (/api/yt/media?itag=...&token=...). The proxy resolves
-// signatures with PO-token-free clients and always returns a muxed
-// (video+audio) progressive stream, which is exactly what a single
-// react-native-video <Video> can play. Device-side innertube extraction is not
-// used anymore: the old ANDROID client needs a PO token and only yielded
-// video-only tracks, so videos failed or played silent.
-//import { SERVER_URL } from '../config';
+// Primary path: resolve a muxed progressive URL on the DEVICE (residential IP,
+// no CORS) using the same PO-token-free innertube clients as the backend. This
+// is what makes playback independent of Render's bot-flagged egress IP.
+// Fallback path: the backend byte proxy (/api/yt/streams + /api/yt/media).
+import { SERVER_URL } from '../config';
+import { getShortStream } from './innertube';
 
-// ---------------------------------------------------
-// Returns a URL that the <Video> component can use directly.
-// ---------------------------------------------------
 export function mediaProxyUrl(videoId, token, itag = 'best') {
   const t = encodeURIComponent(token || '');
   return `${SERVER_URL}/api/yt/media/${encodeURIComponent(videoId)}?itag=${encodeURIComponent(itag)}&token=${t}`;
 }
 
-// ---------------------------------------------------
-// Ask the backend for the list of available formats.
-// Timeout reduced to 10 s so a slow backend never leaves the player stuck on a spinner.
-// ---------------------------------------------------
+// Adaptive (video-only + audio-only) DASH manifest. Kept for compatibility with
+// the player's optional DASH path; its segment BaseURLs point back at the byte
+// proxy, so ExoPlayer never talks to googlevideo directly.
+export function dashProxyUrl(videoId, token) {
+  const t = encodeURIComponent(token || '');
+  return `${SERVER_URL}/api/yt/dash/${encodeURIComponent(videoId)}?token=${t}`;
+}
+
 async function fetchStreams(videoId, token) {
   const ac = new AbortController();
-  // 10 s is enough for innertube/yt‑dlp probe.
+  // Metadata is an optimisation, not a hard dependency: the proxy accepts
+  // itag=best and resolves the format itself. Keep this short so a slow
+  // innertube probe never leaves the player stuck on a spinner.
   const timer = setTimeout(() => ac.abort(), 10000);
   try {
     const res = await fetch(`${SERVER_URL}/api/yt/streams/${encodeURIComponent(videoId)}`, {
@@ -38,30 +38,56 @@ async function fetchStreams(videoId, token) {
   }
 }
 
-// ---------------------------------------------------
-// Final shape returned to the player.
-// ---------------------------------------------------
+// Returns { videoId, videoUrl, audioUrl, height, itag }. `videoUrl` is always a
+// playable muxed progressive source. Never throws — it always hands back a
+// usable URL so the player can start.
 export async function getProxyPlayback(videoId, token, opts = {}) {
-  const maxHeight = opts.maxHeight || 720;          // keep the same UI cap
+  const maxHeight = opts.maxHeight || 720;
+
+  // 1) Device-side extraction first. This is the only path that works when the
+  //    backend's datacenter IP is YouTube-bot-checked.
+  try {
+    const direct = await getShortStream(videoId, { maxHeight });
+    if (direct && direct.url) {
+      return {
+        videoId,
+        videoUrl: direct.url,
+        audioUrl: direct.audioUrl || null,
+        height: direct.height || 0,
+        itag: direct.itag || 18,
+        source: 'device',
+      };
+    }
+  } catch (e) {
+    // fall through to the backend proxy
+  }
+
+  // 2) Backend byte proxy (also works for videos the device client hides).
   try {
     const data = await fetchStreams(videoId, token);
     const muxed = (data.formats || []).filter((f) => f && f.hasVideo && f.hasAudio);
-    const withinCap = muxed.filter((f) => !f.height || f.height <= maxHeight);
+    const withinCap = muxed
+      .filter((f) => !f.height || f.height <= maxHeight)
+      .sort((a, b) => (b.height || 0) - (a.height || 0));
     const pick = withinCap[0] || muxed.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
     const itag = pick && pick.itag != null ? pick.itag : 'best';
+    const audio = data.defaultAudio;
     return {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, itag),
+      audioUrl: audio && audio.itag != null ? mediaProxyUrl(videoId, token, audio.itag) : null,
       height: (pick && pick.height) || 0,
       itag,
+      source: 'proxy',
     };
   } catch (e) {
-    // Never throw – hand back a usable URL so the player never gets stuck.
     return {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, 'best'),
+      audioUrl: null,
       height: 0,
       itag: 'best',
+      source: 'proxy',
     };
   }
 }

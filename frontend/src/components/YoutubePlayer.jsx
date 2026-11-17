@@ -114,6 +114,9 @@ export default function YoutubePlayer({
   const [muted, setMuted] = useState(autoPlay);
   const [fallback, setFallback] = useState(false);
   const [useEmbed, setUseEmbed] = useState(false);
+  // Set to the videoId after the official embed has itself failed; only then do
+  // we try the backend-native path for that same video (avoids a retry loop).
+  const [nativeRetryFor, setNativeRetryFor] = useState(null);
   const [progItag, setProgItag] = useState(18);
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
@@ -170,24 +173,37 @@ const resetControlsTimeout = useCallback(() => {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoId) return;
-    // Known-blocked egress: skip the native attempt entirely (the embed is
-    // interactive and autoplays from the viewer's IP).
-    if (embedFallback && videoId && isEgressBlocked()) {
+    // The official embed runs on the viewer's own IP and is therefore the
+    // reliable path for the web app: Render's datacenter egress is frequently
+    // bot-checked by YouTube, which is why the same video can play on a phone
+    // (device-side extraction) but not in the desktop browser. Only try the
+    // backend-native player after the embed itself has errored for this video.
+    if (embedFallback && videoId && nativeRetryFor !== videoId) {
       setUseEmbed(true);
       setState('ready');
       return;
     }
     let cancelled = false;
     let player = null;
-    let triedFallback = false;
+    let settled = false;
+    const settle = () => {
+      settled = true;
+      clearTimeout(fastFailTimer);
+    };
+    // If native playback hasn't produced a frame within 10s, switch to the
+    // official embed. This deliberately uses a closure flag rather than the
+    // React `state` value: the effect is not re-run when `state` changes, so
+    // testing `state` here would keep seeing the initial "loading" value and
+    // fire even after DASH had already started (the previous desktop bug).
     const fastFailTimer = setTimeout(() => {
-      if (cancelled || state === 'ready') return;
+      if (cancelled || settled) return;
+      settled = true;
       if (embedFallback && videoId) {
         try { destroy(); } catch (e) {}
         setUseEmbed(true);
         setState('ready');
       }
-    }, 800);
+    }, 10000);
 
     setState('loading');
     setErrMsg('');
@@ -210,14 +226,13 @@ const resetControlsTimeout = useCallback(() => {
 
     const fail = (msg) => {
       if (cancelled) return;
-      clearTimeout(fastFailTimer);
+      settle();
       const raw = String(msg || '');
       notePlaybackReason(raw);
-      // Both native paths failed. The usual cause is YouTube flagging the
-      // backend's egress IP (LOGIN_REQUIRED / "confirm you're not a bot"), which
-      // no client rotation can fix. Fall back to the official embed, which plays
-      // from the viewer's own IP with no sign-in required.
-      if (embedFallback && videoId) {
+      // Native playback failed (usually YouTube flagging the backend's egress
+      // IP with LOGIN_REQUIRED). The official embed plays from the viewer's own
+      // IP, so it is the reliable fallback for the desktop web app.
+      if (embedFallback && videoId && nativeRetryFor !== videoId) {
         destroy();
         setUseEmbed(true);
         setState('ready');
@@ -233,9 +248,9 @@ const resetControlsTimeout = useCallback(() => {
       onErrorRef.current && onErrorRef.current(new Error(shown));
     };
 
-    // Progressive muxed (360p) path: last-resort fallback when DASH cannot start
-    // (e.g. no MediaSource, or the MPD/segment proxy fails). Uses the same byte
-    // proxy via the /api/yt/streams metadata.
+    // Progressive muxed (360p) path: used only when DASH cannot even initialise
+    // (no MediaSource / dash.js failed to load). Uses the same byte proxy via
+    // the /api/yt/streams metadata.
     const setupProgressive = async () => {
       destroy();
       try {
@@ -243,16 +258,17 @@ const resetControlsTimeout = useCallback(() => {
           headers: { Authorization: `Bearer ${token || ''}` },
         });
         const data = await res.json().catch(() => ({}));
-        if (cancelled) return;
+        if (cancelled || settled) return;
         const prog = (data.formats || [])
           .filter((f) => f.hasVideo && f.hasAudio)
           .sort((a, b) => (b.height || 0) - (a.height || 0));
         if (!prog.length) { fail(data.reason || data.error || 'No playable stream'); return; }
+        settle();
         setProgItag(prog[0].itag);
         setFallback(true);
         setState('ready');
       } catch (e) {
-        if (!cancelled) fail(e.message);
+        if (!cancelled && !settled) fail(e.message);
       }
     };
 
@@ -265,7 +281,7 @@ const resetControlsTimeout = useCallback(() => {
         setupProgressive();
         return;
       }
-      if (cancelled) return;
+      if (cancelled || settled) return;
       try {
         player = MediaPlayer().create();
         dashRef.current = player;
@@ -294,7 +310,8 @@ const resetControlsTimeout = useCallback(() => {
           },
         });
         player.on('streamInitialized', () => {
-          if (cancelled) return;
+          if (cancelled || settled) return;
+          settle();
           try {
             const reps = player.getRepresentationsByType('video') || [];
             setLevels(
@@ -308,16 +325,18 @@ const resetControlsTimeout = useCallback(() => {
           if (autoPlay) video.play().catch(() => {});
         });
         const onErr = () => {
-          if (cancelled) return;
-          if (!triedFallback) { triedFallback = true; setupProgressive(); }
-          else fail('Playback failed');
+          if (cancelled || settled) return;
+          // DASH failed (most often the backend's egress IP is bot-checked).
+          // Go straight to the embed instead of waiting for a progressive probe
+          // that would hit the same wall.
+          fail('Playback failed');
         };
         player.on('error', onErr);
         player.on('playbackError', onErr);
         player.on('playbackEnded', () => { onEndedRef.current && onEndedRef.current(); });
         player.initialize(video, dashUrl(videoId, token), autoPlay);
       } catch (e) {
-        setupProgressive();
+        if (!cancelled && !settled) setupProgressive();
       }
     };
 
@@ -329,7 +348,7 @@ const resetControlsTimeout = useCallback(() => {
       destroy();
       if (video) { try { video.src = ''; video.load(); } catch (e) {} }
     };
-  }, [videoId, token, nonce, autoPlay]);
+  }, [videoId, token, nonce, autoPlay, nativeRetryFor]);
 
   // Autoplay policies block unmuted playback, so the element starts muted and we
   // try to restore sound on the first canplay. If the browser still refuses, it
@@ -561,6 +580,15 @@ const resetControlsTimeout = useCallback(() => {
           onController={onController}
           onProgress={() => {}}
           onEnded={() => { onEndedRef.current && onEndedRef.current(); }}
+          onError={() => {
+            // Embed is unavailable (embedding disabled, region lock, etc.).
+            // Fall back to the backend-native player for this video.
+            if (!videoId) return;
+            setUseEmbed(false);
+            setState('loading');
+            setNativeRetryFor(videoId);
+            setNonce((n) => n + 1);
+          }}
         />
       )}
       {state === 'loading' && (

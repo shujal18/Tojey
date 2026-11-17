@@ -128,13 +128,18 @@ export default function YouTubeEmbed({
             }
             if (autoPlayRef.current && !pausedRef.current) {
               try { e.target.playVideo(); } catch (err) {}
-              // Autoplay policies block unmuted playback: retry muted so the
-              // feed still plays, and let a tap restore sound (see toggleMute).
+              // Autoplay policies block unmuted playback: if the player has not
+              // started within ~2s, retry muted so the picture appears (the
+              // user can restore sound with YouTube's own controls). This also
+              // applies to long-form videos; previously only Shorts retried,
+              // which left the desktop embed stuck on a black frame.
               unblockTimer = setTimeout(() => {
                 const p = playerRef.current;
                 if (!p || cancelled) return;
                 try {
-                  if (p.getPlayerState() !== YT.PlayerState.PLAYING && variantRef.current === 'short' && !shortsSoundOn) {
+                  const YTS = YT.PlayerState;
+                  const st = p.getPlayerState();
+                  if (st !== YTS.PLAYING && st !== YTS.BUFFERING) {
                     p.mute();
                     reportMute(true);
                     p.playVideo();
