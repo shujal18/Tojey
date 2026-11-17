@@ -352,7 +352,7 @@ function WatchModal({ item, token, onClose }) {
         }} className="wt-modal-card"
       >
         <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px', gap: 10, background: theme.panelHeader || theme.background, position: 'relative' }}>
-          <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>
+          {!inRoom && <button onClick={onClose} style={headerBtnStyle}><X size={22} color={theme.text} /></button>}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</div>
             <div style={{ fontSize: 12, color: theme.textSecondary }}>{item.channelTitle}</div>

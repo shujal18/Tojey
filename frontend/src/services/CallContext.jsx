@@ -14,6 +14,7 @@ export function CallProvider({ socket, currentUser, children }) {
   const [remoteStream, setRemoteStream] = useState(null);
   const [micMuted, setMicMutedState] = useState(false);
   const [videoEnabled, setVideoEnabledState] = useState(true);
+  const [cameraFacing, setCameraFacing] = useState('user');
   const [remoteAudible, setRemoteAudible] = useState(true);
   const [remoteCameraOn, setRemoteCameraOn] = useState(true);
   const [remoteHasVideoTrack, setRemoteHasVideoTrack] = useState(false);
@@ -51,6 +52,7 @@ export function CallProvider({ socket, currentUser, children }) {
     setRemoteCameraOn(true);
     setMicMutedState(false);
     setVideoEnabledState(true);
+    setCameraFacing('user');
     setRemoteAudible(true);
     setSharing(false);
     setRemoteScreenSharing(false);
@@ -193,6 +195,7 @@ export function CallProvider({ socket, currentUser, children }) {
         streamRef.current = stream;
         setLocalStream(stream);
         setVideoEnabledState(stream.getVideoTracks().length > 0);
+        setCameraFacing(call.getCameraFacing());
         wireCallbacks();
         call.createPeerConnection();
         const answer = await call.acceptOffer(payload.offer);
@@ -311,6 +314,7 @@ export function CallProvider({ socket, currentUser, children }) {
       streamRef.current = stream;
       setLocalStream(stream);
       setVideoEnabledState(stream.getVideoTracks().length > 0);
+      setCameraFacing(call.getCameraFacing());
       wireCallbacks();
       call.createPeerConnection();
       const offer = await call.createOffer();
@@ -396,6 +400,7 @@ export function CallProvider({ socket, currentUser, children }) {
         const updated = call.getLocalStream();
         setLocalStream(updated ? new MediaStream(updated.getTracks()) : null);
         setVideoEnabledState(true);
+        setCameraFacing(call.getCameraFacing());
         sendMediaState(true);
         // Camera media changed mid-call; renegotiate so the peer receives the
         // new frames over the (now send-receive) video m-line.
@@ -446,6 +451,7 @@ export function CallProvider({ socket, currentUser, children }) {
     try {
       const updated = await call.flipCamera();
       if (updated) setLocalStream(new MediaStream(updated.getTracks()));
+      setCameraFacing(call.getCameraFacing());
       showToast('Camera switched');
     } catch (e) {
       showToast('Could not switch camera');
@@ -455,7 +461,7 @@ export function CallProvider({ socket, currentUser, children }) {
   return (
     <CallContext.Provider value={{
       state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible, sharing,
-      remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing,
+      remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing, cameraFacing,
       minimized, setMinimized, callError, startCall, acceptCall, declineCall, endCall, dismissError,
       toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
     }}>

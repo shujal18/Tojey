@@ -13,7 +13,7 @@ export default function CallScreen() {
   const {
     state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible,
     sharing, minimized, setMinimized, callError, acceptCall, declineCall, endCall, dismissError,
-    remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing,
+    remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing, cameraFacing,
     toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
   } = useCall();
 
@@ -62,6 +62,15 @@ export default function CallScreen() {
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef({ sx: 0, sy: 0, ox: 0, oy: 0 });
   const pipMovedRef = useRef(false);
+  useEffect(() => {
+    const w = minimized ? 280 : 92;
+    const h = minimized ? 170 : 128;
+    setPipPos((p) => ({
+      x: Math.min(p.x, Math.max(0, (window.innerWidth || 320) - w)),
+      y: Math.min(p.y, Math.max(0, (window.innerHeight || 480) - h)),
+    }));
+  }, [minimized]);
+
 
   // Remote audio: the video element is ALWAYS muted (a muted media element
   // outputs no sound at all, which is why remote audio was completely silent
@@ -179,12 +188,15 @@ export default function CallScreen() {
   const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && (remoteCameraOn || remoteScreenSharing));
   // After the first paint, if videoWidth/Height > 0 we know frames are decoding.
   const showRemoteVideo = remoteVideoReady || remoteHasVideo;
-  // Cameras are shown exactly as captured (unmirrored), preserving the original
-  // frame. A shared screen is also unmirrored and uses `contain` so the viewer
-  // sees the entire display exactly as the host shared it (no cropping).
+  // Mirroring is self-view only: a front camera is mirrored for the person
+  // holding the phone (natural selfie view) while the stream sent to the peer
+  // stays unmirrored so text reads correctly. A rear camera is never mirrored.
+  // The remote feed is always shown exactly as received. Screen share is never
+  // mirrored and uses `contain` so the whole shared display stays visible.
   const localIsScreen = !!sharing;
   const remoteTrackLabel = (remoteStream?.getVideoTracks?.()[0]?.label || '').toLowerCase();
   const remoteIsScreen = !!remoteScreenSharing || /screen|display|monitor|window|tab|capture/.test(remoteTrackLabel);
+  const localMirror = cameraFacing === 'user' && videoEnabled && !localIsScreen;
   const localFit = localIsScreen ? 'contain' : 'cover';
   const remoteFit = remoteIsScreen ? 'contain' : 'cover';
 
@@ -232,8 +244,10 @@ export default function CallScreen() {
     const dx = e.clientX - dragRef.current.sx;
     const dy = e.clientY - dragRef.current.sy;
     if (Math.abs(dx) > 5 || Math.abs(dy) > 5) pipMovedRef.current = true;
-    const nx = Math.min(Math.max(0, dragRef.current.ox + dx), (window.innerWidth || 320) - 280);
-    const ny = Math.min(Math.max(0, dragRef.current.oy + dy), (window.innerHeight || 480) - 170);
+    const w = minimized ? 280 : 92;
+    const h = minimized ? 170 : 128;
+    const nx = Math.min(Math.max(0, dragRef.current.ox + dx), Math.max(0, (window.innerWidth || 320) - w));
+    const ny = Math.min(Math.max(0, dragRef.current.oy + dy), Math.max(0, (window.innerHeight || 480) - h));
     setPipPos({ x: nx, y: ny });
   };
   const onPipUp = () => setDragging(false);
@@ -439,6 +453,7 @@ export default function CallScreen() {
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: localFit,
                   background: localIsScreen ? '#000' : '#141221',
+                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }}
               />
             ) : (
@@ -517,6 +532,7 @@ export default function CallScreen() {
               videoEnabled ? (
                 <video ref={setLocal} autoPlay playsInline muted style={{
                   width: '100%', height: '100%', objectFit: localFit,
+                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>

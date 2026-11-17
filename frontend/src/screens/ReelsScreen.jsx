@@ -784,44 +784,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               </div>
             </div>
 
-            {/* Top scrim so the category chips stay readable over any video. */}
-            {videos.length > 0 && (
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 132, zIndex: 44, pointerEvents: 'none', background: 'linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0))' }} />
-            )}
-
-            {videos.length > 0 && categories.length > 0 && (
-              <div
-                style={{
-                  position: 'absolute', top: 14, left: onBack ? 60 : 12, right: 12,
-                  zIndex: 46, display: 'flex', gap: 8, overflowX: 'auto',
-                  scrollbarWidth: 'none', msOverflowStyle: 'none', padding: '2px 0',
-                }}
-                onClick={(e) => e.stopPropagation()}
-                className="reels-chip-row"
-              >
-                <style>{'.reels-chip-row::-webkit-scrollbar{display:none}'}</style>
-                {categories.map((c) => {
-                  const active = c.id === category;
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => selectCategory(c.id)}
-                      style={{
-                        flexShrink: 0, border: 'none', cursor: 'pointer',
-                        padding: '7px 14px', borderRadius: 16, fontSize: 13, fontWeight: 700,
-                        color: active ? '#fff' : 'rgba(255,255,255,0.95)',
-                        background: active ? theme.primary : 'rgba(0,0,0,0.55)',
-                        boxShadow: active ? 'none' : '0 1px 6px rgba(0,0,0,0.45)',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {c.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
             {onBack && (
               <button onClick={(e) => { e.stopPropagation(); onBack(); }} title="Back" style={{
                 position: 'absolute', top: 14, left: 12, zIndex: 50,

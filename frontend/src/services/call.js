@@ -31,6 +31,7 @@ export function applyCallbacks(cb) {
 
 export function getLocalStream() { return localStream; }
 export function getRemoteStream() { return remoteStream; }
+export function getCameraFacing() { return videoFacing; }
 export function getPeer() { return pc; }
 
 export function setMicMuted(muted) {
