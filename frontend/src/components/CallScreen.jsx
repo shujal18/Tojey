@@ -197,6 +197,7 @@ export default function CallScreen() {
   const remoteTrackLabel = (remoteStream?.getVideoTracks?.()[0]?.label || '').toLowerCase();
   const remoteIsScreen = !!remoteScreenSharing || /screen|display|monitor|window|tab|capture/.test(remoteTrackLabel);
   const localMirror = cameraFacing === 'user' && videoEnabled && !localIsScreen;
+  const remoteMirror = showRemoteVideo && !remoteIsScreen;
   const localFit = localIsScreen ? 'contain' : 'cover';
   const remoteFit = remoteIsScreen ? 'contain' : 'cover';
 
@@ -273,6 +274,7 @@ export default function CallScreen() {
           <video ref={setRemote} autoPlay playsInline muted style={{
             position: 'absolute', inset: 0, width: '100%', height: '100%',
             objectFit: remoteFit, background: '#000',
+            transform: remoteMirror ? 'scaleX(-1)' : 'none',
           }} />
         ) : (
           <div style={{
@@ -482,6 +484,7 @@ export default function CallScreen() {
               muted
               style={{
                 position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: remoteFit, background: remoteIsScreen ? '#000' : '#141221',
+                transform: remoteMirror ? 'scaleX(-1)' : 'none',
                 }}
             />
           ) : (
@@ -549,6 +552,7 @@ export default function CallScreen() {
               <video ref={setRemote} autoPlay playsInline muted style={{
                 width: '100%', height: '100%', objectFit: remoteFit,
                 background: remoteIsScreen ? '#000' : '#111',
+                transform: remoteMirror ? 'scaleX(-1)' : 'none',
                 }} />
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e' }}>
