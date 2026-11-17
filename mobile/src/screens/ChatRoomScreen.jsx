@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from '
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
-  Animated, PanResponder, Dimensions, ScrollView, AppState, LayoutAnimation, UIManager,
+  Animated, PanResponder, Dimensions, ScrollView, AppState, LayoutAnimation, UIManager, DeviceEventEmitter,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -26,15 +26,8 @@ import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
-import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission, ensureVideoCallPermission } from '../services/permissions';
-import {
-  startLocalStream, createPeerConnection, applyCallbacks, createOffer, acceptOffer,
-  handleRemoteAnswer, handleRemoteCandidate, cleanupCall, switchCamera,
-  setVideoEnabled, startScreenShare, stopScreenShare, getScreenStream,
-  setMicMuted, isMicMuted, setRemoteAudioEnabled, isRemoteAudioEnabled,
-  storeInvite, takeInvite,
-} from '../services/videoCall';
-import VideoCallView from '../components/VideoCallView';
+import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
+import { useCall } from '../services/CallContext';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing, flushAllOutgoingQueues } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
@@ -148,6 +141,7 @@ class RowBoundary extends React.Component {
 
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
+  const { callStatus, headerCallPress } = useCall();
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
@@ -206,29 +200,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const atBottomNearRef = useRef(true);
   const scrolledToEndOnMount = useRef(false);
   const uploadTasks = useRef(new Map());
-  // --- video call state (camera-only, media flows P2P, server relays signaling) ---
-  const [callStatus, setCallStatus] = useState('none'); // none|outgoing|incoming|active
-  const [callLayout, setCallLayout] = useState('full'); // full|compact (chat visible while calling)
-  const [mainIsLocal, setMainIsLocal] = useState(false); // swapped pip: local camera becomes the fullscreen main stage
-  const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
-  const [incomingCaller, setIncomingCaller] = useState(null);
-  const [cameraOn, setCameraOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
-  const [remoteAudioOn, setRemoteAudioOn] = useState(true);
-  const [screenSharing, setScreenSharing] = useState(false);
-  const [screenStream, setScreenStream] = useState(null);
-  const screenSharingRef = useRef(false);
-  const callStatusRef = useRef('none');
-  const callIdRef = useRef(null);
-  const callPeerIdRef = useRef(null);
-  const callRingingRef = useRef(null);
-  const callWasConnectedRef = useRef(false);
-  const setCall = (s) => {
-    callStatusRef.current = s;
-    setCallStatus(s);
-  };
-
   // Pagination (lazy-loading older messages on scroll up).
   const hasMoreRef = useRef(false);
   const loadingMoreRef = useRef(false);
@@ -477,6 +448,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       lastSyncedIdRef.current = n;
     }
   };
+  useEffect(() => {
+    const onCallMessage = (m) => {
+      if (!m || !m.id) return;
+      setMessages((prev) => (prev.some((x) => String(x.id) === String(m.id)) ? prev : insertSorted(prev, m)));
+      addKnownId(m.id);
+      bumpCursor(m.id);
+    };
+    const onToast = (message) => {
+      if (message) setNudgeToast(message);
+    };
+    const subMsg = DeviceEventEmitter.addListener('tojey:call-message', onCallMessage);
+    const subToast = DeviceEventEmitter.addListener('tojey:call-toast', onToast);
+    return () => {
+      subMsg.remove();
+      subToast.remove();
+    };
+  }, [addKnownId, bumpCursor]);
+
   const computeSyncCursor = (list) => {
     let max = 0;
     for (const m of list) if (isServerId(m) && Number(m.id) > max) max = Number(m.id);
@@ -807,309 +796,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     }
   };
 
-  // ---------- video call control ----------
-  const emitVideo = (event, payload) => {
-    if (socket && socket.connected) socket.emit(event, payload);
-  };
-
-  const resetCallUi = () => {
-    callIdRef.current = null;
-    callPeerIdRef.current = null;
-    callWasConnectedRef.current = false;
-    if (callRingingRef.current) clearTimeout(callRingingRef.current);
-    callRingingRef.current = null;
-    screenSharingRef.current = false;
-    setCallLayout('full');
-    setMainIsLocal(false);
-    setCameraOn(true);
-    setMicOn(true);
-    setRemoteAudioOn(true);
-    setScreenSharing(false);
-    setScreenStream(null);
-    setLocalStream(null);
-    setRemoteStream(null);
-    setIncomingCaller(null);
-    setCall('none');
-  };
-
-  // Call-event message in the chat box (WhatsApp-style "Video call" / "Call
-  // ended" / "Missed video call"). Both peers fire the SAME idempotent clientId,
-  // so even if both sides race, exactly one row is stored (server dedups by
-  // (conversation_id, client_id)) and both chat boxes show it.
-  const sendCallMessage = (content, suffix) => {
-    if (!socketReady() || !callIdRef.current) return;
-    const clientId = `call-${callIdRef.current}-${suffix}`;
-    socket.emit('message:send', { otherUserId, type: 'CALL', content, clientId }, (ack) => {
-      if (ack && ack.ok && ack.message) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === ack.message.id)) return prev;
-          return insertSorted(prev, ack.message);
-        });
-        addKnownId(ack.message.id);
-        bumpCursor(ack.message.id);
-      }
-    });
-  };
-
-  const teardownCall = () => {
-    cleanupCall();
-    resetCallUi();
-  };
-
-  const endCall = () => {
-    const wasConnected = callWasConnectedRef.current;
-    if (callPeerIdRef.current && callIdRef.current) {
-      emitVideo('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
-    }
-    sendCallMessage(wasConnected ? 'Call ended' : 'Missed video call', 'end');
-    teardownCall();
-  };
-
-  const wirePeerCallbacks = () => {
-    applyCallbacks({
-      onIceCandidate: (candidate) => {
-        if (callPeerIdRef.current && callIdRef.current) {
-          emitVideo('video-call:ice-candidate', { targetUserId: callPeerIdRef.current, callId: callIdRef.current, candidate });
-        }
-      },
-      onRemoteStream: (stream) => setRemoteStream(stream),
-      onConnectionState: (state) => {
-        if (state === 'connected' || state === 'completed') {
-          callWasConnectedRef.current = true;
-          if (callRingingRef.current) clearTimeout(callRingingRef.current);
-        } else if (state === 'failed' || state === 'closed') {
-          if (callStatusRef.current !== 'none') teardownCall();
-        }
-      },
-    });
-  };
-
-  const startVideoCall = async () => {
-    if (callStatusRef.current !== 'none') return;
-    if (!socket?.connected) return;
-    try {
-      if (!(await ensureVideoCallPermission())) {
-        setNudgeToast('Camera permission is required for video calls.');
-        return;
-      }
-      const stream = await startLocalStream();
-      const callId = `vc-${currentUser?.id || 0}-${Date.now()}`;
-      await new Promise((resolve, reject) => {
-        socket.emit('video-call:invite', { calleeId: otherUserId, callId }, (res) => {
-          if (res && res.ok) resolve();
-          else reject(new Error((res && res.error) || 'invite failed'));
-        });
-      });
-      callIdRef.current = callId;
-      callPeerIdRef.current = otherUserId;
-      setLocalStream(stream);
-      wirePeerCallbacks();
-      setCall('outgoing');
-      if (callRingingRef.current) clearTimeout(callRingingRef.current);
-      callRingingRef.current = setTimeout(() => {
-        if (callStatusRef.current === 'outgoing') endCall();
-      }, 30000);
-    } catch (e) {
-      cleanupCall();
-      resetCallUi();
-      setNudgeToast(e && e.message === 'offline' ? `${otherUserName} is not online right now.` : 'Could not start the video call.');
-    }
-  };
-
-  const acceptIncoming = async () => {
-    const inc = incomingCaller;
-    if (!inc) return;
-    try {
-      if (!(await ensureVideoCallPermission())) {
-        emitVideo('video-call:reject', { targetUserId: inc.callerId, callId: inc.callId });
-        resetCallUi();
-        setNudgeToast('Camera permission is required for video calls.');
-        return;
-      }
-      const stream = await startLocalStream();
-      callIdRef.current = inc.callId;
-      callPeerIdRef.current = inc.callerId;
-      setLocalStream(stream);
-      wirePeerCallbacks();
-      createPeerConnection();
-      setIncomingCaller(null);
-      setCall('active');
-      emitVideo('video-call:accept', { targetUserId: inc.callerId, callId: inc.callId });
-      sendCallMessage('Video call', 'start');
-    } catch (e) {
-      resetCallUi();
-      setNudgeToast('Could not start the video call.');
-    }
-  };
-
-  const declineIncoming = () => {
-    const inc = incomingCaller;
-    if (inc) emitVideo('video-call:reject', { targetUserId: inc.callerId, callId: inc.callId });
-    sendCallMessage('Missed video call', 'end');
-    teardownCall();
-  };
-
-  const headerCallPress = () => {
-    if (callStatusRef.current === 'incoming') declineIncoming();
-    else if (callStatusRef.current !== 'none') endCall();
-    else startVideoCall();
-  };
-
-  const toggleCamera = () => {
-    if (callStatusRef.current === 'none') return;
-    const next = !cameraOn;
-    setVideoEnabled(next);
-    setCameraOn(next);
-  };
-
-  // Mute MY microphone only (stops sending my voice). Independent of remote-audio.
-  const toggleMic = () => {
-    if (callStatusRef.current === 'none') return;
-    const next = !micOn;
-    setMicMuted(!next);
-    setMicOn(next);
-  };
-
-  // Stop HEARING the remote participant locally. Purely local: the peer keeps
-  // talking/transmitting and is never notified or muted. Independent of my mic.
-  const toggleRemoteAudio = () => {
-    if (callStatusRef.current === 'none') return;
-    const next = !remoteAudioOn;
-    setRemoteAudioEnabled(next);
-    setRemoteAudioOn(next);
-  };
-
-  const toggleScreenShare = async () => {
-    if (callStatusRef.current === 'none') return;
-    if (screenSharingRef.current) {
-      try {
-        await stopScreenShare();
-      } catch (e) {}
-      screenSharingRef.current = false;
-      setScreenSharing(false);
-      setScreenStream(null);
-    } else {
-      try {
-        const stream = await startScreenShare();
-        if (!stream) throw new Error('could not capture');
-        screenSharingRef.current = true;
-        setScreenStream(getScreenStream());
-        setScreenSharing(true);
-      } catch (e) {
-        screenSharingRef.current = false;
-        setNudgeToast('Could not start screen share: ' + ((e && e.message) || 'unknown error'));
-      }
-    }
-  };
-
-  // Signaling listeners (server relays SDP/ICE only; media is P2P over WebRTC).
-  useEffect(() => {
-    if (!socket || !otherUserId) return;
-
-    // WhatsApp-style auto-open handoff: App.jsx caught the invite globally and
-    // opened this chat; consume the buffered invite if this screen mounted after
-    // the socket event was already delivered.
-    const pending = takeInvite();
-    if (pending && String(pending.callerId) === String(otherUserId) && callStatusRef.current === 'none') {
-      callIdRef.current = pending.callId;
-      callPeerIdRef.current = pending.callerId;
-      setIncomingCaller({ callId: pending.callId, callerId: pending.callerId, caller: pending.caller || null });
-      setCall('incoming');
-    }
-
-    const hInvite = ({ callId, callerId, caller }) => {
-      if (!callId || !callerId) return;
-      if (callStatusRef.current !== 'none') {
-        emitVideo('video-call:reject', { targetUserId: callerId, callId });
-        return;
-      }
-      callIdRef.current = callId;
-      callPeerIdRef.current = callerId;
-      setIncomingCaller({ callId, callerId, caller });
-      setCall('incoming');
-    };
-    const hAccept = ({ callId }) => {
-      if (callIdRef.current !== callId || callStatusRef.current !== 'outgoing') return;
-      setCall('active');
-      sendCallMessage('Video call', 'start');
-      try {
-        createPeerConnection();
-        (async () => {
-          const offer = await createOffer();
-          if (callPeerIdRef.current && callIdRef.current && callStatusRef.current !== 'none') {
-            emitVideo('video-call:offer', { targetUserId: callPeerIdRef.current, callId: callIdRef.current, offer });
-          }
-        })().catch(() => teardownCall());
-      } catch (e) {
-        teardownCall();
-      }
-    };
-    const hReject = ({ callId }) => {
-      if (callIdRef.current !== callId) return;
-      if (callStatusRef.current === 'outgoing') {
-        sendCallMessage('Missed video call', 'end');
-        teardownCall();
-      }
-    };
-    const hOffer = ({ callId, offer }) => {
-      if (callIdRef.current !== callId || !offer) return;
-      (async () => {
-        const answer = await acceptOffer(offer);
-        if (callIdRef.current === callId && callPeerIdRef.current && callStatusRef.current !== 'none') {
-          emitVideo('video-call:answer', { targetUserId: callPeerIdRef.current, callId, answer });
-        }
-      })().catch(() => teardownCall());
-    };
-    const hAnswer = ({ callId, answer }) => {
-      if (callIdRef.current !== callId || !answer) return;
-      handleRemoteAnswer(answer).catch(() => {});
-    };
-    const hIce = ({ callId, candidate }) => {
-      if (callIdRef.current !== callId || !candidate) return;
-      handleRemoteCandidate(candidate);
-    };
-    const hEnd = ({ callId }) => {
-      if (callIdRef.current !== callId) return;
-      sendCallMessage(callWasConnectedRef.current ? 'Call ended' : 'Missed video call', 'end');
-      teardownCall();
-    };
-    const hDisconnect = () => {
-      if (callStatusRef.current !== 'none') teardownCall();
-    };
-    socket.on('video-call:invite', hInvite);
-    socket.on('video-call:accept', hAccept);
-    socket.on('video-call:reject', hReject);
-    socket.on('video-call:offer', hOffer);
-    socket.on('video-call:answer', hAnswer);
-    socket.on('video-call:ice-candidate', hIce);
-    socket.on('video-call:end', hEnd);
-    socket.on('disconnect', hDisconnect);
-    return () => {
-      socket.off('video-call:invite', hInvite);
-      socket.off('video-call:accept', hAccept);
-      socket.off('video-call:reject', hReject);
-      socket.off('video-call:offer', hOffer);
-      socket.off('video-call:answer', hAnswer);
-      socket.off('video-call:ice-candidate', hIce);
-      socket.off('video-call:end', hEnd);
-      socket.off('disconnect', hDisconnect);
-    };
-  }, [socket, otherUserId, otherUserName]);
-
-  // Hard cleanup: if the screen unmounts mid-call, tell the peer and release media.
-  useEffect(() => {
-    return () => {
-      if (sendFlashTimerRef.current) clearTimeout(sendFlashTimerRef.current);
-      if (cameraTimeoutRef.current) clearTimeout(cameraTimeoutRef.current);
-      if (callStatusRef.current !== 'none') {
-        if (callPeerIdRef.current && callIdRef.current && socket?.connected) {
-          socket.emit('video-call:end', { targetUserId: callPeerIdRef.current, callId: callIdRef.current });
-        }
-        cleanupCall();
-      }
-    };
-  }, [socket]);
-
   // Ref mirror of the unread count so scroll handlers clear it without re-renders.
   useEffect(() => { pendingCountRef.current = pendingCount; }, [pendingCount]);
 
@@ -1249,6 +935,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setMessages((prev) => prev.filter((m) => m.id !== msg.id));
   }, []);
 
+  const notifySent = (msg) => {
+    if (!msg) return;
+    DeviceEventEmitter.emit('tojey:sent-message', {
+      message: msg,
+      otherUserId,
+      conversationId: otherUserId,
+      senderPic: currentUser?.profile_pic_url || currentUser?.profilePic || '',
+    });
+  };
+
   const sendText = () => {
     const content = text.trim();
     if (!content) return;
@@ -1302,6 +998,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
+          notifySent(ack.message);
           addKnownId(ack.message && ack.message.id);
           bumpCursor(ack.message && ack.message.id);
           // Reference-parity: keep the freshly sent bubble flush above the composer
@@ -1417,6 +1114,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
+            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1609,6 +1307,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          notifySent(ack.message);
+            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1790,6 +1490,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          notifySent(ack.message);
+            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1840,6 +1542,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          notifySent(ack.message);
+            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
           } else {
@@ -1889,6 +1593,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
+          notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
           pendingScrollToBottomRef.current = true;
@@ -2018,11 +1723,11 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           </View>
         </View>
         <TouchableOpacity
-          onPress={headerCallPress}
+          onPress={() => headerCallPress(safeOtherUser)}
           style={styles.headerIconBtn}
-          accessibilityLabel={callStatusRef.current !== 'none' ? 'End video call' : 'Start video call'}
+          accessibilityLabel={callStatus !== 'none' ? 'Open video call' : 'Start video call'}
         >
-          <Icon name="videocam-outline" size={22} color={callStatusRef.current !== 'none' ? '#E53935' : theme.primary} />
+          <Icon name="videocam-outline" size={22} color={callStatus !== 'none' ? '#E53935' : theme.primary} />
         </TouchableOpacity>
         <TouchableOpacity
           onPress={() => { if (reactionPop) { setNudgeMenuVisible(false); getNudgeVibrationEnabled().then(setNudgeMenuVisible); setSelMenu(true); } else { setHeaderMenu((v) => !v); } }}
@@ -2147,35 +1852,6 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
             fadeDuration={0}
           />
         )}
-        {callStatus !== 'none' && callStatus !== 'incoming' && callLayout === 'compact' && (
-          <View style={styles.callStrip} pointerEvents="auto">
-            <VideoCallView
-              compact
-              status={callStatus}
-              peerName={otherUserName}
-              peerAvatar={otherUserAvatar}
-              localStream={screenSharing && screenStream ? screenStream : localStream}
-              remoteStream={remoteStream}
-              cameraOn={cameraOn}
-              micOn={micOn}
-              remoteAudioOn={remoteAudioOn}
-              screenSharing={screenSharing}
-              onAccept={acceptIncoming}
-              onDecline={declineIncoming}
-              onEnd={endCall}
-              onSwitchCamera={() => switchCamera()}
-              onToggleCamera={toggleCamera}
-              onToggleMic={toggleMic}
-              onToggleRemoteAudio={toggleRemoteAudio}
-              onToggleScreenShare={toggleScreenShare}
-              onExpand={() => setCallLayout('full')}
-              mainIsLocal={mainIsLocal}
-              onSwapPip={() => setMainIsLocal((v) => !v)}
-              onTapMain={() => setMainIsLocal((v) => !v)}
-              theme={theme}
-            />
-          </View>
-        )}
         <MessageList
           messages={messages}
           ownId={currentUser.id}
@@ -2197,35 +1873,6 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           playingVoiceId={playingVoiceId}
           voiceProgress={voiceProgress}
         />
-        {callStatus !== 'none' && (callStatus === 'incoming' || callLayout !== 'compact') && (
-          <View style={styles.callOverlay} pointerEvents="auto">
-            <VideoCallView
-              status={callStatus}
-              peerName={otherUserName}
-              peerAvatar={otherUserAvatar}
-              localStream={screenSharing && screenStream ? screenStream : localStream}
-              remoteStream={remoteStream}
-              cameraOn={cameraOn}
-              micOn={micOn}
-              remoteAudioOn={remoteAudioOn}
-              screenSharing={screenSharing}
-              onAccept={acceptIncoming}
-              onDecline={declineIncoming}
-              onEnd={endCall}
-              onSwitchCamera={() => switchCamera()}
-              onToggleCamera={toggleCamera}
-              onToggleMic={toggleMic}
-              onToggleRemoteAudio={toggleRemoteAudio}
-              onToggleScreenShare={toggleScreenShare}
-              onMinimize={() => setCallLayout('compact')}
-              mainIsLocal={mainIsLocal}
-              onSwapPip={() => setMainIsLocal((v) => !v)}
-              onTapMain={() => setMainIsLocal((v) => !v)}
-              theme={theme}
-            />
-          </View>
-        )}
-
       {/* More emojis (reached via the + on the reaction bar). Reactions only. */}
       {reactionMenu && (
         <View style={styles.menuOverlay}>

@@ -24,7 +24,7 @@ const PIP_W = 96;
 const PIP_H = 132;
 const PIP_MARGIN = 12;
 
-function DraggablePip({ streamUrl, mirror, off, scrTag, onSwap, onDrag, bounds, children }) {
+function DraggablePip({ streamUrl, mirror, off, scrTag, onSwap, onDrag, bounds, enabled = true, children }) {
   const [pos, setPos] = useState({ x: SCREEN_W - PIP_W - PIP_MARGIN, y: 14 });
   const baseRef = useRef({ x: 0, y: 0 });
   const movedRef = useRef(false);
@@ -61,7 +61,7 @@ function DraggablePip({ streamUrl, mirror, off, scrTag, onSwap, onDrag, bounds, 
 
   return (
     <View
-      {...panResponder.panHandlers}
+      {...(enabled ? panResponder.panHandlers : {})}
       style={[styles.localPip, { left: pos.x, top: pos.y }]}
       accessibilityLabel={off ? 'Camera is off' : 'Video preview (tap to switch)'}
     >
@@ -83,7 +83,7 @@ function DraggablePip({ streamUrl, mirror, off, scrTag, onSwap, onDrag, bounds, 
   );
 }
 
-function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing, mainIsLocal, onSwapPip, onTapMain }) {
+function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraOn, screenSharing, remoteScreenSharing, cameraFacing, mainIsLocal, floating, onSwapPip, onTapMain }) {
   const [stageSize, setStageSize] = useState(null);
   const localUrl = localStream ? localStream.toURL() : null;
   const remoteUrl = remoteStream ? remoteStream.toURL() : null;
@@ -91,13 +91,18 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
 
   const mainIsLocalSurface = mainIsLocal && !!localUrl;
   const mainUrl = mainIsLocalSurface ? localUrl : remoteUrl;
-  const mainMirror = mainIsLocalSurface ? !screenSharing : true;
+  const localMirror = cameraFacing === 'user' && !screenSharing;
+  const remoteMirror = !remoteScreenSharing;
+  const mainMirror = mainIsLocalSurface ? localMirror : remoteMirror;
+  const mainIsScreen = mainIsLocalSurface ? screenSharing : remoteScreenSharing;
   const showMainOff = mainIsLocalSurface && localOff;
 
   const pipUrl = mainIsLocalSurface ? remoteUrl : localUrl;
-  const pipMirror = mainIsLocalSurface ? true : !screenSharing;
+  const pipMirror = mainIsLocalSurface ? remoteMirror : localMirror;
+  const pipIsScreen = mainIsLocalSurface ? remoteScreenSharing : screenSharing;
   const showPipOff = !mainIsLocalSurface && localOff;
   const pipScrTag = !mainIsLocalSurface && screenSharing;
+  const showPip = !floating && (!!pipUrl || showPipOff);
 
   return (
     <View
@@ -114,7 +119,7 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
           style={StyleSheet.absoluteFill}
           accessibilityLabel="Switch video"
         >
-          <RTCView streamURL={mainUrl} objectFit="cover" style={StyleSheet.absoluteFill} mirror={mainMirror} zOrder={0} />
+          <RTCView streamURL={mainUrl} objectFit={mainIsScreen ? 'contain' : 'cover'} style={StyleSheet.absoluteFill} mirror={mainMirror} zOrder={0} />
           {screenSharing && mainIsLocalSurface && (
             <View style={styles.scrTagBig}>
               <Icon name="laptop-outline" size={14} color="#fff" />
@@ -140,14 +145,17 @@ function Peers({ localStream, remoteStream, peerAvatar, peerName, theme, cameraO
           <Icon name="videocam-off-outline" size={52} color="#fff" />
         </View>
       )}
-      <DraggablePip
-        streamUrl={pipUrl}
-        mirror={pipMirror}
-        off={showPipOff}
-        scrTag={pipScrTag}
-        onSwap={onSwapPip}
-        bounds={stageSize}
-      />
+      {showPip && (
+        <DraggablePip
+          streamUrl={pipUrl}
+          mirror={pipMirror}
+          off={showPipOff}
+          scrTag={pipScrTag}
+          onSwap={onSwapPip}
+          bounds={stageSize}
+          enabled={!floating}
+        />
+      )}
     </View>
   );
 }
@@ -189,8 +197,12 @@ export default function VideoCallView({
   onToggleScreenShare,
   onMinimize,
   onExpand,
+  remoteScreenSharing = false,
+  cameraFacing = 'user',
+  floating = false,
   theme,
 }) {
+  const [moreOpen, setMoreOpen] = useState(false);
   if (status === 'incoming') {
     return (
       <View style={[styles.fit, { backgroundColor: '#101418' }]}>
@@ -233,81 +245,104 @@ export default function VideoCallView({
         theme={theme}
         cameraOn={cameraOn}
         screenSharing={screenSharing}
+        remoteScreenSharing={remoteScreenSharing}
+        cameraFacing={cameraFacing}
         mainIsLocal={mainIsLocal}
+        floating={floating}
         onSwapPip={onSwapPip}
         onTapMain={onTapMain}
       />
       <View style={styles.topBar} pointerEvents="box-none">
-        <View style={styles.statusChip}>
-          <Text style={styles.topStatus}>
-            {status === 'active' && remoteStream ? (screenSharing ? 'Sharing screen' : 'Video call') : 'Ringing…'}
-          </Text>
-        </View>
-        {compact ? (
-          <TouchableOpacity onPress={onExpand} style={styles.layoutBtn} accessibilityLabel="Expand call">
-            <Icon name="chevron-up" size={22} color="#fff" />
-          </TouchableOpacity>
-        ) : (
+        {!floating && !compact && (
           <TouchableOpacity onPress={onMinimize} style={styles.layoutBtn} accessibilityLabel="Minimize call">
             <Icon name="chevron-down" size={22} color="#fff" />
           </TouchableOpacity>
         )}
-      </View>
-      <View style={[styles.controls, small && styles.controlsSmall]}>
-        <ControlButton
-          onPress={onSwitchCamera}
-          icon="camera-reverse-outline"
-          label="Flip"
-          small={small}
-          accessibilityLabel="Switch camera"
-        />
-        <ControlButton
-          onPress={onToggleCamera}
-          icon={cameraOn ? 'videocam' : 'videocam-off-outline'}
-          label="Camera off"
-          active={!cameraOn}
-          small={small}
-          accessibilityLabel="Toggle camera"
-        />
-        <ControlButton
-          onPress={onToggleScreenShare}
-          icon="laptop-outline"
-          label="Share"
-          active={screenSharing}
-          small={small}
-          accessibilityLabel="Toggle screen share"
-        />
-        <ControlButton
-          onPress={onEnd}
-          icon="call"
-          label="End"
-          color="#E53935"
-          small={small}
-          accessibilityLabel="End call"
-        />
+        {!floating && (
+          <View style={styles.statusChip}>
+            <Text style={styles.topStatus}>
+              {status === 'active' && remoteStream ? (screenSharing ? 'Sharing screen' : 'Video call') : 'Ringing…'}
+            </Text>
+          </View>
+        )}
+        {floating && (
+          <TouchableOpacity onPress={onExpand} style={styles.layoutBtn} accessibilityLabel="Expand call">
+            <Icon name="chevron-up" size={22} color="#fff" />
+          </TouchableOpacity>
+        )}
       </View>
 
-      {/* Audio controls row: my-mic mute and LOCAL remote-audio mute (independent).
-          Mutting "Remote audio" only silences THIS device's playback of the peer;
-          the peer's microphone is never touched and keeps transmitting normally. */}
-      <View style={[styles.voiceControls, small && styles.voiceControlsSmall]}>
-        <ControlButton
-          onPress={onToggleMic}
-          icon={micOn ? 'mic' : 'mic-off-outline'}
-          label="Mic"
-          active={!micOn}
-          small={small}
-          accessibilityLabel="Toggle my microphone"
-        />
-        <ControlButton
-          onPress={onToggleRemoteAudio}
-          icon={remoteAudioOn ? 'volume-high' : 'volume-mute-outline'}
-          label={remoteAudioOn ? 'Remote audio' : 'Remote muted'}
-          accent={!remoteAudioOn}
-          small={small}
-          accessibilityLabel="Toggle remote audio locally"
-        />
-      </View>
+      {moreOpen && !floating && (
+        <View style={styles.moreMenu}>
+          <TouchableOpacity
+            style={styles.moreMenuBtn}
+            onPress={() => { setMoreOpen(false); onToggleScreenShare(); }}
+            accessibilityLabel="Toggle screen share"
+          >
+            <Icon name="laptop-outline" size={20} color="#fff" />
+            <Text style={styles.moreMenuText}>{screenSharing ? 'Stop sharing' : 'Share screen'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.moreMenuBtn}
+            onPress={() => { setMoreOpen(false); onToggleRemoteAudio(); }}
+            accessibilityLabel="Toggle remote audio"
+          >
+            <Icon name={remoteAudioOn ? 'volume-high' : 'volume-mute-outline'} size={20} color="#fff" />
+            <Text style={styles.moreMenuText}>{remoteAudioOn ? 'Mute remote audio' : 'Unmute remote audio'}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {floating ? (
+        <View style={styles.floatingControls}>
+          <ControlButton
+            onPress={onToggleMic}
+            icon={micOn ? 'mic' : 'mic-off-outline'}
+            active={!micOn}
+            small
+            accessibilityLabel="Toggle my microphone"
+          />
+          <ControlButton
+            onPress={onEnd}
+            icon="call"
+            color="#E53935"
+            small
+            accessibilityLabel="End call"
+          />
+        </View>
+      ) : (
+        <View style={styles.controls}>
+          <ControlButton
+            onPress={onSwitchCamera}
+            icon="camera-reverse-outline"
+            accessibilityLabel="Switch camera"
+          />
+          <ControlButton
+            onPress={onToggleCamera}
+            icon={cameraOn ? 'videocam' : 'videocam-off-outline'}
+            active={!cameraOn}
+            accessibilityLabel="Toggle camera"
+          />
+          <ControlButton
+            onPress={onToggleMic}
+            icon={micOn ? 'mic' : 'mic-off-outline'}
+            active={!micOn}
+            accessibilityLabel="Toggle my microphone"
+          />
+          <ControlButton
+            onPress={() => setMoreOpen((v) => !v)}
+            icon="menu"
+            active={moreOpen}
+            accessibilityLabel="More call options"
+          />
+          <ControlButton
+            onPress={onEnd}
+            icon="call"
+            color="#E53935"
+            accessibilityLabel="End call"
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -428,6 +463,21 @@ const styles = StyleSheet.create({
     gap: 24,
   },
   ctrlBtn: { alignItems: 'center' },
+  floatingControls: {
+    position: 'absolute', left: 0, right: 0, bottom: 8,
+    flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', zIndex: 5,
+  },
+  moreMenu: {
+    position: 'absolute', right: 14, bottom: 84,
+    backgroundColor: 'rgba(12,16,20,0.96)', borderRadius: 12,
+    paddingVertical: 6, paddingHorizontal: 6, zIndex: 6,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+  },
+  moreMenuBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 12, paddingVertical: 10,
+  },
+  moreMenuText: { color: '#fff', fontSize: 14 },
   ctrlCircle: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   ctrlCircleS: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   ctrlActive: { backgroundColor: '#fff' },

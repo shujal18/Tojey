@@ -16,8 +16,8 @@ const LOCAL_CONSTRAINTS = {
   audio: true,
   video: {
     facingMode: 'user',
-    width: 640,
-    height: 480,
+    width: 1280,
+    height: 720,
     frameRate: 30,
   },
 };
@@ -25,8 +25,8 @@ const LOCAL_CONSTRAINTS = {
 // Encoder profiles tuned for smooth motion. Both force the WebRTC CPU/network
 // adapter to keep the frame rate and lower the resolution instead (so calls and
 // screen shares stay fluid on weak devices instead of dropping to a slideshow).
-const CAMERA_ENCODING = { maxBitrate: 900000, maxFramerate: 30 };
-const SCREEN_ENCODING = { maxBitrate: 2500000, maxFramerate: 30 };
+const CAMERA_ENCODING = { maxBitrate: 2000000, maxFramerate: 30 };
+const SCREEN_ENCODING = { maxBitrate: 5000000, maxFramerate: 60 };
 
 let pc = null;
 let localStream = null;
@@ -37,6 +37,7 @@ let addedCandidates = new Set();
 let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
+let videoFacing = 'user';
 
 // Incoming-call handoff for WhatsApp-style auto-open: App.jsx catches the
 // invite globally and calls storeInvite() before opening the chat; the mounted
@@ -52,6 +53,10 @@ export function takeInvite() {
   const p = pendingInvite;
   pendingInvite = null;
   return p;
+}
+
+export function getCameraFacing() {
+  return videoFacing;
 }
 
 export function getLocalStream() {
@@ -242,6 +247,7 @@ export function switchCamera() {
   try {
     if (typeof track._switchCamera === 'function') track._switchCamera();
     else if (typeof track.switchCamera === 'function') track.switchCamera();
+    videoFacing = videoFacing === 'user' ? 'environment' : 'user';
   } catch (e) {
     console.warn('switchCamera failed', e && e.message);
   }
@@ -343,4 +349,5 @@ export function cleanupCall() {
   addedCandidates = new Set();
   micMuted = false;
   remoteAudioEnabled = true;
+  videoFacing = 'user';
 }

@@ -440,7 +440,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           !failedStreamsRef.current.has(v.videoId));
 
       if (!append && !pageToken) {
-        let unseen = novel(data.videos);
+        let unseen = novel(data.items);
 
         if (!refresh) {
           const savedCursor = await loadCursor(user.id, cat);
@@ -448,7 +448,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
             try {
               const deeper = await fetchFeedPage(cat, savedCursor, false);
               if (!isMountedRef.current || reqId !== requestIdRef.current) return;
-              unseen = novel(deeper.videos);
+              unseen = novel(deeper.items);
               data = deeper;
               cursor = deeper.nextToken || savedCursor;
               hasMore = deeper.hasMore === true;
@@ -462,7 +462,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           for (let i = 0; i < AUTO_ADVANCE_MAX_PAGES; i++) {
             const p = await fetchFeedPage(cat, token, false);
             if (!isMountedRef.current || reqId !== requestIdRef.current) return;
-            finalVideos = [...finalVideos, ...novel(p.videos)];
+            finalVideos = [...finalVideos, ...novel(p.items)];
             cursor = p.nextToken || token;
             hasMore = p.hasMore === true;
             if (finalVideos.length >= MIN_FRESH_BATCH || !hasMore || !p.nextToken) break;
@@ -472,13 +472,13 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
         if (finalVideos.length >= 3) {
           finalVideos = finalVideos.slice(0, MAX_LIST_LENGTH);
-        } else if (data.videos && data.videos.length) {
-          const stillFresh = data.videos.filter((v) => v && v.videoId &&
+        } else if (data.items && data.items.length) {
+          const stillFresh = data.items.filter((v) => v && v.videoId &&
             !seenSetRef.current.has(v.videoId) && !failedVideoIdsRef.current.has(v.videoId));
-          finalVideos = (stillFresh.length ? stillFresh : data.videos.filter((v) => v && v.videoId)).slice(0, MAX_LIST_LENGTH);
+          finalVideos = (stillFresh.length ? stillFresh : data.items.filter((v) => v && v.videoId)).slice(0, MAX_LIST_LENGTH);
         }
       } else {
-        finalVideos = (data.videos || []).filter((v) => v && v.videoId);
+        finalVideos = (data.items || []).filter((v) => v && v.videoId);
         cursor = data.nextToken || pageToken || null;
         hasMore = data.hasMore === true;
       }
@@ -542,7 +542,7 @@ const loadMore = useCallback(async () => {
     try {
       const data = await fetchFeedPage(currentCategory, token, false);
       if (!isMountedRef.current) return;
-      const valid = (data.videos || []).filter((v) => v && v.videoId &&
+      const valid = (data.items || []).filter((v) => v && v.videoId &&
         !failedVideoIdsRef.current.has(v.videoId) &&
         !failedStreamsRef.current.has(v.videoId) &&
         !seenSetRef.current.has(v.videoId));

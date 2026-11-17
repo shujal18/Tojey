@@ -20,6 +20,7 @@ import YoutubePlaylistScreen from './YoutubePlaylistScreen';
 import YoutubeLibraryScreen from './YoutubeLibraryScreen';
 
 const FALLBACK_CATEGORIES = [
+  { id: 'recommended', label: 'Recommended for you' },
   { id: 'trending', label: 'Trending' },
   { id: 'music', label: 'Music' },
   { id: 'comedy', label: 'Comedy' },
@@ -30,7 +31,7 @@ const FALLBACK_CATEGORIES = [
 
 export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState('trending');
+  const [category, setCategory] = useState('recommended');
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -381,7 +382,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
                 </TouchableOpacity>
               )}
               <Text style={[styles.sectionTitle, { color: theme.text }]}>
-                {categories.find((c) => c.id === category)?.label} videos
+                {(() => {
+                  const label = categories.find((c) => c.id === category)?.label || 'Recommended for you';
+                  return label === 'Recommended for you' ? label : `${label} videos`;
+                })()}
               </Text>
             </View>
           }
