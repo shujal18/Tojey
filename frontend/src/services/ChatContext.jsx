@@ -27,9 +27,6 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   const [unread, setUnread] = useState({});
   const [wallpaper, setWallpaper] = useState(null);
   const [toast, setToast] = useState(null);
-  // In-app heads-up banner (WhatsApp / Facebook Lite style) for chat messages landing
-  // while this tab is open for a conversation that is NOT currently on screen.
-  const [banner, setBanner] = useState(null);
   const socketRef = useRef(socket);
   socketRef.current = socket;
   const conversationRef = useRef(conversation);
@@ -180,17 +177,6 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
       if (!isMine && message.sender_id != null && conversationRef.current.other?.id !== message.sender_id) {
         setUnread(prev => ({ ...prev, [message.sender_id]: (prev[message.sender_id] || 0) + 1 }));
       }
-      // Heads-up banner for messages that arrived while a DIFFERENT screen/chat is open.
-      if (!isMine && document.visibilityState === 'visible') {
-        setBanner({
-          key: `${message.id || Date.now()}`,
-          senderId: message.sender_id,
-          senderName: sender?.displayName || sender?.username || 'Tojey',
-          senderPic: sender?.profilePic || sender?.profile_pic_url || '',
-          conversationId: message.conversation_id,
-          preview: previewFromWeb({ msgType: message.type, msgPreview: message.content || '' }).slice(0, 90),
-        });
-      }
     });
 
     socket.on('nudge', ({ from }) => {
@@ -324,7 +310,6 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
           acceptAck(p._tempId, ack.message);
         }
         if (ack && ack.error && !p._fromQueue) {
-          showToast(ack.error === 'otherUserId required' ? 'Could not send message' : ack.error);
           setConversation(prev => ({ ...prev, messages: prev.messages.filter(x => x._tempId !== p._tempId) }));
         }
       });
@@ -333,7 +318,6 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
     if (!socket.connected) {
       offlineQueueRef.current.push({ ...payload, _queued: true });
       persistQueue();
-      showToast('Offline — message queued');
       setConversation(prev =>
         prev.other && prev.other.id === payload.otherUserId
           ? {
@@ -375,7 +359,7 @@ export function ChatProvider({ socket, currentUser, children, onOpenChat }) {
   }
 
   return (
-    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast, banner, dismissBanner: () => setBanner(null), openChatScreen: onOpenChat, unread, markRead: (id) => setUnread(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; }), totalUnread: Object.values(unread).reduce((a, b) => a + b, 0) }}>
+    <ChatContext.Provider value={{ users, conversation, conversations, presence, wallpaper, setWallpaper, openConversation, sendMessage, sendNudge, clearConversation, setConversation, fetchUsers, toast, showToast, openChatScreen: onOpenChat, unread, markRead: (id) => setUnread(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; }), totalUnread: Object.values(unread).reduce((a, b) => a + b, 0) }}>
       {children}
       {toast && (
         <div style={{

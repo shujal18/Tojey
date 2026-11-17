@@ -11,7 +11,6 @@ import ChatRoomScreen from './ChatRoomScreen';
 import ReelsScreen from './ReelsScreen';
 import YoutubeHomeScreen from './YoutubeHomeScreen';
 import SettingsScreen from './SettingsScreen';
-import HeadsUpBanner from '../components/HeadsUpBanner';
 import { useTheme } from '../theme/ThemeContext';
 import {
   MessageCircle, Youtube, PlaySquare, Settings as SettingsIcon, LogOut, Lock,
@@ -266,7 +265,6 @@ export default function HomeLayout() {
 
           <CallScreen />
           <DeepLinkOpener targetId={pendingChatId} onDone={clearPendingChat} onOpenChat={handleOpenChat} />
-          <HeadsUpBanner />
         </WatchTogetherProvider>
       </CallProvider>
     </ChatProvider>
