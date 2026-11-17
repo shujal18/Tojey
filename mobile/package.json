@@ -1,6 +1,6 @@
 {
   "name": "Tojey",
-  "version": "1.21.0",
+  "version": "1.21.3",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
