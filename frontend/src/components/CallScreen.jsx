@@ -183,7 +183,8 @@ export default function CallScreen() {
   // mirrored and uses `contain` so the viewer sees the entire display, exactly
   // as the host shared it (letterbox bars instead of cropping).
   const localIsScreen = !!sharing;
-  const remoteIsScreen = !!remoteScreenSharing;
+  const remoteTrackLabel = (remoteStream?.getVideoTracks?.()[0]?.label || '').toLowerCase();
+  const remoteIsScreen = !!remoteScreenSharing || /screen|display|monitor|window|tab|capture/.test(remoteTrackLabel);
   const localMirror = videoEnabled && !localIsScreen;
   const remoteMirror = showRemoteVideo && !remoteIsScreen;
   const localFit = localIsScreen ? 'contain' : 'cover';
