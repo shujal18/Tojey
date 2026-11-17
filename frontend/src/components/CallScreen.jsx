@@ -13,7 +13,7 @@ export default function CallScreen() {
   const {
     state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible,
     sharing, minimized, setMinimized, callError, acceptCall, declineCall, endCall, dismissError,
-    remoteCameraOn, remoteHasVideoTrack,
+    remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing,
     toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
   } = useCall();
 
@@ -176,9 +176,18 @@ export default function CallScreen() {
   // Only treat the remote as a video feed when it actually sends a video track
   // AND the peer hasn't turned their camera off. Otherwise show the avatar
   // instead of a black rectangle (audio-only fallback / denied camera).
-  const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && remoteCameraOn);
+  const remoteHasVideo = !!(remoteStream && remoteHasVideoTrack && (remoteCameraOn || remoteScreenSharing));
   // After the first paint, if videoWidth/Height > 0 we know frames are decoding.
   const showRemoteVideo = remoteVideoReady || remoteHasVideo;
+  // Cameras are mirrored selfie-style on BOTH ends. A shared screen is never
+  // mirrored and uses `contain` so the viewer sees the entire display, exactly
+  // as the host shared it (letterbox bars instead of cropping).
+  const localIsScreen = !!sharing;
+  const remoteIsScreen = !!remoteScreenSharing;
+  const localMirror = videoEnabled && !localIsScreen;
+  const remoteMirror = showRemoteVideo && !remoteIsScreen;
+  const localFit = localIsScreen ? 'contain' : 'cover';
+  const remoteFit = remoteIsScreen ? 'contain' : 'cover';
 
   const fmtTime = () => {
     const m = Math.floor(elapsed / 60);
@@ -250,7 +259,8 @@ export default function CallScreen() {
         {showRemoteVideo ? (
           <video ref={setRemote} autoPlay playsInline muted style={{
             position: 'absolute', inset: 0, width: '100%', height: '100%',
-            objectFit: 'cover', background: '#141221',
+            objectFit: remoteFit, background: '#000',
+            transform: remoteMirror ? 'scaleX(-1)' : 'none',
           }} />
         ) : (
           <div style={{
@@ -429,8 +439,9 @@ export default function CallScreen() {
                 playsInline
                 muted
                 style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
-                  background: '#141221', transform: 'none',
+                  position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: localFit,
+                  background: localIsScreen ? '#000' : '#141221',
+                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }}
               />
             ) : (
@@ -458,7 +469,8 @@ export default function CallScreen() {
               playsInline
               muted
               style={{
-                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#141221',
+                position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: remoteFit, background: remoteIsScreen ? '#000' : '#141221',
+                transform: remoteMirror ? 'scaleX(-1)' : 'none',
               }}
             />
           ) : (
@@ -508,8 +520,8 @@ export default function CallScreen() {
             localStream ? (
               videoEnabled ? (
                 <video ref={setLocal} autoPlay playsInline muted style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  transform: 'none',
+                  width: '100%', height: '100%', objectFit: localFit,
+                  transform: localMirror ? 'scaleX(-1)' : 'none',
                 }} />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e', color: '#fff' }}>
@@ -524,7 +536,9 @@ export default function CallScreen() {
           ) : (
             showRemoteVideo ? (
               <video ref={setRemote} autoPlay playsInline muted style={{
-                width: '100%', height: '100%', objectFit: 'cover', background: '#111',
+                width: '100%', height: '100%', objectFit: remoteFit,
+                background: remoteIsScreen ? '#000' : '#111',
+                transform: remoteMirror ? 'scaleX(-1)' : 'none',
               }} />
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#221f2e' }}>

@@ -18,6 +18,7 @@ export function CallProvider({ socket, currentUser, children }) {
   const [remoteCameraOn, setRemoteCameraOn] = useState(true);
   const [remoteHasVideoTrack, setRemoteHasVideoTrack] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [remoteScreenSharing, setRemoteScreenSharing] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [callError, setCallError] = useState(null);
   const [incomingAfterOpen, setIncomingAfterOpen] = useState(null);
@@ -52,6 +53,7 @@ export function CallProvider({ socket, currentUser, children }) {
     setVideoEnabledState(true);
     setRemoteAudible(true);
     setSharing(false);
+    setRemoteScreenSharing(false);
   };
 
   const cleanup = useCallback((opts = {}) => {
@@ -88,7 +90,7 @@ export function CallProvider({ socket, currentUser, children }) {
   // Tell the peer whether our camera is actually sending video, so their UI can
   // show "Camera off" instead of a black rectangle (camera denied, audio-only
   // fallback, or the user toggled the camera off).
-  const sendMediaState = useCallback((cameraOn) => {
+  const sendMediaState = useCallback((cameraOn, screenSharing = false) => {
     const meta = metaRef.current;
     const sk = socketRef.current;
     const s = stateRef.current;
@@ -96,7 +98,7 @@ export function CallProvider({ socket, currentUser, children }) {
     const myId = currentUserRef.current?.id;
     const peerId = meta.callerId === myId ? meta.calleeId : meta.callerId;
     if (peerId) {
-      sk.emit('video-call:media-state', { targetUserId: peerId, callId: meta.callId, cameraOn: !!cameraOn });
+      sk.emit('video-call:media-state', { targetUserId: peerId, callId: meta.callId, cameraOn: !!cameraOn, screenSharing: !!screenSharing });
     }
   }, []);
 
@@ -274,6 +276,7 @@ export function CallProvider({ socket, currentUser, children }) {
       if (!payload) return;
       if (payload.callId && metaRef.current?.callId && payload.callId !== metaRef.current.callId) return;
       setRemoteCameraOn(payload.cameraOn !== false || !(remoteStream?.getVideoTracks().length === 0));
+      setRemoteScreenSharing(!!payload.screenSharing);
     };
 
     socket.on('video-call:invite', onInvite);
@@ -428,14 +431,16 @@ export function CallProvider({ socket, currentUser, children }) {
       if (call.isScreenSharing()) {
         await call.stopScreenShare();
         setSharing(false);
+        sendMediaState(videoEnabled, false);
       } else {
         await call.startScreenShare();
         setSharing(true);
+        sendMediaState(videoEnabled, true);
       }
     } catch (e) {
       showToast(e.message || 'Screen share unavailable');
     }
-  }, [showToast]);
+  }, [showToast, sendMediaState, videoEnabled]);
 
   const flipCamera = useCallback(async () => {
     try {
@@ -450,7 +455,7 @@ export function CallProvider({ socket, currentUser, children }) {
   return (
     <CallContext.Provider value={{
       state, callMeta, localStream, remoteStream, micMuted, videoEnabled, remoteAudible, sharing,
-      remoteCameraOn, remoteHasVideoTrack,
+      remoteCameraOn, remoteHasVideoTrack, remoteScreenSharing,
       minimized, setMinimized, callError, startCall, acceptCall, declineCall, endCall, dismissError,
       toggleMic, toggleVideo, toggleRemoteAudio, toggleScreenShare, flipCamera,
     }}>

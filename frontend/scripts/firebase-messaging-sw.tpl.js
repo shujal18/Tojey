@@ -24,6 +24,9 @@ function mediaLabel(type) {
 
 messaging.onBackgroundMessage((payload) => {
   const data = payload.data || {};
+  // Chat messages and nudges already show up inline in the app. Only the
+  // explicit "Send Notification" action should raise a system notification.
+  if (data.type && data.type !== 'tojey_notification') return;
   const title = data.senderName || data.title || 'Tojey';
   let body = data.body || 'New message';
   if (!body) {
