@@ -63,6 +63,13 @@ function Shell() {
   const openConversationWithRef = useRef(null);
   const homeBackRef = useRef(null);
   const registerHomeBack = useCallback((fn) => { homeBackRef.current = fn; }, []);
+  const openSettings = useCallback(() => setShowSettings(true), []);
+  const openChatFromHome = useCallback((c) => {
+    setIncomingBanner(null);
+    setActiveChat(c);
+  }, []);
+  const handleWatchRequestHandled = useCallback(() => setWatchRequest(null), []);
+  const updateSessionUser = useCallback((u) => setSession((prev) => (prev ? { ...prev, user: u } : prev)), []);
 
   const openConversationWith = useCallback(async (userId) => {
     if (!userId) return;
@@ -418,14 +425,18 @@ function Shell() {
     };
   }, []);
 
+  const backStateRef = useRef({ activeChat: null, showSettings: false });
+  backStateRef.current = { activeChat, showSettings };
+
   // Android hardware back: chat → chats, settings → home, else exit
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (activeChat) {
+      const state = backStateRef.current;
+      if (state.activeChat) {
         setActiveChat(null);
         return true;
       }
-      if (showSettings) {
+      if (state.showSettings) {
         setShowSettings(false);
         return true;
       }
@@ -433,7 +444,7 @@ function Shell() {
       return false;
     });
     return () => sub.remove();
-  }, [activeChat, showSettings]);
+  }, []);
 
   // Show loading screen during initialization
   if (!booted || !themeBooted) {
@@ -552,15 +563,12 @@ function Shell() {
             socket={socket}
             user={session.user}
             token={session.token}
-            setUser={(u) => setSession({ ...session, user: u })}
-            onOpenChat={(c) => {
-              setIncomingBanner(null);
-              setActiveChat(c);
-            }}
-            onOpenSettings={() => setShowSettings(true)}
+            setUser={updateSessionUser}
+            onOpenChat={openChatFromHome}
+            onOpenSettings={openSettings}
             activeChatId={activeChat?.id}
             watchRequest={watchRequest}
-            onWatchRequestHandled={() => setWatchRequest(null)}
+            onWatchRequestHandled={handleWatchRequestHandled}
             registerBackHandler={registerHomeBack}
           />
         </SafeAreaView>

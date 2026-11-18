@@ -67,6 +67,8 @@ function thumbnailUrlFor(item) {
   return vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : '';
 }
 
+const keyExtractor = (item) => item.videoId;
+
 // react-native-video type -> Media3 content type. Progressive URLs are inferred
 // from the URL itself; manifests need an explicit extension.
 function mediaType(kind) {
@@ -820,7 +822,7 @@ const loadMore = useCallback(async () => {
 
   const activeItem = videos[activeIdx];
 
-  const renderItem = ({ item, index }) => {
+  const renderItem = useCallback(({ item, index }) => {
     const isActive = index === activeIdx;
     const inWindow = Math.abs(index - activeIdx) <= 1;
     const res = resolved.get(item.videoId);
@@ -830,7 +832,6 @@ const loadMore = useCallback(async () => {
     const mt = hasVideo ? mediaType(res.source.kind) : undefined;
     return (
       <View style={styles.videoContainer}>
-        <Image source={{ uri: thumb }} style={styles.thumbImage} resizeMode="cover" />
         {hasVideo ? (
           <Video
             key={item.videoId}
@@ -851,7 +852,7 @@ const loadMore = useCallback(async () => {
         </Animated.View>
       </View>
     );
-  };
+  }, [activeIdx, activePaused, muted, resolved, ensureThumbAnim, fadeOutThumb, handleVideoError]);
 
   return (
     <View
@@ -863,7 +864,7 @@ const loadMore = useCallback(async () => {
       <FlatList
         ref={flatListRef}
         data={videos}
-        keyExtractor={(item) => item.videoId}
+        keyExtractor={keyExtractor}
         snapToInterval={ITEM_HEIGHT}
         snapToAlignment="start"
         decelerationRate="fast"
@@ -876,8 +877,9 @@ const loadMore = useCallback(async () => {
         viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairs}
         getItemLayout={(data, index) => ({ length: ITEM_HEIGHT, offset: ITEM_HEIGHT * index, index })}
         initialNumToRender={2}
-        maxToRenderPerBatch={3}
-        windowSize={7}
+        maxToRenderPerBatch={2}
+        updateCellsBatchingPeriod={30}
+        windowSize={3}
         removeClippedSubviews={false}
         renderItem={renderItem}
         ListEmptyComponent={

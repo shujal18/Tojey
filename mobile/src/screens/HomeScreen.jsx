@@ -1,6 +1,6 @@
-import React, { useEffect, useState, memo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, memo } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, FlatList, Image, Modal, Platform, ActivityIndicator,
+  View, Text, TouchableOpacity, TextInput, StyleSheet, FlatList, Image, Modal, Platform, ActivityIndicator,
 } from 'react-native';
 import { fetchUsers } from '../services/auth';
 import { loadUsers, saveUsers, loadConversations, saveConversations, clearConversationCache } from '../services/cache';
@@ -17,11 +17,11 @@ import YoutubeHomeScreen from './YoutubeHomeScreen';
 import DownloadsScreen from './DownloadsScreen';
 import BottomTabBar from '../components/BottomTabBar';
 
-export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled }) {
+export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled, registerBackHandler }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   useEffect(() => {
-    if (!registerBackHandler) return undefined;
+    if (typeof registerBackHandler !== 'function') return undefined;
     registerBackHandler(() => {
       if (tab !== 'chats') {
         setTab('chats');
@@ -29,7 +29,9 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
       }
       return false;
     });
-    return () => registerBackHandler(null);
+    return () => {
+      if (typeof registerBackHandler === 'function') registerBackHandler(null);
+    };
   }, [tab, registerBackHandler]);
 
   const [pendingWatch, setPendingWatch] = useState(null);
@@ -181,9 +183,8 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     setClearTarget(null);
   };
 
-  const openChat = (contact) => {
+  const openChat = useCallback((contact) => {
     setUnread((u) => { const n = { ...u }; delete n[contact.id]; return n; });
-    // Ensure contact has all required properties for ChatRoomScreen
     const normalizedContact = {
       id: contact.id,
       username: contact.username,
@@ -194,7 +195,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
       bio: contact.bio || '',
     };
     onOpenChat(normalizedContact);
-  };
+  }, [onOpenChat]);
 
   const sendNudge = (contact) => {
     if (socket && contact) {
@@ -281,14 +282,68 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
 
   // Long-press on a conversation: open the action modal. The Nudge option is only
   // offered when the "Nudge Vibration" setting is enabled (fresh read at open time).
-  const openChatActions = async (contact) => {
+  const openChatActions = useCallback(async (contact) => {
     setNudgeVisible(await getNudgeVibrationEnabled());
     setActionTarget(contact);
-  };
+  }, []);
 
-  const filtered = users.filter(
-    (u) => !query || u.display_name.toLowerCase().includes(query.toLowerCase())
-  );
+  const chatRows = useMemo(() => {
+    const byId = new Map(users.map((u) => [String(u.id), u]));
+    const conversationIds = new Set(conversations.map((c) => String(c.other?.id)));
+    const rows = [];
+    const makeRow = (source, preview) => {
+      const id = source?.id;
+      if (id == null) return null;
+      const online = presence[id]?.isOnline ?? source.isOnline ?? source.is_online ?? source.online ?? false;
+      const lastSeen = presence[id]?.lastSeen ?? source.lastSeen ?? source.last_seen ?? null;
+      return {
+        id: String(id),
+        contact: {
+          id,
+          username: source.username,
+          display_name: source.display_name,
+          profile_pic_url: source.profile_pic_url || '',
+          online,
+          last_seen: lastSeen,
+          bio: source.bio || '',
+        },
+        preview: preview || null,
+        online,
+        lastSeen,
+        inCall: !!onCall[id],
+        unread: unread[id] || 0,
+      };
+    };
+    conversations.forEach((c) => {
+      const base = byId.get(String(c.other?.id)) || c.other || {};
+      const row = makeRow(base, c.lastMsg);
+      if (row) rows.push(row);
+    });
+    users.forEach((u) => {
+      if (conversationIds.has(String(u.id))) return;
+      const row = makeRow(u, null);
+      if (row) rows.push(row);
+    });
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) =>
+      `${r.contact.display_name || ''} ${r.contact.username || ''} ${r.preview?.content || ''}`.toLowerCase().includes(q)
+    );
+  }, [conversations, users, presence, onCall, unread, query]);
+
+  const renderChatRow = useCallback(({ item }) => (
+    <ConversationRow
+      contact={item.contact}
+      preview={item.preview}
+      isOnline={item.online}
+      lastSeen={item.lastSeen}
+      inCall={item.inCall}
+      unread={item.unread}
+      theme={theme}
+      onPress={() => openChat(item.contact)}
+      onLongPress={() => openChatActions(item.contact)}
+    />
+  ), [openChat, openChatActions, theme]);
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
@@ -319,75 +374,16 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
             />
           </View>
 
-          {conversations.length === 0 && users.length > 0 ? (
+          {chatRows.length > 0 ? (
             <FlatList
-              data={users}
-              keyExtractor={(item) => String(item.id)}
-              initialNumToRender={15}
+              data={chatRows}
+              keyExtractor={(item) => item.id}
+              initialNumToRender={20}
               maxToRenderPerBatch={10}
-              windowSize={11}
+              updateCellsBatchingPeriod={25}
+              windowSize={9}
               removeClippedSubviews={Platform.OS === 'android'}
-              renderItem={({ item }) => {
-                const contact = {
-                  id: item.id,
-                  username: item.username,
-                  display_name: item.display_name,
-                  profile_pic_url: item.profile_pic_url || '',
-                  online: presence[item.id]?.isOnline ?? item.is_online ?? false,
-                  last_seen: presence[item.id]?.lastSeen ?? item.last_seen ?? null,
-                  bio: item.bio || '',
-                };
-                return (
-                  <ConversationRow
-                    contact={contact}
-                    isOnline={contact.online}
-                    lastSeen={contact.last_seen}
-                    inCall={!!onCall[item.id]}
-                    unread={unread[item.id]}
-                    theme={theme}
-                    onPress={() => openChat(contact)}
-                    onLongPress={() => openChatActions(contact)}
-                  />
-                );
-              }}
-              contentContainerStyle={styles.list}
-            />
-          ) : conversations.length > 0 ? (
-            <FlatList
-              data={[
-                ...conversations,
-                ...users.filter((u) => !conversations.find((c) => c.other.id === u.id)),
-              ]}
-              keyExtractor={(item, idx) => `${item.other?.id || item.id}-${idx}`}
-              initialNumToRender={15}
-              maxToRenderPerBatch={10}
-              windowSize={11}
-              removeClippedSubviews={Platform.OS === 'android'}
-              renderItem={({ item }) => {
-                const contact = item.other || item;
-                const normalizedContact = {
-                  id: contact.id,
-                  username: contact.username,
-                  display_name: contact.display_name,
-                  profile_pic_url: contact.profile_pic_url || '',
-                  online: presence[contact.id]?.isOnline ?? contact.online ?? contact.is_online ?? false,
-                  last_seen: presence[contact.id]?.lastSeen ?? contact.last_seen ?? contact.lastSeen ?? null,
-                  bio: contact.bio || '',
-                };
-                return (
-                  <ConversationRow
-                    contact={normalizedContact}
-                    preview={item.lastMsg}
-                    isOnline={normalizedContact.online}
-                    lastSeen={normalizedContact.last_seen}
-                    inCall={!!onCall[normalizedContact.id]}
-                    unread={unread[normalizedContact.id]}
-                    theme={theme}
-                    onPress={() => openChat(normalizedContact)}
-                    onLongPress={() => openChatActions(normalizedContact)}
-                  />
-                );
-              }}
+              renderItem={renderChatRow}
               contentContainerStyle={styles.list}
             />
           ) : (

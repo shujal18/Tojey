@@ -1,5 +1,5 @@
 // Shared YouTube cards used across Home / Search / Channel / Playlist / Library.
-import React from 'react';
+import React, { memo } from 'react';
 import { View, Text, TouchableOpacity, Image, StyleSheet } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from './AppIcon';
@@ -18,7 +18,7 @@ export function thumbOf(item) {
 }
 
 // Grid video card (2-up) with optional download button + progress bar.
-export function VideoCard({ item, width, dlMap = {}, onPress, onDownload, showChannel = true }) {
+function VideoCardFn({ item, width, dlMap = {}, onPress, onDownload, showChannel = true }) {
   const { theme } = useTheme();
   const dl = dlMap[`${item.videoId}:video`];
   return (
@@ -70,8 +70,10 @@ export function VideoCard({ item, width, dlMap = {}, onPress, onDownload, showCh
   );
 }
 
+export const VideoCard = memo(VideoCardFn);
+
 // Horizontal row item (related, playlist, library, channel tabs).
-export function ItemRow({ item, dlMap = {}, onPress, onDownload, index, trailing }) {
+function ItemRowFn({ item, dlMap = {}, onPress, onDownload, index, trailing }) {
   const { theme } = useTheme();
   const dl = dlMap[`${item.videoId}:video`];
   return (
@@ -123,8 +125,10 @@ export function ItemRow({ item, dlMap = {}, onPress, onDownload, index, trailing
   );
 }
 
+export const ItemRow = memo(ItemRowFn);
+
 // Channel row (search results / subscriptions / related).
-export function ChannelRow({ item, onPress }) {
+function ChannelRowFn({ item, onPress }) {
   const { theme } = useTheme();
   return (
     <TouchableOpacity style={styles.channelRow} activeOpacity={0.8} onPress={() => onPress && onPress(item)}>
@@ -146,6 +150,8 @@ export function ChannelRow({ item, onPress }) {
     </TouchableOpacity>
   );
 }
+
+export const ChannelRow = memo(ChannelRowFn);
 
 const styles = StyleSheet.create({
   card: { marginBottom: 12 },

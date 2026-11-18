@@ -4,7 +4,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, Image, StyleSheet, ActivityIndicator,
-  useWindowDimensions,
+  Platform, useWindowDimensions,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -144,7 +144,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     if (refreshTick > 0) fetchPage(category, null, { replace: true, refresh: true });
   }, [refreshTick]);
 
-  const subIdsKey = (snap?.subs || []).map((s) => s.channelId).filter(Boolean).sort().join(',');
+  const subIdsKey = useMemo(
+    () => (snap?.subs || []).map((s) => s.channelId).filter(Boolean).sort().join(','),
+    [snap]
+  );
 
   useEffect(() => {
     if (!subIdsKey) {
@@ -159,30 +162,30 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     return () => { active = false; };
   }, [subIdsKey, authHeaders, refreshTick]);
 
-  const loadMore = () => {
+  const loadMore = useCallback(() => {
     if (!hasMore || loadingMore || loading) return;
     fetchPage(category, nextPageTokenRef.current, {});
-  };
+  }, [hasMore, loadingMore, loading, category, fetchPage]);
 
-  const startDownload = (v, opts) => {
+  const startDownload = useCallback((v, opts) => {
     console.log('[Download] enqueue', v.videoId);
     enqueue(v, opts).catch(() => {});
-  };
+  }, []);
 
-  const openChannel = (item) => {
+  const openChannel = useCallback((item) => {
     setChannelRoute(item && (item.channelId || item.channelTitle) ? {
       channelId: item.channelId || '',
       channelTitle: item.channelTitle || item.title || '',
       avatar: item.avatar || item.thumbnailUrl || '',
     } : item);
     setView('channel');
-  };
+  }, []);
 
-  const openPlaylist = (pl) => {
+  const openPlaylist = useCallback((pl) => {
     const route = typeof pl === 'string' ? { playlistId: pl } : pl;
     setPlaylistRoute(route);
     setView('playlist');
-  };
+  }, []);
 
   // --- sub-screens ---------------------------------------------------------
   const sub =
@@ -236,8 +239,105 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   // Dimensions.get() snapshot stayed at the launch size.
   const { width } = useWindowDimensions();
   const cardW = (width - 16 * 2 - 14) / 2;
-  const historyArr = snap?.history || [];
-  const subsArr = snap?.subs || [];
+  const historyArr = useMemo(() => (snap?.history || []).slice(0, 10), [snap]);
+  const subsArr = useMemo(() => snap?.subs || [], [snap]);
+
+  const renderVideoCard = useCallback(({ item }) => (
+    <VideoCard item={item} width={cardW} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} />
+  ), [cardW, dlMap, startDownload]);
+
+  const renderHistoryItem = useCallback(({ item }) => (
+    <TouchableOpacity style={{ width: 140 }} activeOpacity={0.85} onPress={() => setWatch(item)}>
+      <Image source={{ uri: thumbUrl(item) }} style={styles.continueThumb} resizeMode="cover" />
+      <Text style={{ color: theme.text, fontSize: fs(12), fontWeight: '600', marginTop: 4 }} numberOfLines={2}>{item.title}</Text>
+    </TouchableOpacity>
+  ), [theme.text]);
+
+  const renderSubscription = useCallback(({ item }) => (
+    <TouchableOpacity style={{ width: 64, alignItems: 'center' }} activeOpacity={0.85} onPress={() => openChannel(item)}>
+      {item.avatar ? (
+        <Image source={{ uri: item.avatar }} style={styles.subAvatar} resizeMode="cover" />
+      ) : (
+        <View style={[styles.subAvatar, { backgroundColor: theme.inputBg, alignItems: 'center', justifyContent: 'center' }]}>
+          <Icon name="person" size={22} color={theme.textSecondary} />
+        </View>
+      )}
+      <Text style={{ color: theme.textSecondary, fontSize: fs(10), marginTop: 4, textAlign: 'center' }} numberOfLines={2}>
+        {item.channelTitle || item.title}
+      </Text>
+    </TouchableOpacity>
+  ), [openChannel, theme.inputBg, theme.textSecondary]);
+
+  const renderSubFeedItem = useCallback(({ item }) => (
+    <VideoCard item={item} width={200} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} showChannel />
+  ), [dlMap, startDownload]);
+
+  const listHeader = useMemo(() => (
+    <View>
+      {historyArr.length > 0 && (
+        <View style={styles.strip}>
+          <Text style={[styles.stripTitle, { color: theme.text }]}>Continue watching</Text>
+          <FlatList
+            data={historyArr}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyExtractor={(h) => h.videoId}
+            contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
+            renderItem={renderHistoryItem}
+          />
+        </View>
+      )}
+
+      {subsArr.length > 0 && (
+        <View style={styles.strip}>
+          <Text style={[styles.stripTitle, { color: theme.text }]}>Subscriptions</Text>
+          <FlatList
+            data={subsArr}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyExtractor={(s) => s.channelId}
+            contentContainerStyle={{ paddingHorizontal: 16, gap: 14 }}
+            renderItem={renderSubscription}
+          />
+        </View>
+      )}
+
+      {subFeed.length > 0 && (
+        <View style={styles.strip}>
+          <Text style={[styles.stripTitle, { color: theme.text }]}>New from your subscriptions</Text>
+          <FlatList
+            data={subFeed}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyExtractor={(v) => v.videoId}
+            contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
+            renderItem={renderSubFeedItem}
+          />
+        </View>
+      )}
+
+      {shortsStrip.length > 0 && (
+        <TouchableOpacity onPress={onChangeToShorts} activeOpacity={0.85}>
+          <View style={[styles.shortsHeaderRow, { marginTop: 6 }]}>
+            <Icon name="play-circle" size={18} color={theme.primary} />
+            <Text style={[styles.shortsHeader, { color: theme.text }]}>Shorts</Text>
+            <Text style={{ color: theme.textSecondary, fontSize: fs(12) }}>→ watch full screen</Text>
+          </View>
+          <View style={styles.shortsRow}>
+            {shortsStrip.map((s) => (
+              <Image key={s.videoId} source={{ uri: thumbUrl(s) }} style={styles.shortsThumb} resizeMode="cover" />
+            ))}
+          </View>
+        </TouchableOpacity>
+      )}
+      <Text style={[styles.sectionTitle, { color: theme.text }]}>
+        {(() => {
+          const label = categories.find((c) => c.id === category)?.label || 'Recommended for you';
+          return label === 'Recommended for you' ? label : `${label} videos`;
+        })()}
+      </Text>
+    </View>
+  ), [historyArr, subsArr, subFeed, shortsStrip, theme, onChangeToShorts, categories, category, renderHistoryItem, renderSubscription, renderSubFeedItem]);
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
@@ -284,97 +384,15 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           keyExtractor={(v) => v.videoId}
           numColumns={2}
           columnWrapperStyle={styles.row}
-          renderItem={({ item }) => (
-            <VideoCard item={item} width={cardW} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} />
-          )}
+          renderItem={renderVideoCard}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={30}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS === 'android'}
           onEndReached={loadMore}
           onEndReachedThreshold={0.5}
-          ListHeaderComponent={
-            <View>
-              {historyArr.length > 0 && (
-                <View style={styles.strip}>
-                  <Text style={[styles.stripTitle, { color: theme.text }]}>Continue watching</Text>
-                  <FlatList
-                    data={historyArr.slice(0, 10)}
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    keyExtractor={(h) => h.videoId}
-                    contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
-                    renderItem={({ item }) => (
-                      <TouchableOpacity style={{ width: 140 }} activeOpacity={0.85} onPress={() => setWatch(item)}>
-                        <Image source={{ uri: thumbUrl(item) }} style={styles.continueThumb} resizeMode="cover" />
-                        <Text style={{ color: theme.text, fontSize: fs(12), fontWeight: '600', marginTop: 4 }} numberOfLines={2}>{item.title}</Text>
-                      </TouchableOpacity>
-                    )}
-                  />
-                </View>
-              )}
-
-              {subsArr.length > 0 && (
-                <View style={styles.strip}>
-                  <Text style={[styles.stripTitle, { color: theme.text }]}>Subscriptions</Text>
-                  <FlatList
-                    data={subsArr}
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    keyExtractor={(s) => s.channelId}
-                    contentContainerStyle={{ paddingHorizontal: 16, gap: 14 }}
-                    renderItem={({ item }) => (
-                      <TouchableOpacity style={{ width: 64, alignItems: 'center' }} activeOpacity={0.85} onPress={() => openChannel(item)}>
-                        {item.avatar ? (
-                          <Image source={{ uri: item.avatar }} style={styles.subAvatar} resizeMode="cover" />
-                        ) : (
-                          <View style={[styles.subAvatar, { backgroundColor: theme.inputBg, alignItems: 'center', justifyContent: 'center' }]}>
-                            <Icon name="person" size={22} color={theme.textSecondary} />
-                          </View>
-                        )}
-                        <Text style={{ color: theme.textSecondary, fontSize: fs(10), marginTop: 4, textAlign: 'center' }} numberOfLines={2}>
-                          {item.channelTitle || item.title}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                  />
-                </View>
-              )}
-
-              {subFeed.length > 0 && (
-                <View style={styles.strip}>
-                  <Text style={[styles.stripTitle, { color: theme.text }]}>New from your subscriptions</Text>
-                  <FlatList
-                    data={subFeed}
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    keyExtractor={(v) => v.videoId}
-                    contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
-                    renderItem={({ item }) => (
-                      <VideoCard item={item} width={200} dlMap={dlMap} onPress={setWatch} onDownload={startDownload} showChannel />
-                    )}
-                  />
-                </View>
-              )}
-
-              {shortsStrip.length > 0 && (
-                <TouchableOpacity onPress={onChangeToShorts} activeOpacity={0.85}>
-                  <View style={[styles.shortsHeaderRow, { marginTop: 6 }]}>
-                    <Icon name="play-circle" size={18} color={theme.primary} />
-                    <Text style={[styles.shortsHeader, { color: theme.text }]}>Shorts</Text>
-                    <Text style={{ color: theme.textSecondary, fontSize: fs(12) }}>→ watch full screen</Text>
-                  </View>
-                  <View style={styles.shortsRow}>
-                    {shortsStrip.map((s) => (
-                      <Image key={s.videoId} source={{ uri: thumbUrl(s) }} style={styles.shortsThumb} resizeMode="cover" />
-                    ))}
-                  </View>
-                </TouchableOpacity>
-              )}
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>
-                {(() => {
-                  const label = categories.find((c) => c.id === category)?.label || 'Recommended for you';
-                  return label === 'Recommended for you' ? label : `${label} videos`;
-                })()}
-              </Text>
-            </View>
-          }
+          ListHeaderComponent={listHeader}
           ListEmptyComponent={
             !loading ? (
               <Text style={{ color: theme.textSecondary, textAlign: 'center', marginTop: 30 }}>No videos yet.</Text>
@@ -384,7 +402,6 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
             loadingMore ? <ActivityIndicator color={theme.primary} style={{ marginVertical: 16 }} /> : null
           }
           contentContainerStyle={{ paddingBottom: 12 }}
-          removeClippedSubviews
           showsVerticalScrollIndicator={false}
         />
       )}

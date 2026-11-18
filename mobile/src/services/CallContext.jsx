@@ -1,5 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { DeviceEventEmitter, Dimensions, PanResponder, StyleSheet, View } from 'react-native';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, DeviceEventEmitter, Dimensions, PanResponder, StyleSheet, View } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import VideoCallView from '../components/VideoCallView';
 import { ensureVideoCallPermission } from './permissions';
@@ -22,8 +22,10 @@ const FLOAT_H = 208;
 const FLOAT_MARGIN = 10;
 
 function FloatingCall({ onExpand, children }) {
-  const [pos, setPos] = useState({ x: SCREEN_W - FLOAT_W - FLOAT_MARGIN, y: 88 });
-  const baseRef = useRef({ x: 0, y: 0 });
+  const initial = useRef({ x: SCREEN_W - FLOAT_W - FLOAT_MARGIN, y: 88 }).current;
+  const pos = useRef(new Animated.ValueXY(initial)).current;
+  const currentRef = useRef(initial);
+  const baseRef = useRef(initial);
   const movedRef = useRef(false);
   const maxX = Math.max(0, SCREEN_W - FLOAT_W - FLOAT_MARGIN);
   const maxY = Math.max(0, SCREEN_H - FLOAT_H - FLOAT_MARGIN);
@@ -32,30 +34,36 @@ function FloatingCall({ onExpand, children }) {
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: () => {
-      baseRef.current = pos;
+      baseRef.current = currentRef.current;
       movedRef.current = false;
     },
     onPanResponderMove: (_, g) => {
       if (Math.abs(g.dx) + Math.abs(g.dy) > 4) movedRef.current = true;
-      setPos({
+      const next = {
         x: clamp(baseRef.current.x + g.dx, maxX),
         y: clamp(baseRef.current.y + g.dy, maxY),
-      });
+      };
+      currentRef.current = next;
+      pos.setValue(next);
     },
     onPanResponderRelease: (_, g) => {
       if (!movedRef.current && Math.abs(g.dx) + Math.abs(g.dy) <= 6) onExpand();
     },
   })).current;
   return (
-    <View
-      style={[styles.floating, { left: pos.x, top: pos.y, width: FLOAT_W, height: FLOAT_H }]}
+    <Animated.View
+      style={[
+        styles.floating,
+        { left: 0, top: 0, width: FLOAT_W, height: FLOAT_H },
+        pos.getTranslateTransform(),
+      ]}
       accessibilityLabel="Floating call"
     >
       <View {...pan.panHandlers} style={styles.dragHandle}>
         <View style={styles.grabber} />
       </View>
       <View style={styles.floatBody}>{children}</View>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -395,6 +403,7 @@ export function CallProvider({ socket, currentUser, children }) {
     };
   }, [socket, setCall, emitVideo, pushCallMessage, teardown]);
 
+  const togglePip = useCallback(() => setMainIsLocal((v) => !v), []);
   const peerName = peer?.display_name || peer?.username || 'Unknown';
   const peerAvatar = peer?.profile_pic_url || '';
   const activeLocalStream = screenSharing && screenStream ? screenStream : localStream;
@@ -420,30 +429,32 @@ export function CallProvider({ socket, currentUser, children }) {
     onToggleMic: toggleMic,
     onToggleRemoteAudio: toggleRemoteAudio,
     onToggleScreenShare: toggleScreenShare,
-    onSwapPip: () => setMainIsLocal((v) => !v),
-    onTapMain: () => setMainIsLocal((v) => !v),
+    onSwapPip: togglePip,
+    onTapMain: togglePip,
   };
 
-  const value = {
+  const expandCall = useCallback(() => setCallLayout('full'), []);
+  const minimizeCall = useCallback(() => setCallLayout('floating'), []);
+  const value = useMemo(() => ({
     callStatus,
     startCall,
     headerCallPress,
     endCall,
-    expandCall: () => setCallLayout('full'),
-    minimizeCall: () => setCallLayout('floating'),
-  };
+    expandCall,
+    minimizeCall,
+  }), [callStatus, startCall, headerCallPress, endCall, expandCall, minimizeCall]);
 
   return (
     <CallContext.Provider value={value}>
       {children}
       {callStatus !== 'none' && callLayout === 'full' && (
         <View style={styles.fullOverlay} pointerEvents="auto">
-          <VideoCallView {...callProps} onMinimize={() => setCallLayout('floating')} />
+          <VideoCallView {...callProps} onMinimize={minimizeCall} />
         </View>
       )}
       {callStatus !== 'none' && callStatus !== 'incoming' && callLayout === 'floating' && (
-        <FloatingCall onExpand={() => setCallLayout('full')}>
-          <VideoCallView {...callProps} floating compact onExpand={() => setCallLayout('full')} />
+        <FloatingCall onExpand={expandCall}>
+          <VideoCallView {...callProps} floating compact onExpand={expandCall} />
         </FloatingCall>
       )}
     </CallContext.Provider>

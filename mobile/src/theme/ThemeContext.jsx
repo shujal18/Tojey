@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useCallback, useContext, useState, useEffect, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const CHAT_COLORS = [
@@ -95,15 +95,15 @@ export function ThemeProvider({ children }) {
     })();
   }, []);
 
-  const changeMode = (m) => {
+  const changeMode = useCallback((m) => {
     setMode(m);
     AsyncStorage.setItem(THEME_KEY, m).catch(() => {});
-  };
+  }, []);
 
-  const changeChatColor = (id) => {
+  const changeChatColor = useCallback((id) => {
     setChatColorId(id);
     AsyncStorage.setItem(CHAT_COLOR_KEY, id).catch(() => {});
-  };
+  }, []);
 
   const chatColor = CHAT_COLORS.find((c) => c.id === chatColorId) || CHAT_COLORS[0];
 
@@ -118,8 +118,12 @@ export function ThemeProvider({ children }) {
     };
   }, [mode, chatColor]);
 
+  const value = useMemo(() => ({
+    theme, mode, setMode: changeMode, chatColorId, setChatColor: changeChatColor, booted,
+  }), [theme, mode, changeMode, chatColorId, changeChatColor, booted]);
+
   return (
-    <ThemeContext.Provider value={{ theme, mode, setMode: changeMode, chatColorId, setChatColor: changeChatColor, booted }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );
