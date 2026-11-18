@@ -7,7 +7,7 @@
     "node": "18"
   },
   "scripts": {
-    "postinstall": "npm --prefix frontend install && npm --prefix frontend run build",
+    "postinstall": "node scripts/patch-react-native-webrtc-fps.js && npm --prefix frontend install && npm --prefix frontend run build",
     "install:all": "npm install && npm --prefix backend install",
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",

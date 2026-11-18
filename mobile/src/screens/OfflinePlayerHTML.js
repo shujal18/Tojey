@@ -72,7 +72,9 @@ export const OFFLINE_PLAYER_HTML = `<!DOCTYPE html>
       function emit(event) { post('ytPlayerEvent', { event: event, videoId: location.hash.slice(1) || null }); }
 
       function applyVolume() {
-        if (audio) audio.volume = wantedMuted ? 0 : 1;
+        var v = wantedMuted ? 0 : 1;
+        if (audio) { audio.volume = v; audio.muted = !!wantedMuted; }
+        if (video) { video.volume = v; video.muted = !!wantedMuted; }
       }
       function playPair() {
         if (stopped) return;

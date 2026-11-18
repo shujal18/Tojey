@@ -430,9 +430,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
           const fresh = cached.filter((v) => v && v.videoId &&
             !seenSetRef.current.has(v.videoId) &&
             !failedVideoIdsRef.current.has(v.videoId));
-          if (fresh.length) {
-            videosRef.current = fresh;
-            setVideos(fresh);
+          const initial = (fresh.length ? fresh : cached.filter((v) => v && v.videoId)).slice(0, MAX_LIST_LENGTH);
+          if (initial.length) {
+            videosRef.current = initial;
+            setVideos(initial);
+            setLoading(false);
           }
         }
       }
@@ -510,8 +512,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         scrollOffsetYRef.current = 0;
         if (flatListRef.current) flatListRef.current.scrollToOffset({ offset: 0, animated: false });
         playerStateRef.current = 'idle';
-        primeWindowRef.current(finalVideos.length ? 0 : -1);
-        if (!refresh && finalVideos.length) saveFeedCache(cat, finalVideos.slice(0, 20));
+        if (primeWindowRef.current) primeWindowRef.current(finalVideos.length ? 0 : -1);
+        if (finalVideos.length) saveFeedCache(cat, finalVideos.slice(0, 20));
         console.log('[Reels] Feed ready:', cat, finalVideos.length);
       } else {
         setVideos((prev) => {
@@ -661,51 +663,20 @@ const loadMore = useCallback(async () => {
     if (index < 0 || index >= list.length) return;
     activeIndexRef.current = index;
     pendingSkipRef.current = false;
-    scrollOffsetYRef.current = index * ITEM_HEIGHT;
     setActiveIdx(index);
     setActivePaused(false);
-  }, []);
-
-  useEffect(() => { settleToIndexRef.current = settleToIndex; }, [settleToIndex]);
-
-  const onViewableItemsChanged = useCallback(({ viewableItems }) => {
-    if (!viewableItems || !viewableItems.length) return;
-    const newIndex = viewableItems[0].index;
-    if (newIndex == null) return;
-    if (newIndex >= videosRef.current.length - 3 && loadMoreRef.current) {
+    if (index >= list.length - 3 && loadMoreRef.current) {
       loadMoreRef.current();
     }
   }, []);
+
+  useEffect(() => { settleToIndexRef.current = settleToIndex; }, [settleToIndex]);
 
   const onMomentumScrollEnd = useCallback((event) => {
     const y = event.nativeEvent.contentOffset.y;
     const settledIndex = Math.max(0, Math.min(videosRef.current.length - 1, Math.round(y / ITEM_HEIGHT)));
     settleToIndex(settledIndex);
   }, [settleToIndex]);
-
-  const onScroll = useCallback((event) => {
-    scrollOffsetYRef.current = event.nativeEvent.contentOffset.y;
-  }, []);
-
-  const onScrollEndDrag = useCallback(() => {
-    setTimeout(() => {
-      if (!isMountedRef.current) return;
-      const y = scrollOffsetYRef.current;
-      const settledIndex = Math.max(0, Math.min(videosRef.current.length - 1, Math.round(y / ITEM_HEIGHT)));
-      if (settledIndex !== activeIndexRef.current && Math.abs(y - settledIndex * ITEM_HEIGHT) < 8) {
-        settleToIndex(settledIndex);
-      }
-    }, 320);
-  }, [settleToIndex]);
-
-  const viewabilityConfig = useMemo(() => ({
-    itemVisiblePercentThreshold: 75,
-    minimumViewTime: 100,
-  }), []);
-
-  const viewabilityConfigCallbackPairs = useMemo(() => [
-    { viewabilityConfig, onViewableItemsChanged },
-  ], [viewabilityConfig, onViewableItemsChanged]);
 
   // ---- tap to pause / resume --------------------------------------------------
 
@@ -795,31 +766,6 @@ const loadMore = useCallback(async () => {
 
   // ---- render ------------------------------------------------------------------
 
-  if (loading && !videos.length) {
-    return (
-      <View style={[styles.container, { backgroundColor: theme.background }]}>
-        <ActivityIndicator size="large" color={theme.primary} />
-      </View>
-    );
-  }
-
-  if (error && !videos.length) {
-    return (
-      <View style={[styles.container, { backgroundColor: theme.background }]}>
-        <View style={styles.errorContainer}>
-          <Icon name="alert-circle" size={48} color={theme.danger} />
-          <Text style={[styles.errorText, { color: theme.text }]}>{error}</Text>
-          <TouchableOpacity
-            onPress={() => fetchFeedRef.current && fetchFeedRef.current(currentCategoryRef.current, { refresh: true })}
-            style={[styles.retryBtn, { backgroundColor: theme.primary }]}
-          >
-            <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
   const activeItem = videos[activeIdx];
 
   const renderItem = useCallback(({ item, index }) => {
@@ -854,6 +800,31 @@ const loadMore = useCallback(async () => {
     );
   }, [activeIdx, activePaused, muted, resolved, ensureThumbAnim, fadeOutThumb, handleVideoError]);
 
+  if (loading && !videos.length) {
+    return (
+      <View style={[styles.container, { backgroundColor: theme.background }]}>
+        <ActivityIndicator size="large" color={theme.primary} />
+      </View>
+    );
+  }
+
+  if (error && !videos.length) {
+    return (
+      <View style={[styles.container, { backgroundColor: theme.background }]}>
+        <View style={styles.errorContainer}>
+          <Icon name="alert-circle" size={48} color={theme.danger} />
+          <Text style={[styles.errorText, { color: theme.text }]}>{error}</Text>
+          <TouchableOpacity
+            onPress={() => fetchFeedRef.current && fetchFeedRef.current(currentCategoryRef.current, { refresh: true })}
+            style={[styles.retryBtn, { backgroundColor: theme.primary }]}
+          >
+            <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View
       style={[styles.container, { backgroundColor: '#000' }]}
@@ -870,11 +841,7 @@ const loadMore = useCallback(async () => {
         decelerationRate="fast"
         disableIntervalMomentum
         showsVerticalScrollIndicator={false}
-        onScroll={onScroll}
-        scrollEventThrottle={16}
         onMomentumScrollEnd={onMomentumScrollEnd}
-        onScrollEndDrag={onScrollEndDrag}
-        viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairs}
         getItemLayout={(data, index) => ({ length: ITEM_HEIGHT, offset: ITEM_HEIGHT * index, index })}
         initialNumToRender={2}
         maxToRenderPerBatch={2}

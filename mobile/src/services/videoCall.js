@@ -22,15 +22,33 @@ const LOCAL_CONSTRAINTS = {
   },
 };
 
-// Encoder profiles tuned for smooth motion. Both force the WebRTC CPU/network
-// adapter to keep the frame rate and lower the resolution instead (so calls and
-// screen shares stay fluid on weak devices instead of dropping to a slideshow).
-const CAMERA_ENCODING = { maxBitrate: 2000000, maxFramerate: 30 };
-const SCREEN_ENCODING = { maxBitrate: 5000000, maxFramerate: 60 };
+// Encoder profiles tuned for smooth motion. Camera keeps its framerate while
+// screen sharing favours a balance of resolution and framerate at a higher bitrate.
+const CAMERA_ENCODING = {
+  maxBitrate: 2000000,
+  maxFramerate: 30,
+  scaleResolutionDownBy: 1,
+  degradationPreference: 'MAINTAIN_FRAMERATE',
+};
+const SCREEN_ENCODING = {
+  maxBitrate: 8000000,
+  maxFramerate: 60,
+  scaleResolutionDownBy: 1.35,
+  degradationPreference: 'BALANCED',
+};
+const DISPLAY_CONSTRAINTS = {
+  audio: true,
+  video: {
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
+    frameRate: { ideal: 60, max: 60 },
+  },
+};
 
 let pc = null;
 let localStream = null;
 let screenStream = null;
+let screenAudioTrack = null;
 let remoteStream = null;
 let pendingCandidates = [];
 let addedCandidates = new Set();
@@ -38,6 +56,7 @@ let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
 let videoFacing = 'user';
+let screenShareOptions = { internalAudio: false, allowControl: false };
 
 // Incoming-call handoff for WhatsApp-style auto-open: App.jsx catches the
 // invite globally and calls storeInvite() before opening the chat; the mounted
@@ -71,13 +90,25 @@ export function getPeer() {
   return pc;
 }
 
+function applyRemoteAudioToStream(stream) {
+  if (!stream || typeof stream.getAudioTracks !== 'function') return;
+  const tracks = stream.getAudioTracks() || [];
+  tracks.forEach((t) => {
+    try {
+      if (typeof t._setVolume === 'function') t._setVolume(remoteAudioEnabled ? 1 : 0);
+      else t.enabled = remoteAudioEnabled;
+    } catch (e) {
+      try { t.enabled = remoteAudioEnabled; } catch (e2) {}
+    }
+  });
+}
+
 export function applyCallbacks(cb) {
   callbacks = cb || {};
   const origRemote = callbacks.onRemoteStream;
   callbacks.onRemoteStream = (stream) => {
     remoteStream = stream || remoteStream;
-    // A brand-new remote stream (new call / renegotiation) defaults to audible.
-    setRemoteAudioEnabled(true);
+    applyRemoteAudioToStream(remoteStream);
     if (typeof origRemote === 'function') origRemote(stream);
   };
 }
@@ -101,16 +132,12 @@ export function isMicMuted() {
 
 /**
  * Mutes/unmutes LOCAL playback of the remote participant's incoming audio.
- * This only flips `enabled` on the RECEIVED audio track, which is purely local:
- * the other user keeps transmitting and their microphone state is untouched,
- * this device simply stops playing their audio. No signaling / renegotiation.
+ * Uses the received track's local volume control so the peer keeps transmitting
+ * and their microphone state is untouched. No signaling / renegotiation.
  */
 export function setRemoteAudioEnabled(enabled) {
   remoteAudioEnabled = !!enabled;
-  if (remoteStream) {
-    const tracks = remoteStream.getAudioTracks() || [];
-    tracks.forEach((t) => { t.enabled = remoteAudioEnabled; });
-  }
+  applyRemoteAudioToStream(remoteStream);
 }
 
 export function isRemoteAudioEnabled() {
@@ -136,11 +163,12 @@ async function tuneSender(sender, profile) {
         rid: ej.rid || '',
         maxBitrate: profile.maxBitrate,
         maxFramerate: profile.maxFramerate,
+        scaleResolutionDownBy: profile.scaleResolutionDownBy || 1,
       };
     });
     await sender.setParameters({
       encodings,
-      degradationPreference: 'MAINTAIN_FRAMERATE',
+      degradationPreference: profile.degradationPreference || 'MAINTAIN_FRAMERATE',
     });
   } catch (e) {
     console.warn('tuneSender failed', e && e.message);
@@ -278,29 +306,83 @@ export function getScreenStream() {
   return screenStream;
 }
 
-export async function startScreenShare() {
+export function getScreenShareOptions() {
+  return screenShareOptions;
+}
+
+export async function startScreenShare(opts = {}) {
   if (!pc || !localStream) throw new Error('Start the camera call first');
   if (screenStream) return screenStream;
 
-  const stream = await mediaDevices.getDisplayMedia();
+  const internalAudio = !!opts.internalAudio;
+  screenShareOptions = {
+    internalAudio,
+    allowControl: !!opts.allowControl,
+  };
+  screenAudioTrack = null;
+
+  let stream;
+  try {
+    stream = await mediaDevices.getDisplayMedia({
+      ...DISPLAY_CONSTRAINTS,
+      audio: internalAudio,
+    });
+  } catch (e) {
+    screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
+    screenAudioTrack = null;
+    throw e;
+  }
   const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
   if (!track) {
     try {
       if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
     } catch (e) {}
+    screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
+    screenAudioTrack = null;
     throw new Error('Could not capture the screen');
+  }
+
+  try {
+    if ('contentHint' in track) track.contentHint = 'detail';
+  } catch (e) {}
+
+  if (internalAudio) {
+    try {
+      const audioTrack = stream && stream.getAudioTracks && stream.getAudioTracks()[0];
+      const audioSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
+      if (audioTrack && audioSender) {
+        await audioSender.replaceTrack(audioTrack);
+        screenAudioTrack = audioTrack;
+      }
+    } catch (e) {}
   }
 
   const videoSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'video');
   if (!videoSender) {
     try {
-      track.stop();
+      if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
     } catch (e) {}
+    screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
+    screenAudioTrack = null;
     throw new Error('Video sender is not ready');
   }
 
-  await videoSender.replaceTrack(track);
-  await tuneSender(videoSender, SCREEN_ENCODING);
+  try {
+    await videoSender.replaceTrack(track);
+    await tuneSender(videoSender, SCREEN_ENCODING);
+  } catch (e) {
+    try { track.stop(); } catch (e2) {}
+    try {
+      if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
+    } catch (e3) {}
+    screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
+    screenAudioTrack = null;
+    throw e;
+  }
   screenStream = stream;
   return screenStream;
 }
@@ -315,12 +397,25 @@ export async function stopScreenShare() {
     console.warn('replaceTrack back to camera failed', e && e.message);
   }
   if (videoSender && camTrack) await tuneSender(videoSender, CAMERA_ENCODING);
+  if (screenAudioTrack) {
+    try {
+      const micTrack = localStream && localStream.getAudioTracks && localStream.getAudioTracks()[0];
+      const audioSender = pc && pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
+      if (audioSender && micTrack) {
+        await audioSender.replaceTrack(micTrack);
+        micTrack.enabled = !micMuted;
+      }
+    } catch (e) {}
+    screenAudioTrack = null;
+  }
   try {
     if (screenStream && screenStream.getTracks) {
       screenStream.getTracks().forEach((t) => t.stop());
     }
   } catch (e) {}
   screenStream = null;
+  screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
 }
 
 export function cleanupCall() {
@@ -350,4 +445,6 @@ export function cleanupCall() {
   micMuted = false;
   remoteAudioEnabled = true;
   videoFacing = 'user';
+  screenShareOptions = { internalAudio: false, allowControl: false };
+  screenAudioTrack = null;
 }

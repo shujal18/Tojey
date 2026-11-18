@@ -121,6 +121,7 @@ function DownloadRow({ item, theme, onPlay, onDelete }) {
 function OfflinePlayer({ item, theme, onClose }) {
   const webRef = useRef(null);
   const loadedRef = useRef(false);
+  const [audioError, setAudioError] = useState(false);
 
   if (item.kind === 'audio' && item.audioPath) {
     return (
@@ -138,6 +139,9 @@ function OfflinePlayer({ item, theme, onClose }) {
             <Text style={{ color: theme.textSecondary, fontSize: fs(13), marginTop: 12 }}>
               Playing audio · {item.channel || 'YouTube'}
             </Text>
+            {audioError && (
+              <Text style={{ color: theme.danger, fontSize: fs(12), marginTop: 8 }}>Playback error</Text>
+            )}
             <Video
               source={{ uri: `file://${item.audioPath}` }}
               style={{ width: 1, height: 1 }}
@@ -145,6 +149,8 @@ function OfflinePlayer({ item, theme, onClose }) {
               audioOnly
               playInBackground
               ignoreSilentSwitch="ignore"
+              repeat
+              onError={() => setAudioError(true)}
             />
           </View>
         </View>
@@ -212,7 +218,8 @@ const styles = StyleSheet.create({
   thumbWrap: { width: 108, height: 61, borderRadius: 10, overflow: 'hidden', backgroundColor: '#000' },
   thumb: { width: '100%', height: '100%' },
   thumbOverlay: {
-    position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center',
+    position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
+    alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(16,11,26,0.45)',
   },
   progWrap: { height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },

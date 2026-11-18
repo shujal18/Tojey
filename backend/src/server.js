@@ -2303,6 +2303,34 @@ io.on('connection', async (socket) => {
       relayVideo('video-call:media-state', target, { callId: id, cameraOn: cameraOn !== false, screenSharing: !!screenSharing });
     });
 
+    socket.on('video-call:share-options', ({ targetUserId, callId, internalAudio, allowControl }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:share-options', target, {
+        callId: id,
+        internalAudio: !!internalAudio,
+        allowControl: !!allowControl,
+      });
+    });
+
+    socket.on('video-call:control-event', ({ targetUserId, callId, type, x, y, x2, y2, duration }) => {
+      const target = Number(targetUserId);
+      if (!validTarget(target)) return;
+      const id = String(callId || '');
+      if (!id) return;
+      relayVideo('video-call:control-event', target, {
+        callId: id,
+        type,
+        x,
+        y,
+        x2,
+        y2,
+        duration,
+      });
+    });
+
     socket.on('video-call:end', ({ targetUserId, callId }) => {
       const target = Number(targetUserId);
       if (!validTarget(target)) return;

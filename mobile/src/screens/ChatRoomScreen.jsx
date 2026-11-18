@@ -161,6 +161,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // Enter-to-send is read into a ref, not state, so the input's props stay stable
   // while typing (a state change here would re-render the whole room per tap).
   const enterSendRef = useRef(false);
+  const lastEnterSentRef = useRef(null);
+  const allowNewlineRef = useRef(false);
   const appVisibleRef = useRef(true);
   const headUnreadRef = useRef(0);
   const [recording, setRecording] = useState(false);
@@ -403,6 +405,22 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // progress and unrelated state changes never re-render the visible chat window.
 
   const onType = (t) => {
+    if (enterSendRef.current && !allowNewlineRef.current && typeof t === 'string' && t.endsWith('\n')) {
+      const stripped = t.slice(0, -1);
+      const now = Date.now();
+      const last = lastEnterSentRef.current;
+      const echo = !!(last && stripped.trim() === last.content && now - last.at < 1500);
+      const appended = t === text + '\n';
+      if (echo || appended) {
+        if (echo) lastEnterSentRef.current = null;
+        else lastEnterSentRef.current = { content: stripped.trim(), at: now };
+        setText('');
+        if (!echo) sendText(stripped);
+        return;
+      }
+    }
+    allowNewlineRef.current = false;
+    if (t !== text + '\n') lastEnterSentRef.current = null;
     setText(t);
     if (socket && t.trim()) {
       if (!typingTimer.current) {
@@ -935,8 +953,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setMessages((prev) => prev.filter((m) => m.id !== msg.id));
   }, []);
 
-  const sendText = () => {
-    const content = text.trim();
+  const sendText = (override) => {
+    const content = (override != null ? String(override) : text).trim();
     if (!content) return;
     if (editing) {
       socket.emit('message:edit', { messageId: editing.id, content });
@@ -2018,13 +2036,26 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
                 multiline
                 blurOnSubmit={!enterSendRef.current}
                 onKeyPress={(e) => {
-                  // Enter-to-send ON: Enter sends, Shift+Enter inserts a newline.
-                  // Implemented via onKeyPress rather than onSubmitEditing because
-                  // a multiline TextInput on Android never fires onSubmitEditing.
                   if (!enterSendRef.current) return;
-                  if (e.nativeEvent.key !== 'Enter') return;
-                  if (e.nativeEvent.shiftKey) return;
+                  const key = e.nativeEvent.key;
+                  if (key !== 'Enter') {
+                    allowNewlineRef.current = false;
+                    return;
+                  }
+                  if (e.nativeEvent.shiftKey) {
+                    allowNewlineRef.current = true;
+                    return;
+                  }
                   e.preventDefault?.();
+                  const content = text.trim();
+                  if (!content) return;
+                  const now = Date.now();
+                  const last = lastEnterSentRef.current;
+                  if (last && last.content === content && now - last.at < 1500) {
+                    lastEnterSentRef.current = null;
+                    return;
+                  }
+                  lastEnterSentRef.current = { content, at: now };
                   pressSend();
                 }}
                 onPressIn={reopenKeyboard}

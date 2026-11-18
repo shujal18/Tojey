@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Tojey</string>
+    <string name="remote_control_description">Allows the person watching your shared screen to tap and swipe on your device during a Tojey screen share. Enabled only while you allow control.</string>
 </resources>

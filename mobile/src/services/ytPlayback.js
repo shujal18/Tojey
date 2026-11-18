@@ -7,6 +7,16 @@
 import { SERVER_URL } from '../config';
 import { getShortStream } from './innertube';
 
+function mimeFromUrl(url) {
+  const m = /[?&]mime=([^&]+)/i.exec(String(url || ''));
+  if (!m) return '';
+  try {
+    return decodeURIComponent(m[1].replace(/\+/g, ' '));
+  } catch (e) {
+    return '';
+  }
+}
+
 export function mediaProxyUrl(videoId, token, itag = 'best') {
   const t = encodeURIComponent(token || '');
   return `${SERVER_URL}/api/yt/media/${encodeURIComponent(videoId)}?itag=${encodeURIComponent(itag)}&token=${t}`;
@@ -53,6 +63,9 @@ export async function getProxyPlayback(videoId, token, opts = {}) {
         videoId,
         videoUrl: direct.url,
         audioUrl: direct.audioUrl || null,
+        videoMime: mimeFromUrl(direct.url),
+        audioMime: direct.audioUrl ? mimeFromUrl(direct.audioUrl) : '',
+        videoHasAudio: !direct.audioUrl,
         height: direct.height || 0,
         itag: direct.itag || 18,
         source: 'device',
@@ -76,6 +89,9 @@ export async function getProxyPlayback(videoId, token, opts = {}) {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, itag),
       audioUrl: audio && audio.itag != null ? mediaProxyUrl(videoId, token, audio.itag) : null,
+      videoMime: (pick && pick.mimeType) || '',
+      audioMime: (audio && audio.mimeType) || '',
+      videoHasAudio: !!(pick && pick.hasAudio),
       height: (pick && pick.height) || 0,
       itag,
       source: 'proxy',
@@ -85,6 +101,9 @@ export async function getProxyPlayback(videoId, token, opts = {}) {
       videoId,
       videoUrl: mediaProxyUrl(videoId, token, 'best'),
       audioUrl: null,
+      videoMime: '',
+      audioMime: '',
+      videoHasAudio: true,
       height: 0,
       itag: 'best',
       source: 'proxy',

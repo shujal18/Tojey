@@ -3,6 +3,7 @@ import { Animated, DeviceEventEmitter, Dimensions, PanResponder, StyleSheet, Vie
 import { useTheme } from '../theme/ThemeContext';
 import VideoCallView from '../components/VideoCallView';
 import { ensureVideoCallPermission } from './permissions';
+import { dispatchRemoteSwipe, dispatchRemoteTap, isRemoteControlEnabled, openRemoteControlSettings } from './remoteControl';
 import {
   startLocalStream, createPeerConnection, applyCallbacks, createOffer, acceptOffer,
   handleRemoteAnswer, handleRemoteCandidate, cleanupCall, switchCamera,
@@ -83,6 +84,12 @@ export function CallProvider({ socket, currentUser, children }) {
   const [screenStream, setScreenStream] = useState(null);
   const [cameraFacing, setCameraFacing] = useState('user');
   const [remoteScreenSharing, setRemoteScreenSharing] = useState(false);
+  const [remoteCameraOn, setRemoteCameraOn] = useState(true);
+  const [remoteShareOptions, setRemoteShareOptions] = useState({ internalAudio: false, allowControl: false });
+  const [controlEnabledHere, setControlEnabledHere] = useState(false);
+  const [remoteControlGranted, setRemoteControlGranted] = useState(false);
+  const controlEnabledRef = useRef(false);
+  useEffect(() => { controlEnabledRef.current = controlEnabledHere; }, [controlEnabledHere]);
 
   const statusRef = useRef('none');
   const callIdRef = useRef(null);
@@ -141,6 +148,10 @@ export function CallProvider({ socket, currentUser, children }) {
     setScreenStream(null);
     setCameraFacing('user');
     setRemoteScreenSharing(false);
+    setRemoteCameraOn(true);
+    setRemoteShareOptions({ internalAudio: false, allowControl: false });
+    setControlEnabledHere(false);
+    setRemoteControlGranted(false);
     setLocalStream(null);
     setRemoteStream(null);
     setIncomingCaller(null);
@@ -261,28 +272,63 @@ export function CallProvider({ socket, currentUser, children }) {
     setCameraFacing(getCameraFacing());
   }, []);
 
-  const toggleScreenShare = useCallback(async () => {
+  const toggleScreenShare = useCallback(async (opts = {}) => {
     if (statusRef.current === 'none') return;
+    const internalAudio = !!opts.internalAudio;
+    const allowControl = !!opts.allowControl;
     if (screenSharingRef.current) {
       try { await stopScreenShare(); } catch (e) {}
       screenSharingRef.current = false;
       setScreenSharing(false);
       setScreenStream(null);
       emitMediaState(false, cameraOn);
+      setControlEnabledHere(false);
     } else {
+      if (allowControl && !(await isRemoteControlEnabled())) {
+        openRemoteControlSettings();
+        notify('Enable Tojey remote control in Accessibility settings, then start sharing again.');
+        return;
+      }
       try {
-        const stream = await startScreenShare();
+        const stream = await startScreenShare({ internalAudio, allowControl });
         if (!stream) throw new Error('could not capture');
         screenSharingRef.current = true;
         setScreenStream(getScreenStream());
         setScreenSharing(true);
         emitMediaState(true, cameraOn);
+        setControlEnabledHere(allowControl);
+        if (peerIdRef.current && callIdRef.current) {
+          emitVideo('video-call:share-options', {
+            targetUserId: peerIdRef.current,
+            callId: callIdRef.current,
+            internalAudio,
+            allowControl,
+          });
+        }
       } catch (e) {
         screenSharingRef.current = false;
         notify('Could not start screen share: ' + ((e && e.message) || 'unknown error'));
       }
     }
-  }, [cameraOn, emitMediaState, notify]);
+  }, [cameraOn, emitMediaState, emitVideo, notify]);
+
+  const grantRemoteControl = useCallback(async () => {
+    if (!(await isRemoteControlEnabled())) {
+      openRemoteControlSettings();
+      notify('Enable Tojey remote control in Accessibility settings, then tap Grant again.');
+      return;
+    }
+    setRemoteControlGranted(true);
+  }, [notify]);
+
+  const sendControlEvent = useCallback((event) => {
+    if (!remoteControlGranted || !peerIdRef.current || !callIdRef.current) return;
+    emitVideo('video-call:control-event', {
+      targetUserId: peerIdRef.current,
+      callId: callIdRef.current,
+      ...event,
+    });
+  }, [emitVideo, remoteControlGranted]);
 
   useEffect(() => {
     if (!socket) return undefined;
@@ -373,9 +419,23 @@ export function CallProvider({ socket, currentUser, children }) {
       pushCallMessage(wasConnectedRef.current ? 'Call ended' : 'Missed video call', 'end');
       teardown();
     };
-    const hMedia = ({ callId, screenSharing: remoteSharing }) => {
+    const hMedia = ({ callId, cameraOn: remoteCamera, screenSharing: remoteSharing }) => {
       if (callIdRef.current !== callId) return;
+      setRemoteCameraOn(remoteCamera !== false);
       setRemoteScreenSharing(!!remoteSharing);
+      if (!remoteSharing) setRemoteShareOptions({ internalAudio: false, allowControl: false });
+    };
+    const hShareOptions = ({ callId, internalAudio, allowControl }) => {
+      if (callIdRef.current !== callId) return;
+      setRemoteShareOptions({ internalAudio: !!internalAudio, allowControl: !!allowControl });
+      setRemoteControlGranted(false);
+    };
+    const hControl = async ({ callId, type, x, y, x2, y2, duration }) => {
+      if (callIdRef.current !== callId || !controlEnabledRef.current) return;
+      if (type === 'tap') await dispatchRemoteTap(Number(x) || 0, Number(y) || 0);
+      else if (type === 'swipe') {
+        await dispatchRemoteSwipe(Number(x) || 0, Number(y) || 0, Number(x2) || 0, Number(y2) || 0, Number(duration) || 260);
+      }
     };
     const hDisconnect = () => {
       if (statusRef.current !== 'none') teardown();
@@ -389,6 +449,8 @@ export function CallProvider({ socket, currentUser, children }) {
     socket.on('video-call:ice-candidate', hIce);
     socket.on('video-call:end', hEnd);
     socket.on('video-call:media-state', hMedia);
+    socket.on('video-call:share-options', hShareOptions);
+    socket.on('video-call:control-event', hControl);
     socket.on('disconnect', hDisconnect);
     return () => {
       socket.off('video-call:invite', hInvite);
@@ -399,25 +461,35 @@ export function CallProvider({ socket, currentUser, children }) {
       socket.off('video-call:ice-candidate', hIce);
       socket.off('video-call:end', hEnd);
       socket.off('video-call:media-state', hMedia);
+      socket.off('video-call:share-options', hShareOptions);
+      socket.off('video-call:control-event', hControl);
       socket.off('disconnect', hDisconnect);
     };
   }, [socket, setCall, emitVideo, pushCallMessage, teardown]);
 
   const togglePip = useCallback(() => setMainIsLocal((v) => !v), []);
-  const peerName = peer?.display_name || peer?.username || 'Unknown';
-  const peerAvatar = peer?.profile_pic_url || '';
+  const peerName = peer?.display_name || peer?.displayName || peer?.username || 'Unknown';
+  const peerAvatar = peer?.profile_pic_url || peer?.profilePic || '';
+  const localName = currentUser?.display_name || currentUser?.displayName || currentUser?.username || 'You';
+  const localAvatar = currentUser?.profile_pic_url || currentUser?.profilePic || '';
   const activeLocalStream = screenSharing && screenStream ? screenStream : localStream;
   const callProps = {
     status: callStatus,
     peerName,
     peerAvatar,
+    localName,
+    localAvatar,
     localStream: activeLocalStream,
     remoteStream,
     cameraOn,
     micOn,
     remoteAudioOn,
+    remoteCameraOn,
     screenSharing,
     remoteScreenSharing,
+    remoteShareOptions,
+    controlEnabledHere,
+    remoteControlGranted,
     cameraFacing,
     mainIsLocal,
     theme,
@@ -431,6 +503,9 @@ export function CallProvider({ socket, currentUser, children }) {
     onToggleScreenShare: toggleScreenShare,
     onSwapPip: togglePip,
     onTapMain: togglePip,
+    onGrantRemoteControl: grantRemoteControl,
+    onControlTap: (x, y) => sendControlEvent({ type: 'tap', x, y }),
+    onControlSwipe: (x1, y1, x2, y2, duration) => sendControlEvent({ type: 'swipe', x: x1, y: y1, x2, y2, duration }),
   };
 
   const expandCall = useCallback(() => setCallLayout('full'), []);

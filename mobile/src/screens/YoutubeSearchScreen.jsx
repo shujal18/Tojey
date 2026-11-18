@@ -2,7 +2,7 @@
 // mixed results (videos / channels / playlists / shorts).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, Image, TextInput, TouchableOpacity, FlatList, StyleSheet, ActivityIndicator, Dimensions,
+  View, Text, Image, TextInput, TouchableOpacity, FlatList, StyleSheet, ActivityIndicator, useWindowDimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
@@ -10,6 +10,7 @@ import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { VideoCard, ItemRow, ChannelRow } from '../components/YouTubeCards';
 import makeYoutubeApi from '../services/youtubeApi';
+import { SEARCH_HISTORY_KEY } from '../services/recommendation';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -19,7 +20,7 @@ const FILTERS = [
   { id: 'shorts', label: 'Shorts' },
 ];
 
-const HISTORY_KEY = 'tojey_search_history_v1';
+const HISTORY_KEY = SEARCH_HISTORY_KEY;
 const HISTORY_MAX = 12;
 
 export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChannel, onOpenPlaylist, dlMap, onDownload }) {
@@ -36,8 +37,8 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
   const [history, setHistory] = useState([]);
   const nextTokenRef = useRef(null);
   const reqIdRef = useRef(0);
-  const width = Dimensions.get('window').width;
-  const cardW = (width - 20 - 16 * 2) / 2;
+  const { width } = useWindowDimensions();
+  const cardW = (width - 32 - 12) / 2;
 
   useEffect(() => {
     AsyncStorage.getItem(HISTORY_KEY)
@@ -290,7 +291,7 @@ const styles = StyleSheet.create({
   suggestionText: { fontSize: fs(13), flex: 1 },
   histHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 6 },
   histTitle: { fontSize: fs(13), fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4 },
-  row: { gap: 10, marginBottom: 12 },
+  row: { gap: 12, marginBottom: 12 },
   shortsRow: { flexDirection: 'row', gap: 12, marginBottom: 14, alignItems: 'center' },
   shortThumb: { width: 92, height: 126, borderRadius: 10, backgroundColor: '#000' },
   shortTitle: { fontSize: fs(13), fontWeight: '700', lineHeight: 17 },
