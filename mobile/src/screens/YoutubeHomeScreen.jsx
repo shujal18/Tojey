@@ -246,6 +246,9 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       ) : (
         <>
           <View style={[styles.header, { backgroundColor: theme.background }]}>
+            <TouchableOpacity onPress={onOpenChats} style={[styles.headerBtn, { marginRight: 8 }]} accessibilityLabel="Back to chats">
+              <Icon name="chevron-back" size={24} color={theme.primary} />
+            </TouchableOpacity>
             <View style={{ flex: 1 }}>
               <Text style={[styles.brand, { color: theme.primary }]}>Tojey</Text>
               <Text style={[styles.tagline, { color: theme.textSecondary }]}>YouTube inside</Text>
@@ -288,23 +291,6 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           onEndReachedThreshold={0.5}
           ListHeaderComponent={
             <View>
-              <View style={styles.chips}>
-                {categories.map((c) => {
-                  const active = c.id === category;
-                  return (
-                    <TouchableOpacity
-                      key={c.id}
-                      style={[styles.chip, { backgroundColor: active ? theme.primary : theme.inputBg }]}
-                      onPress={() => setCategory(c.id)}
-                    >
-                      <Text style={[styles.chipText, { color: active ? '#fff' : theme.textSecondary }]}>
-                        {c.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
               {historyArr.length > 0 && (
                 <View style={styles.strip}>
                   <Text style={[styles.stripTitle, { color: theme.text }]}>Continue watching</Text>
@@ -435,9 +421,6 @@ const styles = StyleSheet.create({
   headerBtn: { padding: 4 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   retry: { marginTop: 14, paddingHorizontal: 20, paddingVertical: 8, borderRadius: 18 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 16, gap: 8 },
-  chip: { paddingHorizontal: 13, paddingVertical: 6, borderRadius: 16 },
-  chipText: { fontSize: fs(12), fontWeight: '600' },
   strip: { marginTop: 18 },
   stripTitle: { fontSize: fs(15), fontWeight: '800', marginBottom: 10, paddingHorizontal: 16 },
   continueThumb: { width: 140, height: 79, borderRadius: 10, backgroundColor: '#000' },

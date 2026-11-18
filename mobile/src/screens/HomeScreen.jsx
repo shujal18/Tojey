@@ -20,6 +20,18 @@ import BottomTabBar from '../components/BottomTabBar';
 export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
+  useEffect(() => {
+    if (!registerBackHandler) return undefined;
+    registerBackHandler(() => {
+      if (tab !== 'chats') {
+        setTab('chats');
+        return true;
+      }
+      return false;
+    });
+    return () => registerBackHandler(null);
+  }, [tab, registerBackHandler]);
+
   const [pendingWatch, setPendingWatch] = useState(null);
   // A Watch Together room became active: consume the one-shot request, switch to
   // the YouTube surface, and let the player open the shared video.
@@ -306,26 +318,6 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
               style={[styles.searchInput, { color: theme.text }]}
             />
           </View>
-
-          <TouchableOpacity
-            onPress={onOpenSettings}
-            activeOpacity={0.8}
-            style={[styles.selfCard, { backgroundColor: theme.card, borderColor: theme.border }]}
-            accessibilityLabel="Your profile"
-          >
-            {user.profile_pic_url || user.profilePic ? (
-              <Image source={{ uri: absUrl(user.profile_pic_url || user.profilePic) }} style={styles.selfAvatar} />
-            ) : (
-              <View style={[styles.selfAvatar, styles.selfAvatarFallback, { backgroundColor: theme.primary }]}>
-                <Text style={styles.selfAvatarText}>{(user.display_name || user.username || '?')[0].toUpperCase()}</Text>
-              </View>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.selfName, { color: theme.text }]}>You</Text>
-              <Text style={[styles.selfHandle, { color: theme.textSecondary }]}>@{user.username} · your profile</Text>
-            </View>
-            <Icon name="settings-outline" size={20} color={theme.primary} />
-          </TouchableOpacity>
 
           {conversations.length === 0 && users.length > 0 ? (
             <FlatList
@@ -653,16 +645,6 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, fontSize: fs(14), padding: 0 },
   list: { paddingVertical: 4 },
-  selfCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    marginHorizontal: fs(16), marginBottom: 6, paddingHorizontal: fs(12), paddingVertical: fs(10),
-    borderRadius: fs(12), borderWidth: 1,
-  },
-  selfAvatar: { width: fs(46), height: fs(46), borderRadius: fs(23) },
-  selfAvatarFallback: { alignItems: 'center', justifyContent: 'center' },
-  selfAvatarText: { color: '#fff', fontSize: fs(18), fontWeight: '700' },
-  selfName: { fontSize: fs(15), fontWeight: '700' },
-  selfHandle: { fontSize: fs(12), marginTop: 2 },
   row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(10) },
   avatarWrap: { position: 'relative', marginRight: fs(12) },
   avatar: {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, BackHandler, useWindowDimensions, AppState, DeviceEventEmitter } from 'react-native';
+import { SafeAreaView, StatusBar, View, Text, TouchableOpacity, Platform, BackHandler, useWindowDimensions, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { loadSession, logout, fetchUsers } from './src/services/auth';
@@ -61,6 +61,8 @@ function Shell() {
 
   // Reference kept fresh so the video-call invite listener can navigate.
   const openConversationWithRef = useRef(null);
+  const homeBackRef = useRef(null);
+  const registerHomeBack = useCallback((fn) => { homeBackRef.current = fn; }, []);
 
   const openConversationWith = useCallback(async (userId) => {
     if (!userId) return;
@@ -325,29 +327,6 @@ function Shell() {
     };
   }, [socket, session]);
 
-  // Normal chat sends also raise the same heads-up banner as the explicit
-  // "Send Notification" button, so a sent message is visibly confirmed as a
-  // notification instead of only appearing as a bubble in the room.
-  useEffect(() => {
-    const onSent = (d) => {
-      if (!d || !d.message) return;
-      const msg = d.message;
-      const preview = typeof msg.content === 'string' && msg.content.trim()
-        ? msg.content.trim().slice(0, 90)
-        : (msg.type || 'New message');
-      setIncomingBanner({
-        key: `sent-${msg.id || Date.now()}`,
-        senderId: d.otherUserId,
-        senderName: 'You',
-        senderPic: d.senderPic || '',
-        conversationId: d.conversationId || d.otherUserId,
-        preview,
-      });
-    };
-    const sub = DeviceEventEmitter.addListener('tojey:sent-message', onSent);
-    return () => sub.remove();
-  }, []);
-
   // Heads-up banner for chat messages landing while the app is open: shows over ANY
   // screen (home, settings, another chat) when the message is for a conversation that
   // is not the one currently on screen. Socket already delivered the message, so this
@@ -450,6 +429,7 @@ function Shell() {
         setShowSettings(false);
         return true;
       }
+      if (homeBackRef.current && homeBackRef.current()) return true;
       return false;
     });
     return () => sub.remove();
@@ -581,6 +561,7 @@ function Shell() {
             activeChatId={activeChat?.id}
             watchRequest={watchRequest}
             onWatchRequestHandled={() => setWatchRequest(null)}
+            registerBackHandler={registerHomeBack}
           />
         </SafeAreaView>
       </>

@@ -935,16 +935,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     setMessages((prev) => prev.filter((m) => m.id !== msg.id));
   }, []);
 
-  const notifySent = (msg) => {
-    if (!msg) return;
-    DeviceEventEmitter.emit('tojey:sent-message', {
-      message: msg,
-      otherUserId,
-      conversationId: otherUserId,
-      senderPic: currentUser?.profile_pic_url || currentUser?.profilePic || '',
-    });
-  };
-
   const sendText = () => {
     const content = text.trim();
     if (!content) return;
@@ -998,7 +988,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setAtBottomNear(true);
           setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
-          notifySent(ack.message);
           addKnownId(ack.message && ack.message.id);
           bumpCursor(ack.message && ack.message.id);
           // Reference-parity: keep the freshly sent bubble flush above the composer
@@ -1114,7 +1103,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
-            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1307,8 +1295,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-          notifySent(ack.message);
-            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1490,8 +1476,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         socket.emit('message:send', payload, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-          notifySent(ack.message);
-            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
             pendingScrollToBottomRef.current = true;
@@ -1542,8 +1526,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }, (ack) => {
           if (ack?.ok) {
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-          notifySent(ack.message);
-            notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
           } else {
@@ -1593,7 +1575,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-          notifySent(ack.message);
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
           pendingScrollToBottomRef.current = true;

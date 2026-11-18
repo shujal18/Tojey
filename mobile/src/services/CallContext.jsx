@@ -17,8 +17,8 @@ export function useCall() {
 }
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const FLOAT_W = 136;
-const FLOAT_H = 188;
+const FLOAT_W = 166;
+const FLOAT_H = 208;
 const FLOAT_MARGIN = 10;
 
 function FloatingCall({ onExpand, children }) {

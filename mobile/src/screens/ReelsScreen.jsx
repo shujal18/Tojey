@@ -20,7 +20,8 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { SERVER_URL } from '../config';
-import { mediaProxyUrl } from '../services/ytPlayback';
+import { getProxyPlayback } from '../services/ytPlayback';
+import { getRecommendationSeeds, getWatchedVideoIds, recordWatched } from '../services/recommendation';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -71,6 +72,7 @@ function thumbnailUrlFor(item) {
 function mediaType(kind) {
   if (kind === 'hls') return 'm3u8';
   if (kind === 'dash') return 'mpd';
+  if (kind === 'progressive') return 'mp4';
   return undefined;
 }
 
@@ -148,8 +150,7 @@ async function saveFeedCache(category, videos) {
 
 export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
-  const [category, setCategory] = useState('trending');
-  const [categories, setCategories] = useState([]);
+  const category = 'trending';
   const [activeIdx, setActiveIdx] = useState(0);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -165,7 +166,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const flatListRef = useRef(null);
   const scrollOffsetYRef = useRef(0);
   const activeIndexRef = useRef(0);
-  const currentCategoryRef = useRef(category);
+  const currentCategoryRef = useRef('trending');
   const playerStateRef = useRef('idle'); // idle, loading, ready, playing, paused
   const isMountedRef = useRef(true);
   const requestIdRef = useRef(0);
@@ -174,6 +175,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const pendingSkipRef = useRef(false);
   const failedVideoIdsRef = useRef(new Set());
   const staleReportRef = useRef(new Set());
+  const lastRecordedRef = useRef(null);
 
   // persistent (device-wide) seen history
   const seenSetRef = useRef(new Set());
@@ -260,7 +262,6 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const resolveFor = useCallback((item, opts = {}) => {
     if (!item || !item.videoId || !validateVideoId(item.videoId)) return Promise.resolve(null);
     const id = item.videoId;
-    // A caller retrying explicitly is saying "this one is worth another try".
     if (failedStreamsRef.current.has(id) && !opts.retry) return Promise.resolve(null);
     const cached = opts.retry ? null : streamCacheRef.current.get(id);
     if (cached) {
@@ -269,13 +270,15 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     }
     const inflight = opts.retry ? null : inflightStreamRef.current.get(id);
     if (inflight) return inflight;
-    const base = mediaProxyUrl(id, token, 'best');
-    // A retry busts the player's source URL so react-native-video reloads and
-    // the proxy re-resolves a freshly-signed upstream stream.
-    const src = opts.retry ? `${base}&_=${Date.now()}` : base;
-    const p = Promise.resolve({
-      source: { url: src, kind: 'progressive', height: 0 },
-    }).then((entry) => {
+    const p = (async () => {
+      const playback = await getProxyPlayback(id, token, { maxHeight: 720 });
+      let url = playback.videoUrl;
+      if (opts.retry) url += `${url.includes('?') ? '&' : '_'}=${Date.now()}`;
+      const entry = {
+        source: { url, kind: 'progressive', height: playback.height || 0 },
+        itag: playback.itag,
+        via: playback.source,
+      };
       const cache = streamCacheRef.current;
       cache.delete(id);
       cache.set(id, entry);
@@ -289,7 +292,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         return next;
       });
       return entry;
-    });
+    })();
     if (!opts.retry) {
       inflightStreamRef.current.set(id, p);
       p.finally(() => inflightStreamRef.current.delete(id)).catch(() => {});
@@ -389,6 +392,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     const q = [`category=${encodeURIComponent(cat)}`];
     if (token) q.push(`nextToken=${encodeURIComponent(token)}`);
     if (refresh) q.push('refresh=1');
+    const seeds = await getRecommendationSeeds(8);
+    const watched = await getWatchedVideoIds(250);
+    const exclude = [...new Set([...watched, ...Array.from(seenSetRef.current || [])])].slice(-300);
+    if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+    if (exclude.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(exclude))}`);
     const res = await fetch(`${SERVER_URL}/api/shorts/feed?${q.join('&')}`, { headers: authHeaders });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load feed');
@@ -571,15 +579,6 @@ const loadMore = useCallback(async () => {
 
   useEffect(() => { loadMoreRef.current = loadMore; }, [loadMore]);
 
-  // ---- categories ------------------------------------------------------------
-
-  useEffect(() => {
-    fetch(`${SERVER_URL}/api/shorts/categories`, { headers: authHeaders })
-      .then((r) => (r.ok ? r.json() : { categories: [] }))
-      .then((d) => { if (Array.isArray(d.categories) && d.categories.length) setCategories(d.categories); })
-      .catch(() => {});
-  }, [authHeaders]);
-
   // ---- actions ---------------------------------------------------------------
 
   useEffect(() => {
@@ -754,7 +753,7 @@ const loadMore = useCallback(async () => {
     };
   }, []);
 
-  // Initial feed load + category changes (seed rotation server-side per session).
+  // Initial feed load (seed rotation server-side per session).
   useEffect(() => {
     if (isMountedRef.current) {
       requestIdRef.current += 1;
@@ -770,7 +769,19 @@ const loadMore = useCallback(async () => {
       setActivePaused(false);
       if (fetchFeedRef.current) fetchFeedRef.current(category, { refresh: false });
     }
-  }, [category]);
+  }, []);
+
+  useEffect(() => {
+    const item = videos[activeIdx];
+    if (!item || !validateVideoId(item.videoId)) return;
+    if (lastRecordedRef.current === item.videoId) return;
+    lastRecordedRef.current = item.videoId;
+    recordWatched({
+      videoId: item.videoId,
+      title: item.title || '',
+      channelTitle: item.channelTitle || '',
+    }).catch(() => {});
+  }, [activeIdx, videos]);
 
   // Reels nav icon tapped while already inside Reels -> fresh content.
   const prevRefreshTickRef = useRef(0);
@@ -831,6 +842,7 @@ const loadMore = useCallback(async () => {
             repeat
             playInBackground={false}
             onLoad={() => { playErrorTriesRef.current = 0; fadeOutThumb(item.videoId); }}
+            onReadyForDisplay={() => fadeOutThumb(item.videoId)}
             onError={(payload) => handleVideoError(item, index, payload)}
           />
         ) : null}
@@ -892,35 +904,6 @@ const loadMore = useCallback(async () => {
       <TouchableOpacity onPress={onBack} style={styles.backBtn} accessibilityLabel="Back to chats">
         <Icon name="chevron-back" size={26} color="#fff" />
       </TouchableOpacity>
-
-      {/* Category chips row */}
-      {categories.length > 0 && (
-        <View style={styles.chipsWrap}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chipsContent}
-          >
-            {categories.map((c) => {
-              const selected = c.id === category;
-              return (
-                <TouchableOpacity
-                  key={c.id}
-                  onPress={() => setCategory(c.id)}
-                  style={[
-                    styles.chip,
-                    selected ? { backgroundColor: theme.primary } : { backgroundColor: 'rgba(15,15,15,0.55)' },
-                  ]}
-                >
-                  <Text style={[styles.chipText, selected ? { color: '#fff', fontWeight: '800' } : { color: '#eee' }]}>
-                    {c.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        </View>
-      )}
 
       {/* YT-style right action rail */}
       {activeItem && sanitizeVideoId(activeItem.videoId) ? (
