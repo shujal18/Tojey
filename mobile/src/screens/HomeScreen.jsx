@@ -17,14 +17,35 @@ import YoutubeHomeScreen from './YoutubeHomeScreen';
 import DownloadsScreen from './DownloadsScreen';
 import BottomTabBar from '../components/BottomTabBar';
 
+const LIST_REFRESH_COOLDOWN = 1500;
+const MAP_CAP = 500;
+
+function capMap(map, key, value, cap = MAP_CAP) {
+  if (Object.prototype.hasOwnProperty.call(map, key)) return { ...map, [key]: value };
+  const keys = Object.keys(map);
+  if (keys.length < cap) return { ...map, [key]: value };
+  const next = { ...map, [key]: value };
+  delete next[keys[0]];
+  return next;
+}
+
 export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled, registerBackHandler }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
   const tabStackRef = useRef(['chats']);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
   const youtubeBackRef = useRef(null);
   const registerYoutubeBack = useCallback((fn) => { youtubeBackRef.current = fn; }, []);
   const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
   const [homeRefreshTick, setHomeRefreshTick] = useState(0);
+  const [pendingWatch, setPendingWatch] = useState(null);
+  const activeChatIdRef = useRef(activeChatId);
+  activeChatIdRef.current = activeChatId;
+  const userId = user?.id;
+  const conversationsRef = useRef([]);
+  const lastConvSigRef = useRef('');
+  const timersRef = useRef(new Set());
 
   const switchTab = useCallback((next) => {
     setTab((prev) => {
@@ -36,29 +57,33 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     if (next === 'home') setHomeRefreshTick((t) => t + 1);
   }, []);
 
+  const openChatsTab = useCallback(() => switchTab('chats'), [switchTab]);
+  const openHomeTab = useCallback(() => switchTab('home'), [switchTab]);
+  const openShortsTab = useCallback(() => switchTab('shorts'), [switchTab]);
+  const consumeWatch = useCallback(() => setPendingWatch(null), []);
+
   useEffect(() => {
     if (typeof registerBackHandler !== 'function') return undefined;
-    registerBackHandler(() => {
+    const onBack = () => {
       if (youtubeBackRef.current && youtubeBackRef.current()) return true;
       const previous = tabStackRef.current.pop();
-      if (previous && previous !== tab) {
+      const current = tabRef.current;
+      if (previous && previous !== current) {
         setTab(previous);
         return true;
       }
-      if (tab !== 'chats') {
+      if (current !== 'chats') {
         setTab('chats');
         return true;
       }
       return true;
-    });
+    };
+    registerBackHandler(onBack);
     return () => {
       if (typeof registerBackHandler === 'function') registerBackHandler(null);
     };
-  }, [tab, registerBackHandler]);
+  }, [registerBackHandler]);
 
-  const [pendingWatch, setPendingWatch] = useState(null);
-  // A Watch Together room became active: consume the one-shot request, switch to
-  // the YouTube surface, and let the player open the shared video.
   useEffect(() => {
     if (!watchRequest || !watchRequest.key) return;
     setPendingWatch(watchRequest);
@@ -66,6 +91,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     if (onWatchRequestHandled) onWatchRequestHandled();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchRequest && watchRequest.key]);
+
   const [users, setUsers] = useState([]);
   const [presence, setPresence] = useState({});
   const [onCall, setOnCall] = useState({});
@@ -79,40 +105,85 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   const [notifSending, setNotifSending] = useState(false);
   const [notifResult, setNotifResult] = useState(null);
   const [nudgeToast, setNudgeToast] = useState('');
+  const [nudgeVisible, setNudgeVisible] = useState(true);
+
+  const commitConversations = useCallback((next) => {
+    conversationsRef.current = next;
+    setConversations(next);
+    const sig = JSON.stringify(next);
+    if (sig === lastConvSigRef.current) return;
+    lastConvSigRef.current = sig;
+    if (userId) saveConversations(userId, next).catch(() => {});
+  }, [userId]);
+
+  const updateConversations = useCallback((updater) => {
+    commitConversations(updater(conversationsRef.current));
+  }, [commitConversations]);
+
+  const trackTimeout = useCallback((fn, ms) => {
+    const id = setTimeout(() => {
+      timersRef.current.delete(id);
+      fn();
+    }, ms);
+    timersRef.current.add(id);
+    return id;
+  }, []);
+
+  const clearTrackedTimeout = useCallback((id) => {
+    if (id == null) return;
+    clearTimeout(id);
+    timersRef.current.delete(id);
+  }, []);
+
+  useEffect(() => () => {
+    timersRef.current.forEach((id) => clearTimeout(id));
+    timersRef.current.clear();
+  }, []);
 
   useEffect(() => {
-    if (!user?.id) return;
+    if (!userId) return undefined;
     let mounted = true;
+    let usersSig = '';
+    let lastListEmitAt = 0;
 
-    // Seed UI with cached data first (works offline / while Render wakes up)
     (async () => {
       const [cachedUsers, cachedConvs] = await Promise.all([
-        loadUsers(user.id),
-        loadConversations(user.id),
+        loadUsers(userId),
+        loadConversations(userId),
       ]);
       if (!mounted) return;
-      if (cachedUsers.length) setUsers(cachedUsers.filter((u) => String(u.id) !== String(user.id)));
+      if (cachedUsers.length) setUsers(cachedUsers.filter((u) => String(u.id) !== String(userId)));
       if (cachedConvs.length) {
         const normalized = cachedConvs
           .map((c) => ({
             ...c,
             lastMsg: c.lastMsg ? { ...c.lastMsg, time: new Date(c.lastMsg.time || 0) } : null,
           }))
-          .filter((c) => c.other && String(c.other.id) !== String(user.id));
+          .filter((c) => c.other && String(c.other.id) !== String(userId));
+        conversationsRef.current = normalized;
+        lastConvSigRef.current = JSON.stringify(normalized);
         setConversations(normalized);
       }
-    })();
+    })().catch(() => {});
 
     fetchUsers().then((data) => {
-      if (data && data.length) {
-        const others = data.filter((u) => String(u.id) !== String(user.id));
-        setUsers(others);
-        saveUsers(user.id, others);
+      if (!mounted || !data || !data.length) return;
+      const others = data.filter((u) => String(u.id) !== String(userId));
+      setUsers(others);
+      const sig = JSON.stringify(others);
+      if (sig !== usersSig) {
+        usersSig = sig;
+        saveUsers(userId, others).catch(() => {});
       }
-    });
+    }).catch(() => {});
 
     if (socket) {
-      const refreshList = () => socket.emit('conversation:list');
+      const refreshList = () => {
+        const now = Date.now();
+        if (now - lastListEmitAt < LIST_REFRESH_COOLDOWN) return;
+        lastListEmitAt = now;
+        socket.emit('conversation:list');
+      };
       const hList = (list) => {
         const mapped = (Array.isArray(list) ? list : [])
           .map((c) => ({
@@ -120,89 +191,86 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
             other: c.other,
             lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
           }))
-          .filter((c) => c.other && String(c.other.id) !== String(user.id));
-        setConversations(mapped);
-        saveConversations(user.id, mapped);
+          .filter((c) => c.other && String(c.other.id) !== String(userId));
+        commitConversations(mapped);
         setPresence((prev) => {
-          const next = { ...prev };
+          let next = { ...prev };
           mapped.forEach((c) => {
-            next[c.other.id] = { isOnline: c.other.isOnline, lastSeen: c.other.last_seen };
+            next = capMap(next, c.other.id, { isOnline: c.other.isOnline, lastSeen: c.other.last_seen });
           });
           return next;
         });
       };
-      socket.on('conversation:list', hList);
-      socket.on('presence:update', ({ userId, isOnline, lastSeen }) => {
-        // Update presence in place - no full conversation-list round trip needed
-        // (avoids a server fetch on every presence change across all users).
-        setPresence((prev) => ({ ...prev, [userId]: { isOnline, lastSeen } }));
-      });
-      // In-call presence: the server broadcasts which of my chats is currently in
-      // a video call, so the row shows a WhatsApp-style "In a call" subtitle.
-      socket.on('video-call:presence', ({ targetUserId, onCall: isOnCall }) => {
+      const hPresence = ({ userId: id, isOnline, lastSeen }) => {
+        if (!id) return;
+        setPresence((prev) => capMap(prev, id, { isOnline, lastSeen }));
+      };
+      const hCallPresence = ({ targetUserId, onCall: isOnCall }) => {
+        if (!targetUserId) return;
         setOnCall((prev) => {
-          const next = { ...prev };
-          if (isOnCall) next[targetUserId] = true;
-          else delete next[targetUserId];
-          return next;
+          if (!isOnCall) {
+            if (!Object.prototype.hasOwnProperty.call(prev, targetUserId)) return prev;
+            const next = { ...prev };
+            delete next[targetUserId];
+            return next;
+          }
+          return capMap(prev, targetUserId, true);
         });
-      });
-      socket.on('message:receive', ({ message, sender, conversationId }) => {
-        if (!sender?.userId || String(sender.userId) === String(user.id)) return;
+      };
+      const hMessage = ({ message, sender, conversationId }) => {
+        if (!sender?.userId || String(sender.userId) === String(userId)) return;
         const senderPic = sender.profilePic || '';
-        setConversations((prev) => {
-          const mine = prev.filter((c) => String(c.other?.id) !== String(sender.userId));
-          const next = [
-            {
-              conversationId,
-              other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: senderPic },
-              lastMsg: { content: message.content || '📎 Media', type: message.type, time: new Date(message.created_at) },
-            },
-            ...mine,
-          ];
-          saveConversations(user.id, next);
-          return next;
-        });
-        if (sender.userId !== activeChatId) {
-          setUnread((u) => ({ ...u, [sender.userId]: (u[sender.userId] || 0) + 1 }));
+        updateConversations((prev) => [
+          {
+            conversationId,
+            other: { id: sender.userId, display_name: sender.displayName, profile_pic_url: senderPic },
+            lastMsg: { content: message.content || '📎 Media', type: message.type, time: new Date(message.created_at) },
+          },
+          ...prev.filter((c) => String(c.other?.id) !== String(sender.userId)),
+        ]);
+        if (String(sender.userId) !== String(activeChatIdRef.current)) {
+          setUnread((u) => capMap(u, sender.userId, (u[sender.userId] || 0) + 1));
         }
-      });
-      socket.on('conversation:cleared', ({ conversationId }) => {
-        setConversations((prev) => {
-          const next = prev.map((c) =>
-            c.conversationId === conversationId ? { ...c, lastMsg: null } : c
-          );
-          saveConversations(user.id, next);
-          return next;
-        });
-      });
+      };
+      const hCleared = ({ conversationId }) => {
+        updateConversations((prev) => prev.map((c) =>
+          c.conversationId === conversationId ? { ...c, lastMsg: null } : c
+        ));
+      };
       const hNudge = ({ from }) => {
         playNudgeVibration();
         const who = (from && (from.displayName || from.username)) || 'Someone';
         setNudgeToast(`${who} nudged you`);
       };
+
+      socket.on('conversation:list', hList);
+      socket.on('presence:update', hPresence);
+      socket.on('video-call:presence', hCallPresence);
+      socket.on('message:receive', hMessage);
+      socket.on('conversation:cleared', hCleared);
       socket.on('nudge', hNudge);
 
       refreshList();
       socket.on('connect', refreshList);
 
       return () => {
+        mounted = false;
         socket.off('conversation:list', hList);
-        socket.off('presence:update');
-        socket.off('video-call:presence');
-        socket.off('message:receive');
-        socket.off('conversation:cleared');
+        socket.off('presence:update', hPresence);
+        socket.off('video-call:presence', hCallPresence);
+        socket.off('message:receive', hMessage);
+        socket.off('conversation:cleared', hCleared);
         socket.off('nudge', hNudge);
         socket.off('connect', refreshList);
       };
     }
     return () => { mounted = false; };
-  }, [socket, user.id]);
+  }, [socket, userId, commitConversations, updateConversations]);
 
   const clearChat = (contact) => {
     if (socket) socket.emit('conversation:clear', { otherUserId: contact.id });
-    clearConversationCache(user.id, contact.id);
-    setConversations((prev) => prev.map((c) => (String(c.other?.id) === String(contact.id) ? { ...c, lastMsg: null } : c)) || []);
+    clearConversationCache(userId, contact.id).catch(() => {});
+    updateConversations((prev) => prev.map((c) => (String(c.other?.id) === String(contact.id) ? { ...c, lastMsg: null } : c)));
     setClearTarget(null);
   };
 
@@ -237,10 +305,11 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     }
     setNotifSending(true);
     setNotifResult(null);
+    let timeout = null;
     try {
       const conv = conversations.find((c) => c.other && c.other.id === notifTarget.id);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      timeout = trackTimeout(() => controller.abort(), 15000);
       const res = await fetch(`${SERVER_URL}/api/notifications/send`, {
         method: 'POST',
         headers: {
@@ -254,7 +323,8 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeout);
+      clearTrackedTimeout(timeout);
+      timeout = null;
       let data = null;
       try {
         data = await res.json();
@@ -284,7 +354,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
       }
       const via = data.deliveryMethod === 'socket' ? 'live connection' : 'push notification';
       setNotifResult({ ok: true, text: `Sent via ${via}` });
-      setTimeout(() => {
+      trackTimeout(() => {
         setNotifTarget(null);
         setNotifMsg('');
         setNotifResult(null);
@@ -297,21 +367,18 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         setNotifResult({ error: 'Cannot reach server — check your internet connection' });
       }
     } finally {
+      clearTrackedTimeout(timeout);
       setNotifSending(false);
     }
   };
 
-  const [nudgeVisible, setNudgeVisible] = useState(true);
-
-  // Long-press on a conversation: open the action modal. The Nudge option is only
-  // offered when the "Nudge Vibration" setting is enabled (fresh read at open time).
   const openChatActions = useCallback(async (contact) => {
     setNudgeVisible(await getNudgeVibrationEnabled());
     setActionTarget(contact);
   }, []);
 
   const chatRows = useMemo(() => {
-    const selfId = String(user?.id ?? '');
+    const selfId = String(userId ?? '');
     const byId = new Map(users.map((u) => [String(u.id), u]));
     const conversationIds = new Set(conversations.map((c) => String(c.other?.id)));
     const rows = [];
@@ -353,7 +420,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     return rows.filter((r) =>
       `${r.contact.display_name || ''} ${r.contact.username || ''} ${r.preview?.content || ''}`.toLowerCase().includes(q)
     );
-  }, [conversations, users, presence, onCall, unread, query, user?.id]);
+  }, [conversations, users, presence, onCall, unread, query, userId]);
 
   const renderChatRow = useCallback(({ item }) => (
     <ConversationRow
@@ -364,8 +431,8 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
       inCall={item.inCall}
       unread={item.unread}
       theme={theme}
-      onPress={() => openChat(item.contact)}
-      onLongPress={() => openChatActions(item.contact)}
+      onPress={openChat}
+      onLongPress={openChatActions}
     />
   ), [openChat, openChatActions, theme]);
 
@@ -376,14 +443,12 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
           <View style={[styles.header, { backgroundColor: theme.background }]}>
             <Text style={[styles.title, { color: theme.primaryDeep }]}>Tojey</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity onPress={() => switchTab('home')} style={styles.headerBtn}>
+              <TouchableOpacity onPress={openHomeTab} style={styles.headerBtn}>
                 <Icon name="play-circle-outline" size={24} color={theme.primary} />
               </TouchableOpacity>
               <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 4 }]}>
                 <Icon name="settings-outline" size={22} color={theme.primary} />
               </TouchableOpacity>
-              {/* Logout was removed from the header: signing out by accident
-                  loses the session, and it already lives in Settings. */}
             </View>
           </View>
 
@@ -420,24 +485,23 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         <YoutubeHomeScreen
           token={token}
           refreshTick={homeRefreshTick}
-          onOpenChats={() => switchTab('chats')}
+          onOpenChats={openChatsTab}
           onOpenSettings={onOpenSettings}
-          onChangeToShorts={() => switchTab('shorts')}
+          onChangeToShorts={openShortsTab}
           initialWatch={pendingWatch}
-          onInitialWatchConsumed={() => setPendingWatch(null)}
+          onInitialWatchConsumed={consumeWatch}
           registerBackHandler={registerYoutubeBack}
         />
       )}
 
       {tab === 'shorts' && (
-        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => switchTab('home')} />
+        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={openHomeTab} />
       )}
 
       {tab === 'downloads' && (
-        <DownloadsScreen onBack={() => switchTab('home')} />
+        <DownloadsScreen onBack={openHomeTab} />
       )}
 
-      {/* Long-press actions: send notification / clear messages */}
       <Modal transparent visible={!!actionTarget} animationType="fade" onRequestClose={() => setActionTarget(null)}>
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
@@ -483,7 +547,6 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         </View>
       </Modal>
 
-      {/* Send notification composer */}
       <Modal transparent visible={!!notifTarget} animationType="slide" onRequestClose={() => setNotifTarget(null)}>
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
@@ -515,7 +578,6 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         </View>
       </Modal>
 
-      {/* Clear chat confirmation */}
       <Modal transparent visible={!!clearTarget} animationType="fade" onRequestClose={() => setClearTarget(null)}>
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
@@ -538,7 +600,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
       {tab !== 'chats' && tab !== 'shorts' && (
         <BottomTabBar
           active={tab}
-          onChange={(k) => switchTab(k)}
+          onChange={switchTab}
           theme={theme}
         />
       )}
@@ -552,7 +614,7 @@ function ConversationRowFn({ contact, isOnline, lastSeen, inCall, onPress, onLon
   const initial = contact.display_name ? contact.display_name[0].toUpperCase() : '?';
   const lastMsg = preview && preview.content ? preview.content : (preview && preview.type ? '📎 Media' : '');
   return (
-    <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={onPress} onLongPress={onLongPress} delayLongPress={400}>
+    <TouchableOpacity style={[styles.row, { backgroundColor: theme.background }]} onPress={() => onPress(contact)} onLongPress={() => onLongPress(contact)} delayLongPress={400}>
       <View style={styles.avatarWrap}>
         <View style={[styles.avatar, { backgroundColor: contact.id === 1 ? theme.primary : theme.primaryDeep }]}>
           {contact.profile_pic_url ? (
@@ -590,8 +652,8 @@ function ConversationRowFn({ contact, isOnline, lastSeen, inCall, onPress, onLon
             <Text style={{ fontSize: fs(11), color: isOnline ? theme.online : theme.textSecondary, marginLeft: 3 }}>
               {isOnline ? 'Online' : presenceText(lastSeen)}
             </Text>
-</View>
-      </View>
+          </View>
+        </View>
       </View>
     </TouchableOpacity>
   );

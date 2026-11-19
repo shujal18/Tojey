@@ -1,10 +1,10 @@
 // YouTube surface container: Home feed (categories + shorts strip + continue
 // watching + subscriptions), in-surface Search / Channel / Playlist / Library
 // sub-screens and the full player modal.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, Image, StyleSheet, ActivityIndicator,
-  Platform, useWindowDimensions,
+  View, Text, TouchableOpacity, FlatList, ScrollView, Image, StyleSheet, ActivityIndicator,
+  Platform, InteractionManager, useWindowDimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../theme/ThemeContext';
@@ -34,8 +34,58 @@ const FALLBACK_CATEGORIES = [
 const FEED_CACHE_KEY = 'yt_home_feed_v1';
 const STRIP_CACHE_KEY = 'yt_home_shorts_strip_v1';
 const SUBFEED_CACHE_KEY = 'yt_home_subfeed_v1';
+const FEED_CACHE_TTL = 5 * 60 * 1000;
+const STRIP_CACHE_TTL = 10 * 60 * 1000;
+const SUBFEED_TTL = 5 * 60 * 1000;
+const SIGNALS_TTL = 20 * 1000;
+const REFRESH_COOLDOWN = 20 * 1000;
+const MAX_SUB_IDS = 15;
+const MAX_STRIP = 8;
+const CACHE_WRITES_CAP = 24;
 
-export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed, registerBackHandler }) {
+let signalsPromise = null;
+let signalsAt = 0;
+
+function getSignals(force) {
+  const now = Date.now();
+  if (!force && signalsPromise && now - signalsAt < SIGNALS_TTL) return signalsPromise;
+  signalsAt = now;
+  signalsPromise = Promise.all([getRecommendationSeeds(8), getWatchedVideoIds(250)])
+    .then(([seeds, watched]) => ({ seeds, watched }))
+    .catch(() => ({ seeds: [], watched: [] }));
+  return signalsPromise;
+}
+
+function invalidateSignals() {
+  signalsPromise = null;
+  signalsAt = 0;
+}
+
+function parseCache(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function isFresh(ts, ttl) {
+  return typeof ts === 'number' && Date.now() - ts < ttl;
+}
+
+function rememberWrite(writes, key, value) {
+  if (writes.current.get(key) === value) return false;
+  writes.current.set(key, value);
+  if (writes.current.size > CACHE_WRITES_CAP) {
+    const oldest = writes.current.keys().next().value;
+    writes.current.delete(oldest);
+  }
+  return true;
+}
+
+function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed, registerBackHandler }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('recommended');
   const [videos, setVideos] = useState([]);
@@ -48,36 +98,69 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [dlMap, setDlMap] = useState({});
   const [subFeed, setSubFeed] = useState([]);
   const [snap, setSnap] = useState(null);
+  const [categories] = useState(FALLBACK_CATEGORIES);
+  const [headerReady, setHeaderReady] = useState(false);
+
   const requestIdRef = useRef(0);
   const nonceRef = useRef(0);
-  const [categories] = useState(FALLBACK_CATEGORIES);
+  const aliveRef = useRef(true);
+  const inFlightRef = useRef(new Set());
+  const cacheWritesRef = useRef(new Map());
+  const dlSigRef = useRef('');
+  const snapSigRef = useRef('');
+  const lastFetchAtRef = useRef(0);
+  const refreshTickRef = useRef(refreshTick);
+  const shortsTickRef = useRef(refreshTick);
+  const shortsAuthRef = useRef(null);
+  const shortsFetchedAtRef = useRef(0);
+  const shortsInFlightRef = useRef(false);
+  const subTickRef = useRef(refreshTick);
+  const subAuthRef = useRef(null);
+  const subKeyRef = useRef(null);
+  const subFetchedAtRef = useRef(0);
+  const subInFlightRef = useRef(false);
+  const subLoadedRef = useRef(false);
+  const loadMoreInFlightRef = useRef(false);
+  const lastInitialWatchRef = useRef(null);
 
-  // Sub-view routing: search | channel | playlist | library | home
   const [view, setView] = useState('home');
   const [channelRoute, setChannelRoute] = useState(null);
   const [playlistRoute, setPlaylistRoute] = useState(null);
   const [watch, setWatch] = useState(null);
-  const lastInitialWatchRef = useRef(null);
+  const backStateRef = useRef({ watch, view });
+  backStateRef.current = { watch, view };
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      inFlightRef.current.clear();
+      shortsInFlightRef.current = false;
+      subInFlightRef.current = false;
+      loadMoreInFlightRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof registerBackHandler !== 'function') return undefined;
-    registerBackHandler(() => {
-      if (watch) {
+    const onBack = () => {
+      const state = backStateRef.current;
+      if (state.watch) {
         setWatch(null);
         return true;
       }
-      if (view !== 'home') {
+      if (state.view !== 'home') {
         setView('home');
         return true;
       }
       return false;
-    });
+    };
+    registerBackHandler(onBack);
     return () => {
       if (typeof registerBackHandler === 'function') registerBackHandler(null);
     };
-  }, [watch, view, registerBackHandler]);
+  }, [registerBackHandler]);
 
-  // Open a video requested by the Watch Together room exactly once.
   useEffect(() => {
     if (!initialWatch || !initialWatch.videoId) return;
     if (lastInitialWatchRef.current === initialWatch.key) return;
@@ -94,6 +177,20 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialWatch]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const show = () => { if (!cancelled && aliveRef.current) setHeaderReady(true); };
+    if (Platform.OS === 'ios' || Platform.OS === 'android') {
+      const handle = InteractionManager.runAfterInteractions(show);
+      return () => {
+        cancelled = true;
+        if (handle && typeof handle.cancel === 'function') handle.cancel();
+      };
+    }
+    const timer = setTimeout(show, 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
+
   const authHeaders = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token]);
 
   useEffect(() => subscribe((list) => {
@@ -103,171 +200,230 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
         m[`${e.videoId}:${e.kind || 'video'}`] = e;
       }
     });
-    setDlMap(m);
+    const sig = JSON.stringify(m);
+    if (sig === dlSigRef.current) return;
+    dlSigRef.current = sig;
+    if (aliveRef.current) setDlMap(m);
   }), []);
 
-  useEffect(() => {
-    let active = true;
-    initLibrary().then(() => {
-      if (active) setSnap(storeSnapshot());
-    });
-    const unsub = subscribeLibrary(() => setSnap(storeSnapshot()));
-    return () => {
-      active = false;
-      unsub();
-    };
+  const updateSnap = useCallback((next) => {
+    const value = next || {};
+    const sig = JSON.stringify([
+      (value.history || []).slice(0, 10).map((h) => h.videoId),
+      (value.subs || []).map((s) => s.channelId),
+    ]);
+    if (sig === snapSigRef.current) return;
+    snapSigRef.current = sig;
+    setSnap(next);
   }, []);
 
   useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const [stripRaw, subRaw] = await Promise.all([
-          AsyncStorage.getItem(STRIP_CACHE_KEY),
-          AsyncStorage.getItem(SUBFEED_CACHE_KEY),
-        ]);
-        if (!active) return;
-        if (stripRaw) {
-          const parsed = JSON.parse(stripRaw);
-          if (Array.isArray(parsed) && parsed.length) setShortsStrip(parsed.slice(0, 8));
-        }
-        if (subRaw) {
-          const parsed = JSON.parse(subRaw);
-          if (Array.isArray(parsed)) setSubFeed(parsed);
-        }
-      } catch (e) {}
-    })();
-    return () => { active = false; };
-  }, []);
+    initLibrary().then(() => {
+      if (aliveRef.current) updateSnap(storeSnapshot());
+    }).catch(() => {});
+    const unsub = subscribeLibrary((next) => {
+      if (aliveRef.current) updateSnap(next);
+    });
+    return () => { unsub(); };
+  }, [updateSnap]);
 
   const fetchPage = useCallback(
     async (cat, pageToken, opts = {}) => {
-      if (opts.replace) requestIdRef.current += 1;
-      const reqId = requestIdRef.current;
+      if (!aliveRef.current) return;
+      const replace = !!opts.replace;
       const background = !!opts.background;
+      const key = `${cat}|${pageToken || ''}|${replace ? 'r' : 'p'}`;
+      if (inFlightRef.current.has(key)) return;
+      inFlightRef.current.add(key);
       try {
-        setError('');
-        if (opts.replace && !background) setLoading(true);
-        else if (!opts.replace) setLoadingMore(true);
-        const q = [`category=${encodeURIComponent(cat)}`, `refresh=${opts.refresh ? 'true' : 'false'}`];
-        if (pageToken) q.push(`pageToken=${encodeURIComponent(pageToken)}`);
-        if (cat === 'recommended') {
-          const [seeds, watched] = await Promise.all([
-            getRecommendationSeeds(8),
-            getWatchedVideoIds(250),
-          ]);
-          if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
-          if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
-          q.push(`nonce=${nonceRef.current++}`);
-        }
-        const res = await fetch(`${SERVER_URL}/api/youtube/feed?${q.join('&')}`, { headers: authHeaders });
-        const data = await res.json();
-        if (reqId !== requestIdRef.current) return;
-        const nextVideos = opts.replace ? (data.videos || []) : null;
-        setVideos((prev) => (opts.replace ? (data.videos || []) : [...prev, ...(data.videos || [])]));
-        nextPageTokenRef.current = data.nextPageToken || null;
-        setHasMore(!!data.hasMore);
-        if (data.videos && data.videos.length === 0 && !opts.replace) setHasMore(false);
-        if (data.warning) setError(data.warning);
-        if (opts.replace) {
-          try {
-            await AsyncStorage.setItem(`${FEED_CACHE_KEY}_${cat}`, JSON.stringify({
+        if (replace) requestIdRef.current += 1;
+        const reqId = requestIdRef.current;
+        try {
+          if (aliveRef.current) {
+            setError('');
+            if (replace && !background) setLoading(true);
+            else if (!replace) setLoadingMore(true);
+          }
+          const q = [`category=${encodeURIComponent(cat)}`, `refresh=${opts.refresh ? 'true' : 'false'}`];
+          if (pageToken) q.push(`pageToken=${encodeURIComponent(pageToken)}`);
+          if (cat === 'recommended') {
+            const { seeds, watched } = await getSignals(!!opts.refresh);
+            if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+            if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
+            q.push(`nonce=${replace ? nonceRef.current++ : nonceRef.current}`);
+          }
+          const res = await fetch(`${SERVER_URL}/api/youtube/feed?${q.join('&')}`, { headers: authHeaders });
+          const data = await res.json();
+          if (!aliveRef.current || reqId !== requestIdRef.current) return;
+          const nextVideos = replace ? (data.videos || []) : null;
+          setVideos((prev) => (replace ? (data.videos || []) : [...prev, ...(data.videos || [])]));
+          nextPageTokenRef.current = data.nextPageToken || null;
+          setHasMore(!!data.hasMore);
+          if (data.videos && data.videos.length === 0 && !replace) setHasMore(false);
+          if (data.warning) setError(data.warning);
+          if (replace) {
+            lastFetchAtRef.current = Date.now();
+            const cacheKey = `${FEED_CACHE_KEY}_${cat}`;
+            const payload = JSON.stringify({
               videos: nextVideos || [],
               nextPageToken: data.nextPageToken || null,
               hasMore: !!data.hasMore,
               ts: Date.now(),
-            }));
-          } catch (e) {}
+            });
+            if (rememberWrite(cacheWritesRef, cacheKey, payload)) {
+              try { await AsyncStorage.setItem(cacheKey, payload); } catch (e) {}
+            }
+          }
+        } catch (e) {
+          if (aliveRef.current && reqId === requestIdRef.current && replace && !background) {
+            setError('Could not load the feed right now.');
+          }
+        } finally {
+          if (aliveRef.current && reqId === requestIdRef.current) {
+            setLoading(false);
+            setLoadingMore(false);
+          }
         }
-      } catch (e) {
-        if (reqId === requestIdRef.current && opts.replace && !background) setError('Could not load the feed right now.');
       } finally {
-        if (reqId === requestIdRef.current) {
-          setLoading(false);
-          setLoadingMore(false);
-        }
+        inFlightRef.current.delete(key);
       }
     },
     [authHeaders]
   );
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const [seeds, watched] = await Promise.all([
-          getRecommendationSeeds(8),
-          getWatchedVideoIds(250),
-        ]);
-        const q = ['category=trending'];
-        if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
-        if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
-        const res = await fetch(`${SERVER_URL}/api/shorts/feed?${q.join('&')}`, { headers: authHeaders });
-        const d = await res.json();
-        if (!mounted || !Array.isArray(d.items)) return;
-        const items = d.items.slice(0, 8);
-        setShortsStrip(items);
-        try { await AsyncStorage.setItem(STRIP_CACHE_KEY, JSON.stringify(items)); } catch (e) {}
-      } catch (e) {}
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [authHeaders, refreshTick]);
-
-  useEffect(() => {
     let active = true;
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(`${FEED_CACHE_KEY}_${category}`);
-        if (!active) return;
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && Array.isArray(parsed.videos)) {
-            setVideos(parsed.videos);
-            nextPageTokenRef.current = parsed.nextPageToken || null;
-            setHasMore(!!parsed.hasMore);
-            setLoading(false);
-            fetchPage(category, null, { replace: true, background: true });
-            return;
-          }
+        if (!active || !aliveRef.current) return;
+        const cached = parseCache(raw);
+        if (cached && Array.isArray(cached.videos) && cached.videos.length) {
+          setVideos(cached.videos);
+          nextPageTokenRef.current = cached.nextPageToken || null;
+          setHasMore(!!cached.hasMore);
+          setLoading(false);
+          if (isFresh(cached.ts, FEED_CACHE_TTL)) return;
+          fetchPage(category, null, { replace: true, background: true });
+          return;
         }
       } catch (e) {}
-      if (active) fetchPage(category, null, { replace: true });
+      if (active && aliveRef.current) fetchPage(category, null, { replace: true });
     })();
     return () => { active = false; };
   }, [category, fetchPage]);
 
   useEffect(() => {
-    if (refreshTick > 0) fetchPage(category, null, { replace: true, refresh: true });
+    if (refreshTick === refreshTickRef.current) return;
+    refreshTickRef.current = refreshTick;
+    if (Date.now() - lastFetchAtRef.current < REFRESH_COOLDOWN) return;
+    invalidateSignals();
+    fetchPage(category, null, { replace: true, refresh: true, background: true });
   }, [refreshTick, category, fetchPage]);
 
-  const subIdsKey = useMemo(
-    () => (snap?.subs || []).map((s) => s.channelId).filter(Boolean).sort().join(','),
-    [snap]
-  );
+  useEffect(() => {
+    let active = true;
+    const authChanged = shortsAuthRef.current !== null && shortsAuthRef.current !== authHeaders;
+    shortsAuthRef.current = authHeaders;
+    const forced = refreshTick !== shortsTickRef.current || authChanged;
+    shortsTickRef.current = refreshTick;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(STRIP_CACHE_KEY);
+        const cached = parseCache(raw);
+        if (active && aliveRef.current && Array.isArray(cached?.items)) {
+          setShortsStrip(cached.items.slice(0, MAX_STRIP));
+          shortsFetchedAtRef.current = cached.ts || Date.now();
+        }
+      } catch (e) {}
+      if (!active || !aliveRef.current) return;
+      if (!forced && Date.now() - shortsFetchedAtRef.current < STRIP_CACHE_TTL) return;
+      if (forced && !authChanged && Date.now() - shortsFetchedAtRef.current < REFRESH_COOLDOWN) return;
+      if (shortsInFlightRef.current) return;
+      shortsInFlightRef.current = true;
+      try {
+        const { seeds, watched } = await getSignals(forced);
+        const q = ['category=trending', 'refresh=false'];
+        if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
+        if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
+        const res = await fetch(`${SERVER_URL}/api/shorts/feed?${q.join('&')}`, { headers: authHeaders });
+        const d = await res.json();
+        if (!active || !aliveRef.current || !Array.isArray(d.items)) return;
+        const items = d.items.slice(0, MAX_STRIP);
+        setShortsStrip(items);
+        shortsFetchedAtRef.current = Date.now();
+        const payload = JSON.stringify({ items, ts: Date.now() });
+        if (rememberWrite(cacheWritesRef, STRIP_CACHE_KEY, payload)) {
+          try { await AsyncStorage.setItem(STRIP_CACHE_KEY, payload); } catch (e) {}
+        }
+      } catch (e) {} finally {
+        shortsInFlightRef.current = false;
+      }
+    })();
+    return () => { active = false; };
+  }, [authHeaders, refreshTick]);
+
+  const subIdsKey = useMemo(() => {
+    const ids = (snap?.subs || []).map((s) => s.channelId).filter(Boolean).slice(0, MAX_SUB_IDS);
+    return [...new Set(ids)].sort().join(',');
+  }, [snap]);
 
   useEffect(() => {
     if (!subIdsKey) {
       setSubFeed([]);
-      return;
+      return undefined;
     }
     let active = true;
-    fetch(`${SERVER_URL}/api/yt/subfeed?channels=${encodeURIComponent(subIdsKey)}&per=4&cap=20`, { headers: authHeaders })
-      .then((r) => (r.ok ? r.json() : { items: [] }))
-      .then(async (d) => {
-        if (!active) return;
+    const authChanged = subAuthRef.current !== null && subAuthRef.current !== authHeaders;
+    subAuthRef.current = authHeaders;
+    const keyChanged = subKeyRef.current !== null && subKeyRef.current !== subIdsKey;
+    subKeyRef.current = subIdsKey;
+    const tickChanged = refreshTick !== subTickRef.current;
+    subTickRef.current = refreshTick;
+    const forced = authChanged || keyChanged || tickChanged;
+    (async () => {
+      if (!subLoadedRef.current) {
+        subLoadedRef.current = true;
+        try {
+          const raw = await AsyncStorage.getItem(SUBFEED_CACHE_KEY);
+          const cached = parseCache(raw);
+          if (active && aliveRef.current && Array.isArray(cached?.items)) {
+            setSubFeed(cached.items);
+            subFetchedAtRef.current = cached.ts || Date.now();
+          }
+        } catch (e) {}
+      }
+      if (!active || !aliveRef.current) return;
+      if (!forced && Date.now() - subFetchedAtRef.current < SUBFEED_TTL) return;
+      if (forced && !keyChanged && !authChanged && Date.now() - subFetchedAtRef.current < REFRESH_COOLDOWN) return;
+      if (subInFlightRef.current) return;
+      subInFlightRef.current = true;
+      try {
+        const res = await fetch(`${SERVER_URL}/api/yt/subfeed?channels=${encodeURIComponent(subIdsKey)}&per=4&cap=20`, { headers: authHeaders });
+        const d = res.ok ? await res.json() : { items: [] };
+        if (!active || !aliveRef.current) return;
         const items = d.items || [];
         setSubFeed(items);
-        try { await AsyncStorage.setItem(SUBFEED_CACHE_KEY, JSON.stringify(items)); } catch (e) {}
-      })
-      .catch(() => {});
+        subFetchedAtRef.current = Date.now();
+        const payload = JSON.stringify({ items, ts: Date.now() });
+        if (rememberWrite(cacheWritesRef, SUBFEED_CACHE_KEY, payload)) {
+          try { await AsyncStorage.setItem(SUBFEED_CACHE_KEY, payload); } catch (e) {}
+        }
+      } catch (e) {} finally {
+        subInFlightRef.current = false;
+      }
+    })();
     return () => { active = false; };
   }, [subIdsKey, authHeaders, refreshTick]);
 
   const loadMore = useCallback(() => {
-    if (!hasMore || loadingMore || loading) return;
-    fetchPage(category, nextPageTokenRef.current, {});
+    if (loadMoreInFlightRef.current || !hasMore || loadingMore || loading) return;
+    const pageToken = nextPageTokenRef.current;
+    if (!pageToken) return;
+    loadMoreInFlightRef.current = true;
+    Promise.resolve(fetchPage(category, pageToken, {})).finally(() => {
+      loadMoreInFlightRef.current = false;
+    });
   }, [hasMore, loadingMore, loading, category, fetchPage]);
 
   const startDownload = useCallback((v, opts) => {
@@ -288,6 +444,11 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     }
   }, []);
 
+  const closeWatch = useCallback(() => setWatch(null), []);
+  const goHome = useCallback(() => setView('home'), []);
+  const goSearch = useCallback(() => setView('search'), []);
+  const goLibrary = useCallback(() => setView('library'), []);
+
   const openChannel = useCallback((item) => {
     setChannelRoute(item && (item.channelId || item.channelTitle) ? {
       channelId: item.channelId || '',
@@ -303,15 +464,14 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     setView('playlist');
   }, []);
 
-  // --- sub-screens ---------------------------------------------------------
   const sub =
     view === 'search' ? (
       <YoutubeSearchScreen
         token={token}
-        onBack={() => setView('home')}
+        onBack={goHome}
         onPlay={openWatch}
         onOpenChannel={openChannel}
-        onOpenPlaylist={(id) => openPlaylist(id)}
+        onOpenPlaylist={openPlaylist}
         dlMap={dlMap}
         onDownload={startDownload}
       />
@@ -319,9 +479,9 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       <YoutubeChannelScreen
         token={token}
         channelId={channelRoute.channelId}
-        onBack={() => setView('home')}
+        onBack={goHome}
         onPlay={openWatch}
-        onOpenPlaylist={(id) => openPlaylist(id)}
+        onOpenPlaylist={openPlaylist}
         dlMap={dlMap}
         onDownload={startDownload}
       />
@@ -329,7 +489,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
       <YoutubePlaylistScreen
         token={token}
         playlist={playlistRoute}
-        onBack={() => setView('home')}
+        onBack={goHome}
         onPlay={openWatch}
         onOpenChannel={openChannel}
         dlMap={dlMap}
@@ -338,7 +498,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
     ) : view === 'library' ? (
       <YoutubeLibraryScreen
         token={token}
-        onBack={() => setView('home')}
+        onBack={goHome}
         onPlay={openWatch}
         onOpenChannel={openChannel}
         onOpenPlaylist={openPlaylist}
@@ -350,8 +510,13 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const { width } = useWindowDimensions();
   const cardW = (width - 32 - 12) / 2;
   const historyArr = useMemo(() => (snap?.history || []).slice(0, 10), [snap]);
-  const subsArr = useMemo(() => snap?.subs || [], [snap]);
+  const subsArr = useMemo(() => (snap?.subs || []).slice(0, 12), [snap]);
+  const sectionLabel = useMemo(() => {
+    const label = categories.find((c) => c.id === category)?.label || 'Recommended for you';
+    return label === 'Recommended for you' ? label : `${label} videos`;
+  }, [categories, category]);
 
+  const videoKey = useCallback((v) => v.videoId, []);
   const renderVideoCard = useCallback(({ item }) => (
     <VideoCard item={item} width={cardW} dlMap={dlMap} onPress={openWatch} onDownload={startDownload} />
   ), [cardW, dlMap, openWatch, startDownload]);
@@ -384,49 +549,34 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
 
   const listHeader = useMemo(() => (
     <View>
-      {historyArr.length > 0 && (
+      {headerReady && historyArr.length > 0 && (
         <View style={styles.strip}>
           <Text style={[styles.stripTitle, { color: theme.text }]}>Continue watching</Text>
-          <FlatList
-            data={historyArr}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyExtractor={(h) => h.videoId}
-            contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
-            renderItem={renderHistoryItem}
-          />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stripContent}>
+            {historyArr.map((h) => <React.Fragment key={h.videoId}>{renderHistoryItem({ item: h })}</React.Fragment>)}
+          </ScrollView>
         </View>
       )}
 
-      {subsArr.length > 0 && (
+      {headerReady && subsArr.length > 0 && (
         <View style={styles.strip}>
           <Text style={[styles.stripTitle, { color: theme.text }]}>Subscriptions</Text>
-          <FlatList
-            data={subsArr}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyExtractor={(s) => s.channelId}
-            contentContainerStyle={{ paddingHorizontal: 16, gap: 14 }}
-            renderItem={renderSubscription}
-          />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.subsContent}>
+            {subsArr.map((s) => <React.Fragment key={s.channelId}>{renderSubscription({ item: s })}</React.Fragment>)}
+          </ScrollView>
         </View>
       )}
 
-      {subFeed.length > 0 && (
+      {headerReady && subFeed.length > 0 && (
         <View style={styles.strip}>
           <Text style={[styles.stripTitle, { color: theme.text }]}>New from your subscriptions</Text>
-          <FlatList
-            data={subFeed}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyExtractor={(v) => v.videoId}
-            contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
-            renderItem={renderSubFeedItem}
-          />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stripContent}>
+            {subFeed.map((v) => <React.Fragment key={v.videoId}>{renderSubFeedItem({ item: v })}</React.Fragment>)}
+          </ScrollView>
         </View>
       )}
 
-      {shortsStrip.length > 0 && (
+      {headerReady && shortsStrip.length > 0 && (
         <TouchableOpacity onPress={onChangeToShorts} activeOpacity={0.85}>
           <View style={[styles.shortsHeaderRow, { marginTop: 6 }]}>
             <Icon name="play-circle" size={18} color={theme.primary} />
@@ -440,14 +590,21 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           </View>
         </TouchableOpacity>
       )}
-      <Text style={[styles.sectionTitle, { color: theme.text }]}>
-        {(() => {
-          const label = categories.find((c) => c.id === category)?.label || 'Recommended for you';
-          return label === 'Recommended for you' ? label : `${label} videos`;
-        })()}
-      </Text>
+      <Text style={[styles.sectionTitle, { color: theme.text }]}>{sectionLabel}</Text>
     </View>
-  ), [historyArr, subsArr, subFeed, shortsStrip, theme, onChangeToShorts, categories, category, renderHistoryItem, renderSubscription, renderSubFeedItem]);
+  ), [headerReady, historyArr, subsArr, subFeed, shortsStrip, theme, onChangeToShorts, sectionLabel, renderHistoryItem, renderSubscription, renderSubFeedItem]);
+
+  const emptyComponent = useMemo(() => (
+    !loading ? (
+      <Text style={{ color: theme.textSecondary, textAlign: 'center', marginTop: 30 }}>No videos yet.</Text>
+    ) : null
+  ), [loading, theme.textSecondary]);
+
+  const footerComponent = useMemo(() => (
+    loadingMore ? <ActivityIndicator color={theme.primary} style={{ marginVertical: 16 }} /> : null
+  ), [loadingMore, theme.primary]);
+
+  const retry = useCallback(() => fetchPage(category, null, { replace: true }), [category, fetchPage]);
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
@@ -463,10 +620,10 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
               <Text style={[styles.brand, { color: theme.primary }]}>Tojey</Text>
               <Text style={[styles.tagline, { color: theme.textSecondary }]}>YouTube inside</Text>
             </View>
-            <TouchableOpacity onPress={() => setView('search')} style={styles.headerBtn}>
+            <TouchableOpacity onPress={goSearch} style={styles.headerBtn}>
               <Icon name="search" size={22} color={theme.primary} />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setView('library')} style={[styles.headerBtn, { marginLeft: 12 }]}>
+            <TouchableOpacity onPress={goLibrary} style={[styles.headerBtn, { marginLeft: 12 }]}>
               <Icon name="library-outline" size={22} color={theme.primary} />
             </TouchableOpacity>
             <TouchableOpacity onPress={onOpenChats} style={[styles.headerBtn, { marginLeft: 12 }]}>
@@ -477,45 +634,39 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
             </TouchableOpacity>
           </View>
 
-      {loading && videos.length === 0 ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.primary} />
-        </View>
-      ) : error && videos.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={{ color: theme.textSecondary, paddingHorizontal: 30, textAlign: 'center' }}>{error}</Text>
-          <TouchableOpacity style={styles.retry} onPress={() => fetchPage(category, null, { replace: true })}>
-            <Text style={{ color: theme.primary, fontWeight: '700' }}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <FlatList
-          data={videos}
-          keyExtractor={(v) => v.videoId}
-          numColumns={2}
-          columnWrapperStyle={styles.row}
-          renderItem={renderVideoCard}
-          initialNumToRender={12}
-          maxToRenderPerBatch={8}
-          updateCellsBatchingPeriod={30}
-          windowSize={7}
-          removeClippedSubviews={Platform.OS === 'android'}
-          onEndReached={loadMore}
-          onEndReachedThreshold={0.5}
-          ListHeaderComponent={listHeader}
-          ListEmptyComponent={
-            !loading ? (
-              <Text style={{ color: theme.textSecondary, textAlign: 'center', marginTop: 30 }}>No videos yet.</Text>
-            ) : null
-          }
-          ListFooterComponent={
-            loadingMore ? <ActivityIndicator color={theme.primary} style={{ marginVertical: 16 }} /> : null
-          }
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 12 }}
-          showsVerticalScrollIndicator={false}
-        />
-      )}
-      </>
+          {loading && videos.length === 0 ? (
+            <View style={styles.center}>
+              <ActivityIndicator color={theme.primary} />
+            </View>
+          ) : error && videos.length === 0 ? (
+            <View style={styles.center}>
+              <Text style={{ color: theme.textSecondary, paddingHorizontal: 30, textAlign: 'center' }}>{error}</Text>
+              <TouchableOpacity style={styles.retry} onPress={retry}>
+                <Text style={{ color: theme.primary, fontWeight: '700' }}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <FlatList
+              data={videos}
+              keyExtractor={videoKey}
+              numColumns={2}
+              columnWrapperStyle={styles.row}
+              renderItem={renderVideoCard}
+              initialNumToRender={12}
+              maxToRenderPerBatch={8}
+              updateCellsBatchingPeriod={30}
+              windowSize={7}
+              removeClippedSubviews={Platform.OS === 'android'}
+              onEndReached={loadMore}
+              onEndReachedThreshold={0.5}
+              ListHeaderComponent={listHeader}
+              ListEmptyComponent={emptyComponent}
+              ListFooterComponent={footerComponent}
+              contentContainerStyle={styles.feedContent}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
+        </>
       )}
 
       {!!watch && (
@@ -523,7 +674,7 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
           item={watch}
           authHeaders={authHeaders}
           token={token}
-          onClose={() => setWatch(null)}
+          onClose={closeWatch}
           onOpenChannel={openChannel}
           onOpenPlaylist={openPlaylist}
           dlMap={dlMap}
@@ -550,12 +701,17 @@ const styles = StyleSheet.create({
   retry: { marginTop: 14, paddingHorizontal: 20, paddingVertical: 8, borderRadius: 18 },
   strip: { marginTop: 18 },
   stripTitle: { fontSize: fs(15), fontWeight: '800', marginBottom: 10, paddingHorizontal: 16 },
+  stripContent: { paddingHorizontal: 16, gap: 10 },
+  subsContent: { paddingHorizontal: 16, gap: 14 },
   continueThumb: { width: 140, height: 79, borderRadius: 10, backgroundColor: '#000' },
   subAvatar: { width: 58, height: 58, borderRadius: 29, backgroundColor: '#000' },
   sectionTitle: { fontSize: fs(15), fontWeight: '800', marginHorizontal: 16, marginTop: 16, marginBottom: 8 },
   row: { gap: 12, marginBottom: 12 },
+  feedContent: { paddingHorizontal: 16, paddingBottom: 12 },
   shortsHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16 },
   shortsHeader: { fontSize: fs(16), fontWeight: '800' },
   shortsRow: { flexDirection: 'row', paddingHorizontal: 16, marginTop: 10, gap: 8 },
   shortsThumb: { width: 92, height: 126, borderRadius: 10, backgroundColor: '#000' },
 });
+
+export default memo(YoutubeHomeScreenInner);

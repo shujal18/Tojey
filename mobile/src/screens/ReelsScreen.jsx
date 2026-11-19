@@ -11,8 +11,9 @@ import {
   Animated,
   AppState,
   Alert,
-  Share as RNShare,
   Modal,
+  Platform,
+  StatusBar,
 } from 'react-native';
 import Video from 'react-native-video';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -20,8 +21,9 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { SERVER_URL } from '../config';
-import { getProxyPlayback } from '../services/ytPlayback';
+import { getProxyPlayback, mediaProxyUrl } from '../services/ytPlayback';
 import { getRecommendationSeeds, getWatchedVideoIds, recordWatched } from '../services/recommendation';
+import { initLibrary, isSubscribed, subscribeLibrary, toggleSubscribe } from '../services/library';
 import Toast from '../components/Toast';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -30,7 +32,6 @@ const STORAGE_KEY_SEEN = '@tojey_reels_seen_v2';
 const REEL_CYCLE_SIZE = 50;
 const SEEN_MAX_IDS = 200;
 const MAX_STREAM_CACHE = 12;
-const LIKES_STORAGE_KEY = '@tojey_reels_likes';
 const QUALITY_STORAGE_KEY = '@tojey_reels_quality';
 const SPEED_STORAGE_KEY = '@tojey_reels_speed';
 
@@ -65,6 +66,12 @@ function thumbnailUrlFor(item) {
   return vid ? `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg` : '';
 }
 
+function avatarUrlFor(item) {
+  if (!item) return '';
+  const value = item.avatar || item.channelAvatar || item.avatarUrl;
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
 function mediaType(kind) {
   if (kind === 'hls') return 'm3u8';
   if (kind === 'dash') return 'mpd';
@@ -76,6 +83,69 @@ function maxHeightFor(value) {
   const found = QUALITY_OPTIONS.find((q) => q.value === value);
   return found ? found.maxHeight : 1080;
 }
+
+async function readJson(response) {
+  const type = (response.headers && response.headers.get && response.headers.get('content-type')) || '';
+  const html = /html/i.test(type);
+  let data = {};
+  let parsed = false;
+  if (!html) {
+    try {
+      const value = await response.json();
+      if (value && typeof value === 'object') data = value;
+      parsed = true;
+    } catch (e) {
+      parsed = false;
+    }
+  }
+  return { data, parseFailed: html || !parsed };
+}
+
+function canUseFeedFallback(response, parseFailed) {
+  return parseFailed || response.status === 404 || response.status === 405;
+}
+
+function sessionExpiredError() {
+  const err = new Error('Session expired. Please sign in again.');
+  err.sessionExpired = true;
+  return err;
+}
+
+function extractItems(data) {
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.videos)) return data.videos;
+  return [];
+}
+
+async function fetchShortsPayload(baseUrl, request) {
+  const response = await fetch(`${baseUrl}/api/shorts/refresh`, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(request.body),
+  });
+  const parsed = await readJson(response);
+  if (response.status === 401) throw sessionExpiredError();
+  if (canUseFeedFallback(response, parsed.parseFailed)) {
+    const feedResponse = await fetch(
+      `${baseUrl}/api/shorts/feed?category=${encodeURIComponent(request.category)}&refresh=1`,
+      { method: 'GET', headers: request.headers },
+    );
+    const feedParsed = await readJson(feedResponse);
+    if (feedResponse.status === 401) throw sessionExpiredError();
+    if (feedParsed.parseFailed) throw new Error('Feed fallback returned an invalid response');
+    if (!feedResponse.ok) {
+      throw new Error(feedParsed.data.error || feedParsed.data.detail || `Feed request failed (${feedResponse.status})`);
+    }
+    return { data: feedParsed.data, usedFallback: true };
+  }
+  if (!response.ok) {
+    throw new Error(parsed.data.error || parsed.data.detail || 'Failed to refresh reels');
+  }
+  return { data: parsed.data, usedFallback: false };
+}
+
+const TOP_INSET = Platform.OS === 'ios' ? 44 : (StatusBar.currentHeight || 0);
+const BOTTOM_INSET = Platform.OS === 'ios' ? 22 : 12;
 
 const keyExtractor = (item) => item.videoId;
 
@@ -125,8 +195,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [error, setError] = useState(null);
   const [toast, setToast] = useState('');
   const [cycleId, setCycleId] = useState(null);
-  const [likedIds, setLikedIds] = useState(() => new Set());
+  const [usingFeedFallback, setUsingFeedFallback] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [captionExpanded, setCaptionExpanded] = useState(false);
+  const [subscribed, setSubscribed] = useState(false);
   const [activePaused, setActivePaused] = useState(false);
   const [resolved, setResolved] = useState(() => new Map());
   const [quality, setQuality] = useState('auto');
@@ -153,6 +226,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const failedStreamsRef = useRef(new Set());
   const playErrorTriesRef = useRef(new Map());
   const thumbAnims = useRef(new Map());
+  const suppressPauseRef = useRef(false);
   const videosRef = useRef([]);
   const fetchCycleRef = useRef(null);
   const primeWindowRef = useRef(null);
@@ -166,6 +240,22 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   }), [token]);
 
   useEffect(() => { videosRef.current = videos; }, [videos]);
+
+  useEffect(() => {
+    let alive = true;
+    initLibrary().catch(() => {});
+    const unsubscribe = subscribeLibrary(() => {
+      if (!alive) return;
+      const item = videosRef.current[activeIndexRef.current];
+      setSubscribed(!!(item && item.channelId && isSubscribed(item.channelId)));
+    });
+    return () => { alive = false; unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    const item = videos[activeIdx];
+    setSubscribed(!!(item && item.channelId && isSubscribed(item.channelId)));
+  }, [videos, activeIdx]);
 
   useEffect(() => {
     let alive = true;
@@ -225,17 +315,24 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     if (inflight) return inflight;
 
     const promise = (async () => {
+      const maxHeight = maxHeightFor(qualityRef.current);
       const playback = await getProxyPlayback(id, token, {
-        maxHeight: maxHeightFor(qualityRef.current),
+        maxHeight,
         skipCache: opts.retry === true,
         retry: opts.retry === true,
       });
-      let url = playback.videoUrl;
-      if (opts.retry) url += `${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+      const needsMuxed = !!playback.audioUrl && playback.videoHasAudio === false;
+      let url = needsMuxed ? mediaProxyUrl(id, token, 'best', maxHeight) : playback.videoUrl;
+      const isProxy = needsMuxed || playback.source === 'proxy' || /\/api\/yt\//.test(String(url));
+      if (opts.retry && isProxy) url += `${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
       const entry = {
-        source: { url, kind: 'progressive', height: playback.height || 0 },
-        itag: playback.itag,
-        via: playback.source,
+        source: {
+          url,
+          kind: needsMuxed || playback.videoHasAudio !== false ? 'progressive' : 'adaptive',
+          height: playback.height || 0,
+        },
+        itag: needsMuxed ? 'best' : playback.itag,
+        via: needsMuxed ? 'proxy-muxed' : playback.source,
       };
       const cache = streamCacheRef.current;
       cache.delete(id);
@@ -369,17 +466,15 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       ])).slice(-300);
       const nonce = opts.nonce || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-      const response = await fetch(`${SERVER_URL}/api/shorts/refresh`, {
-        method: 'POST',
+      const { data, usedFallback } = await fetchShortsPayload(SERVER_URL, {
+        category,
         headers: authHeaders,
-        body: JSON.stringify({ category, seeds, exclude, nonce, requestId: nonce }),
+        body: { category, seeds, exclude, nonce, requestId: nonce },
       });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || data.detail || 'Failed to refresh reels');
 
       const ids = new Set();
       const unique = [];
-      for (const raw of (Array.isArray(data.items) ? data.items : [])) {
+      for (const raw of extractItems(data)) {
         const id = sanitizeVideoId(raw && raw.videoId);
         if (!id || ids.has(id)) continue;
         if (failedVideoIdsRef.current.has(id) || failedStreamsRef.current.has(id)) continue;
@@ -391,7 +486,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
       videosRef.current = unique;
       setVideos(unique);
-      setCycleId(data.cycleId || null);
+      setCycleId(usedFallback ? null : (data.cycleId || null));
+      setUsingFeedFallback(usedFallback);
       failedVideoIdsRef.current.clear();
       failedStreamsRef.current.clear();
       playErrorTriesRef.current.clear();
@@ -406,7 +502,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       pendingSkipRef.current = false;
       scrollOffsetReset();
       if (primeWindowRef.current) primeWindowRef.current(0);
-      if (data.message) setToast(data.message);
+      setToast(usedFallback ? 'Feed fallback active' : (data.message || ''));
     } catch (e) {
       if (!isMountedRef.current || requestId !== requestIdRef.current) return;
       console.warn('[Reels] cycle error:', e.message);
@@ -438,25 +534,10 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     if (fetchCycleRef.current) fetchCycleRef.current({ nonce: `refresh-${Date.now()}` });
   }, [refreshing]);
 
-  const toggleLike = useCallback((id) => {
-    setLikedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      try { AsyncStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(Array.from(next))); } catch (e) {}
-      return next;
-    });
-  }, []);
-
   const toggleMute = useCallback(() => {
     const next = !mutedRef.current;
     mutedRef.current = next;
     setMuted(next);
-  }, []);
-
-  const shareVideo = useCallback((item) => {
-    if (!item || !item.videoId) return;
-    RNShare.share({ message: `${item.title || 'Check this out'}\nhttps://youtube.com/shorts/${item.videoId}` }).catch(() => {});
   }, []);
 
   const reportVideo = useCallback((item) => {
@@ -483,6 +564,18 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     ]);
   }, [authHeaders]);
 
+  const toggleChannelSubscribe = useCallback(async () => {
+    const item = videosRef.current[activeIndexRef.current];
+    if (!item || !item.channelId) return;
+    try {
+      setSubscribed(await toggleSubscribe({
+        channelId: item.channelId,
+        channelTitle: item.channelTitle || '',
+        avatar: item.avatar || item.channelAvatar || '',
+      }));
+    } catch (e) {}
+  }, []);
+
   useEffect(() => {
     const interval = setInterval(async () => {
       if (!staleReportRef.current.size) return;
@@ -506,6 +599,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     pendingSkipRef.current = false;
     setActiveIdx(index);
     setActivePaused(false);
+    setCaptionExpanded(false);
+    setMenuOpen(false);
   }, []);
 
   useEffect(() => { settleToIndexRef.current = settleToIndex; }, [settleToIndex]);
@@ -532,12 +627,16 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     const deltaY = Math.abs(touchEndY - touchStartYRef.current);
     const deltaX = Math.abs(touchEndX - touchStartXRef.current);
     const deltaTime = Date.now() - touchStartTimeRef.current;
-    if (settingsOpen) return;
+    if (settingsOpen || menuOpen) return;
+    if (suppressPauseRef.current) {
+      suppressPauseRef.current = false;
+      return;
+    }
     if (deltaX < 15 && deltaY < 15 && deltaTime < 300 &&
         touchStartYRef.current > 120 && touchStartXRef.current < SCREEN_W - 96) {
       setActivePaused((p) => !p);
     }
-  }, [settingsOpen]);
+  }, [settingsOpen, menuOpen]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -611,6 +710,8 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   }, []);
 
   const activeItem = videos[activeIdx];
+  const creatorArtwork = avatarUrlFor(activeItem);
+  const audioArt = activeItem && sanitizeVideoId(activeItem.videoId) ? thumbnailUrlFor(activeItem) : '';
   const activeResolution = activeItem && resolved.get(activeItem.videoId)
     ? resolved.get(activeItem.videoId).source.height
     : 0;
@@ -706,68 +807,132 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         }
       />
 
-      {toast && <Toast message={toast} onDismiss={() => setToast('')} />}
+      {toast && <Toast message={toast} bottom={BOTTOM_INSET + 132} />}
 
-      <TouchableOpacity onPress={onBack} style={styles.backBtn} accessibilityLabel="Back to chats">
+      <View style={styles.topGradient} pointerEvents="none">
+        <View style={{ height: 44, backgroundColor: 'rgba(0,0,0,0.40)' }} />
+        <View style={{ height: 32, backgroundColor: 'rgba(0,0,0,0.22)' }} />
+        <View style={{ height: 24, backgroundColor: 'rgba(0,0,0,0.10)' }} />
+      </View>
+      <View style={styles.bottomGradient} pointerEvents="none">
+        <View style={{ height: 26, backgroundColor: 'rgba(0,0,0,0.10)' }} />
+        <View style={{ height: 40, backgroundColor: 'rgba(0,0,0,0.25)' }} />
+        <View style={{ height: 82, backgroundColor: 'rgba(0,0,0,0.48)' }} />
+      </View>
+
+      <TouchableOpacity
+        onPress={onBack}
+        style={[styles.backBtn, { top: TOP_INSET + 10 }]}
+        accessibilityLabel="Back"
+      >
         <Icon name="chevron-back" size={26} color="#fff" />
       </TouchableOpacity>
 
-      {videos.length > 0 && (
-        <View style={styles.cycleBadge} pointerEvents="none">
-          <Text style={styles.cycleText}>{activeIdx + 1}/{videos.length}</Text>
-        </View>
-      )}
-
-      {activeItem && sanitizeVideoId(activeItem.videoId) ? (
-        <View style={styles.railWrap} pointerEvents="box-none">
-          <View style={styles.railAvatar} pointerEvents="none">
-            <Icon name="person" size={24} color="#fff" />
+      <View style={[styles.menuAnchor, { top: TOP_INSET + 8 }]} pointerEvents="box-none">
+        <TouchableOpacity
+          style={styles.menuButton}
+          onPress={() => setMenuOpen((value) => !value)}
+          accessibilityLabel="More options"
+        >
+          <Icon name="ellipsis-vertical" size={22} color="#fff" />
+        </TouchableOpacity>
+        {menuOpen && activeItem ? (
+          <View style={styles.menuSheet}>
+            <TouchableOpacity style={styles.menuRow} onPress={() => { toggleMute(); setMenuOpen(false); }}>
+              <Icon name={muted ? 'volume-mute' : 'volume-high'} size={18} color="#fff" />
+              <Text style={styles.menuRowText}>{muted ? 'Unmute' : 'Mute'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.menuRow} onPress={() => { setMenuOpen(false); setSettingsOpen(true); }}>
+              <Icon name="settings-outline" size={18} color="#fff" />
+              <Text style={styles.menuRowText}>Playback settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.menuRow} onPress={() => { setMenuOpen(false); refreshCycle(); }} disabled={refreshing}>
+              <Icon name="refresh-outline" size={18} color="#fff" />
+              <Text style={styles.menuRowText}>{refreshing ? 'Refreshing...' : 'Refresh feed'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.menuRow} onPress={() => { setMenuOpen(false); reportVideo(activeItem); }}>
+              <Icon name="flag-outline" size={18} color="#fff" />
+              <Text style={styles.menuRowText}>Report</Text>
+            </TouchableOpacity>
+            <View style={styles.menuDivider} />
+            <Text style={styles.menuCycleText}>
+              {videos.length ? `${activeIdx + 1}/${videos.length} in cycle` : 'No cycle loaded'}
+              {usingFeedFallback ? ' - feed fallback active' : ''}
+            </Text>
           </View>
-          <TouchableOpacity
-            style={styles.railBtn}
-            onPress={() => toggleLike(activeItem.videoId)}
-            accessibilityLabel={likedIds.has(activeItem.videoId) ? 'Unlike' : 'Like'}
-          >
-            <Icon
-              name={likedIds.has(activeItem.videoId) ? 'heart' : 'heart-outline'}
-              size={30}
-              color={likedIds.has(activeItem.videoId) ? '#FF2C55' : '#fff'}
-            />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.railBtn} onPress={() => shareVideo(activeItem)} accessibilityLabel="Share reel">
-            <Icon name="share-social" size={27} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.railBtn} onPress={toggleMute} accessibilityLabel={muted ? 'Unmute' : 'Mute'}>
-            <Icon name={muted ? 'volume-mute' : 'volume-high'} size={27} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.railBtn} onPress={() => setSettingsOpen(true)} accessibilityLabel="Video settings">
-            <Icon name="settings-outline" size={26} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.railBtn} onPress={() => reportVideo(activeItem)} accessibilityLabel="More options">
-            <Icon name="ellipsis-horizontal" size={25} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      ) : null}
+        ) : null}
+      </View>
 
       {activeIdx === videos.length - 1 && videos.length > 0 ? (
-        <TouchableOpacity onPress={refreshCycle} disabled={refreshing} style={styles.refreshReelsBtn}>
-          <Icon name="refresh-outline" size={18} color="#fff" />
-          <Text style={styles.refreshReelsText}>{refreshing ? 'Refreshing...' : 'Refresh Reels'}</Text>
+        <TouchableOpacity
+          onPress={refreshCycle}
+          disabled={refreshing}
+          style={[styles.refreshReelsBtn, { bottom: BOTTOM_INSET + 92 }]}
+        >
+          <Icon name="refresh-outline" size={17} color="#fff" />
+          <Text style={styles.refreshReelsText}>{refreshing ? 'Refreshing...' : 'Refresh feed'}</Text>
         </TouchableOpacity>
       ) : null}
 
       {activeItem ? (
-        <View style={styles.caption} pointerEvents="none">
-          <View style={styles.captionChannelRow}>
-            <View style={styles.captionAvatar} pointerEvents="none">
-              <Icon name="person" size={13} color="#fff" />
-            </View>
-            <Text numberOfLines={1} style={styles.captionChannel}>{activeItem.channelTitle || 'Tojey'}</Text>
+        <TouchableOpacity
+          style={[styles.audioThumb, { bottom: BOTTOM_INSET + 18 }]}
+          onPress={toggleMute}
+          accessibilityLabel={muted ? 'Unmute' : 'Mute'}
+        >
+          {audioArt ? (
+            <Image source={{ uri: audioArt }} style={styles.audioThumbImage} resizeMode="cover" />
+          ) : (
+            <Icon name="musical-notes" size={18} color="#fff" />
+          )}
+          <View style={styles.audioThumbIcon}>
+            <Icon name={muted ? 'volume-mute' : 'musical-notes'} size={12} color="#fff" />
           </View>
-          <Text numberOfLines={2} style={styles.captionTitle}>{activeItem.title || ''}</Text>
-          <Text numberOfLines={1} style={styles.captionMeta}>
-            {activeItem.durationSeconds ? `${Math.round(activeItem.durationSeconds)}s` : ''}
-          </Text>
+        </TouchableOpacity>
+      ) : null}
+
+      {activeItem ? (
+        <View style={[styles.caption, { bottom: BOTTOM_INSET + 18 }]} pointerEvents="box-none">
+          {activeItem.channelTitle || activeItem.channelId ? (
+            <View style={styles.captionChannelRow}>
+              {creatorArtwork ? (
+                <Image source={{ uri: creatorArtwork }} style={styles.captionAvatarImage} />
+              ) : (
+                <View style={styles.captionAvatar}>
+                  <Text style={styles.captionAvatarText}>
+                    {(activeItem.channelTitle || '?').trim().charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+              {activeItem.channelTitle ? (
+                <Text numberOfLines={1} style={styles.captionChannel}>{activeItem.channelTitle}</Text>
+              ) : null}
+              {activeItem.channelId ? (
+                <TouchableOpacity
+                  onPress={toggleChannelSubscribe}
+                  onTouchStart={() => { suppressPauseRef.current = true; }}
+                  style={styles.subscribeBtn}
+                >
+                  <Text style={styles.subscribeText}>{subscribed ? 'Subscribed' : 'Subscribe'}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={() => setCaptionExpanded((value) => !value)}
+            onTouchStart={() => { suppressPauseRef.current = true; }}
+          >
+            <Text numberOfLines={captionExpanded ? undefined : 2} style={styles.captionTitle}>
+              {activeItem.title || ''}
+            </Text>
+            {captionExpanded ? (
+              <Text style={styles.captionMeta}>
+                {activeItem.durationSeconds ? `${Math.round(activeItem.durationSeconds)}s` : ''}
+                {usingFeedFallback ? ' - Feed fallback active' : ''}
+              </Text>
+            ) : null}
+          </TouchableOpacity>
         </View>
       ) : null}
 
@@ -806,7 +971,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
                 </TouchableOpacity>
               ))}
             </View>
-            <Text style={styles.settingsHint}>Cycle {cycleId ? 'ready' : 'loading'} - {REEL_CYCLE_SIZE} reels per refresh</Text>
+            <Text style={styles.settingsHint}>
+              {usingFeedFallback
+                ? 'Feed fallback active - no cycle id from server'
+                : `Cycle ${cycleId ? 'ready' : 'loading'} - ${REEL_CYCLE_SIZE} reels per refresh`}
+            </Text>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -863,105 +1032,174 @@ const styles = StyleSheet.create({
     paddingVertical: fs(10),
     borderRadius: fs(10),
   },
+  topGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 40,
+  },
+  bottomGradient: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 40,
+  },
   backBtn: {
     position: 'absolute',
-    top: 26,
     left: 12,
     zIndex: 50,
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.42)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  cycleBadge: {
+  menuAnchor: {
     position: 'absolute',
-    top: 32,
     right: 12,
-    zIndex: 50,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    zIndex: 52,
+    alignItems: 'flex-end',
   },
-  cycleText: {
+  menuButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(0,0,0,0.42)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuSheet: {
+    marginTop: 8,
+    width: 208,
+    borderRadius: 14,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(18,18,22,0.92)',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  menuRowText: {
     color: '#fff',
-    fontSize: fs(12),
-    fontWeight: '700',
+    fontSize: fs(13),
+    fontWeight: '600',
   },
-  railWrap: {
-    position: 'absolute',
-    right: 10,
-    top: '38%',
-    zIndex: 48,
-    alignItems: 'center',
-    gap: 16,
+  menuDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    marginVertical: 4,
   },
-  railAvatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: 'rgba(15,15,15,0.55)',
-    borderWidth: 1.5,
-    borderColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 4,
-  },
-  railBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(15,15,15,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
+  menuCycleText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: fs(11),
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   refreshReelsBtn: {
     position: 'absolute',
-    bottom: 132,
     alignSelf: 'center',
     zIndex: 60,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    borderRadius: 24,
-    backgroundColor: '#6C3CE9',
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 22,
+    backgroundColor: 'rgba(108,60,233,0.9)',
   },
   refreshReelsText: {
     color: '#fff',
-    fontSize: fs(14),
+    fontSize: fs(13),
     fontWeight: '700',
+  },
+  audioThumb: {
+    position: 'absolute',
+    right: 14,
+    zIndex: 46,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  audioThumbImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 12,
+  },
+  audioThumbIcon: {
+    position: 'absolute',
+    right: -3,
+    bottom: -3,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   caption: {
     position: 'absolute',
     left: 14,
-    right: 92,
-    bottom: 20,
+    right: 66,
     zIndex: 45,
   },
   captionChannelRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 7,
   },
   captionAvatar: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: 'rgba(255,255,255,0.35)',
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.28)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 7,
+    marginRight: 8,
+  },
+  captionAvatarImage: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginRight: 8,
+  },
+  captionAvatarText: {
+    color: '#fff',
+    fontSize: fs(12),
+    fontWeight: '800',
   },
   captionChannel: {
     color: '#fff',
-    fontSize: fs(14),
+    fontSize: fs(13),
     fontWeight: '800',
     textShadowColor: 'rgba(0,0,0,0.7)',
     textShadowRadius: 6,
+    flexShrink: 1,
+  },
+  subscribeBtn: {
+    marginLeft: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.85)',
+  },
+  subscribeText: {
+    color: '#fff',
+    fontSize: fs(11),
+    fontWeight: '700',
   },
   captionTitle: {
     color: '#fff',

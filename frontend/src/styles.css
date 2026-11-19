@@ -137,6 +137,32 @@ input, textarea {
   animation: slideInUp 0.25s ease forwards;
 }
 
+@keyframes messageEnterSent {
+  from { opacity: 0; transform: translate3d(12px, 6px, 0) scale(0.98); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes messageEnterReceived {
+  from { opacity: 0; transform: translate3d(-12px, 6px, 0) scale(0.98); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+.message-enter-sent {
+  animation: messageEnterSent 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.message-enter-received {
+  animation: messageEnterReceived 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-enter,
+  .message-enter-sent,
+  .message-enter-received {
+    animation: none;
+  }
+}
+
 .reaction-pop {
   animation: pop 0.3s ease forwards;
 }

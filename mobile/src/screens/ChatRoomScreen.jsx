@@ -222,23 +222,120 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const bottomInsetRef = useRef(0);
   const scrollActionRef = useRef(null);
   const pendingCountRef = useRef(0);
+  const scrollModeRef = useRef(null);
+  const mobileDiffRef = useRef({ prev: null, aliases: new Map(), chatId: null });
+  const listIntentRef = useRef(null);
+  const historyLoadRef = useRef(false);
+  const receiveIntentRef = useRef(false);
+  const replaceIntentRef = useRef(false);
 
-  // Single instant-scroll helper: double-rAF ensures layout has applied after a
-  // state change before scrolling, and always animated:false (spec: no animated
-  // list scroll).
+  const runScrollToEnd = useCallback((animated) => {
+    const l = listRef.current;
+    if (l) l.scrollToEnd({ animated });
+  }, []);
+
   const scrollToLatestInstant = useCallback(() => {
-    // Coalesce bursts (send + ack + content-change all want the same jump) into
-    // a single double-rAF scroll; always animated:false (spec: no animated list scroll).
-    if (scrollActionRef.current === 'latest') return;
-    scrollActionRef.current = 'latest';
+    scrollModeRef.current = 'instant';
+    if (scrollActionRef.current) return;
+    scrollActionRef.current = 'instant';
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         scrollActionRef.current = null;
-        const l = listRef.current;
-        if (l) l.scrollToEnd({ animated: false });
+        scrollModeRef.current = null;
+        pendingScrollToBottomRef.current = false;
+        runScrollToEnd(false);
       });
     });
-  }, []);
+  }, [runScrollToEnd]);
+
+  const scrollToLatestAnimated = useCallback(() => {
+    scrollModeRef.current = 'animated';
+    if (scrollActionRef.current) return;
+    scrollActionRef.current = 'animated';
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollActionRef.current = null;
+        scrollModeRef.current = null;
+        pendingScrollToBottomRef.current = false;
+        runScrollToEnd(true);
+      });
+    });
+  }, [runScrollToEnd]);
+
+  const listMeta = useMemo(() => {
+    const state = mobileDiffRef.current;
+    if (state.chatId !== otherUserId) {
+      state.chatId = otherUserId;
+      state.aliases.clear();
+      state.prev = null;
+    }
+    const prev = state.prev;
+    const aliases = state.aliases;
+    const prevKeys = new Set();
+    if (prev) {
+      prev.forEach((m) => {
+        let k = String(m.id);
+        if (aliases.has(k)) k = aliases.get(k);
+        prevKeys.add(k);
+      });
+    }
+    const raw = messages.map((m, i) => {
+      const prevAt = prev ? prev[i] : null;
+      if (prevAt && String(prevAt.id).startsWith('tmp-') && !String(m.id).startsWith('tmp-') && prevAt.sender_id === m.sender_id) {
+        aliases.set(String(m.id), String(prevAt.id));
+      }
+      let key = String(m.id);
+      if (aliases.has(key)) key = aliases.get(key);
+      return { key, message: m, isNew: !!prev && prev.length > 0 && !prevKeys.has(key) };
+    });
+    const added = raw.filter(e => e.isNew).length;
+    const addedSent = raw.filter(e => e.isNew && e.message.sender_id === currentUser.id).length;
+    const addedReceived = added - addedSent;
+    const nextKeys = new Set(raw.map(e => e.key));
+    let removed = 0;
+    if (prev) {
+      prev.forEach((m) => {
+        let k = String(m.id);
+        if (aliases.has(k)) k = aliases.get(k);
+        if (!nextKeys.has(k)) removed += 1;
+      });
+    }
+    const userAppend = addedSent > 0 || (receiveIntentRef.current && addedReceived > 0);
+    const replace = replaceIntentRef.current && added > 0;
+    const load = !prev || prev.length === 0 || messages.length === 0 || prependPendingRef.current || historyLoadRef.current || replace || (!userAppend && added > 1) || (removed > 0 && added === 0);
+    const kind = load ? 'instant' : addedSent > 0 ? 'own' : addedReceived > 0 ? 'receive' : 'none';
+    listIntentRef.current = { token: messages, kind };
+    const entryMap = new Map();
+    raw.forEach((e) => {
+      entryMap.set(String(e.message.id), { key: e.key, animate: !load && e.isNew && added === 1 });
+    });
+    return { entryMap };
+  }, [messages, currentUser.id, otherUserId]);
+
+  useEffect(() => {
+    const intent = listIntentRef.current;
+    if (!intent || intent.token !== messages) return;
+    if (intent.kind === 'instant') {
+      pendingScrollToBottomRef.current = true;
+      scrollToLatestInstant();
+    } else if (intent.kind === 'own') {
+      atBottomRef.current = true;
+      atBottomNearRef.current = true;
+      setAtBottomNear(true);
+      pendingCountRef.current = 0;
+      setPendingCount(0);
+      pendingScrollToBottomRef.current = true;
+      scrollToLatestAnimated();
+    } else if (intent.kind === 'receive' && atBottomNearRef.current) {
+      atBottomRef.current = true;
+      pendingScrollToBottomRef.current = true;
+      scrollToLatestAnimated();
+    }
+    mobileDiffRef.current.prev = messages;
+    historyLoadRef.current = false;
+    receiveIntentRef.current = false;
+    replaceIntentRef.current = false;
+  }, [messages, scrollToLatestInstant, scrollToLatestAnimated]);
 
   // Send a message through the socket if connected, otherwise queue it for flush
   // on reconnect. Mirrors whatsapp's offline-queue behaviour.
@@ -308,15 +405,19 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     // Follow growth only when the user is at the bottom or a jump is explicitly owed.
     if ((atBottomRef.current || pendingScrollToBottomRef.current) && scrolledToEndOnMount.current) {
       pendingScrollToBottomRef.current = false;
-      scrollToLatestInstant();
+      if (scrollModeRef.current === 'animated') scrollToLatestAnimated();
+      else scrollToLatestInstant();
     }
-  }, [scrollToLatestInstant]);
+  }, [scrollToLatestInstant, scrollToLatestAnimated]);
 
   // Stable FlatList layout callback (memo comparison of <MessageList> requires it to
   // not be an inline arrow).
   const handleListLayout = useCallback(() => {
-    if (atBottomRef.current || pendingScrollToBottomRef.current) scrollToLatestInstant();
-  }, [scrollToLatestInstant]);
+    if (atBottomRef.current || pendingScrollToBottomRef.current) {
+      if (scrollModeRef.current === 'animated') scrollToLatestAnimated();
+      else scrollToLatestInstant();
+    }
+  }, [scrollToLatestInstant, scrollToLatestAnimated]);
 
   const handleScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
@@ -593,6 +694,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       if (cached && cached.length) {
         trackIds(cached);
         lastSyncedIdRef.current = computeSyncCursor(cached);
+        historyLoadRef.current = true;
         setMessages(cached);
         atBottomRef.current = true;
         atBottomNearRef.current = true;
@@ -610,6 +712,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
     const hHistory = (msgs) => {
       const list = Array.isArray(msgs) ? msgs : [];
+      historyLoadRef.current = true;
       setMessages((prev) => historyAdvance(prev, list));
       oldestIdRef.current = list.length ? list[0].id : null;
       hasMoreRef.current = list.length >= 200;
@@ -625,6 +728,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       // a sync/retry can never produce a second row. The updater re-checks the same set
       // so a concurrent duplicate is collapsed even between renders.
       if (!message || !isServerId(message)) return;
+      receiveIntentRef.current = true;
       setMessages((prev) => {
         const ids = knownIdsRef.current || trackIds(prev);
         if (ids.has(message.id)) return prev;
@@ -649,14 +753,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           headUnreadRef.current += 1;
           updateChatHead();
         }
-        if (!atBottomRef.current) {
+        if (!atBottomNearRef.current) {
           // Away from the bottom: count the unread badge, never steal position.
-          setPendingCount((n) => n + 1);
+          pendingCountRef.current += 1;
+          setPendingCount(pendingCountRef.current);
         } else {
-          // At the bottom: owe instantly a jump so the new bubble clears the
-          // composer (double-rAF), and re-check once content actually grows.
+          atBottomRef.current = true;
           pendingScrollToBottomRef.current = true;
-          scrollToLatestInstant();
+          scrollToLatestAnimated();
         }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
@@ -816,6 +920,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   // Ref mirror of the unread count so scroll handlers clear it without re-renders.
   useEffect(() => { pendingCountRef.current = pendingCount; }, [pendingCount]);
+
+  const jumpToLatest = useCallback(() => {
+    pendingCountRef.current = 0;
+    setPendingCount(0);
+    atBottomRef.current = true;
+    atBottomNearRef.current = true;
+    setAtBottomNear(true);
+    pendingScrollToBottomRef.current = true;
+    scrollToLatestAnimated();
+  }, [scrollToLatestAnimated]);
 
   // Keyboard reopen fix: Android stops showing the keyboard on the focused input
   // after a manual dismiss. Track visibility and force a blur+refocus cycle.
@@ -985,12 +1099,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     atBottomRef.current = true;
     atBottomNearRef.current = true;
     setAtBottomNear(true);
+    pendingCountRef.current = 0;
     setPendingCount(0);
     if (socketReady()) {
       // Optimistic render + instant scroll-to-latest: the message appears
       // immediately, then the ack swaps the temp id in place (no scroll jump).
       setMessages((prev) => [...prev, localMsg]);
-      scrollToLatestInstant();
+      scrollToLatestAnimated();
       const payload = {
         otherUserId,
         type: 'TEXT',
@@ -1002,23 +1117,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
       socket.emit('message:send', payload, (ack) => {
         if (ack?.ok) {
-          atBottomRef.current = true;
-          setAtBottomNear(true);
-          setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
           addKnownId(ack.message && ack.message.id);
           bumpCursor(ack.message && ack.message.id);
-          // Reference-parity: keep the freshly sent bubble flush above the composer
-          // even after the ack swap changes row geometry.
-          pendingScrollToBottomRef.current = true;
-          scrollToLatestInstant();
         }
       });
     } else {
       // Offline: show the pending row immediately and queue the send for flush
       // on reconnect (idempotent by clientId).
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      scrollToLatestInstant();
+      scrollToLatestAnimated();
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content, replyTo });
     }
   };
@@ -1058,28 +1166,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     atBottomRef.current = true;
     atBottomNearRef.current = true;
     setAtBottomNear(true);
+    pendingCountRef.current = 0;
     setPendingCount(0);
     if (socketReady()) {
       setMessages((prev) => [...prev, localMsg]);
-      scrollToLatestInstant();
+      scrollToLatestAnimated();
       socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
         if (ack && ack.ok) {
-          atBottomRef.current = true;
-          setAtBottomNear(true);
-          setPendingCount(0);
           setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
           addKnownId(ack.message && ack.message.id);
           bumpCursor(ack.message && ack.message.id);
-          pendingScrollToBottomRef.current = true;
-          scrollToLatestInstant();
         }
       });
     } else {
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      scrollToLatestInstant();
+      scrollToLatestAnimated();
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
     }
-  }, [socket, otherUserId, currentUser.id, scrollToLatestInstant]);
+  }, [socket, otherUserId, currentUser.id, scrollToLatestAnimated]);
 
   const sendVoiceMessage = useCallback((filePath, durationSec) => {
     if (!filePath) return;
@@ -1107,7 +1211,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     pendingScrollToBottomRef.current = true;
-    scrollToLatestInstant();
+    scrollToLatestAnimated();
     uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1123,8 +1227,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
-            pendingScrollToBottomRef.current = true;
-            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
             deleteVoiceFile(cleanPath).catch(() => {});
@@ -1136,7 +1238,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         console.error('voice upload failed:', e);
         setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
       });
-  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, scrollToLatestInstant]);
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, scrollToLatestAnimated]);
 
   const startRecording = async () => {
     if (recording) return;
@@ -1299,7 +1401,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     pendingScrollToBottomRef.current = true;
-    scrollToLatestInstant();
+    scrollToLatestAnimated();
     uploadAsset({ uri: asset.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1315,8 +1417,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
-            pendingScrollToBottomRef.current = true;
-            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1479,7 +1579,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     pendingScrollToBottomRef.current = true;
-    scrollToLatestInstant();
+    scrollToLatestAnimated();
     uploadAsset({ uri: opts.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
@@ -1496,8 +1596,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
             addKnownId(ack.message && ack.message.id);
             bumpCursor(ack.message && ack.message.id);
-            pendingScrollToBottomRef.current = true;
-            scrollToLatestInstant();
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1526,6 +1624,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       ? (mimeFor(msg) || 'application/octet-stream')
       : isVoice ? 'audio/mp4'
       : isVideo ? 'video/mp4' : 'image/jpeg';
+    replaceIntentRef.current = true;
     setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
     pendingScrollToBottomRef.current = true;
     scrollToLatestInstant();
@@ -1580,7 +1679,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     };
     setMessages((prev) => [...prev, localMsg]);
     pendingScrollToBottomRef.current = true;
-    scrollToLatestInstant();
+    scrollToLatestAnimated();
     try {
       const upData = await uploadAsset({ uri: filePath, name: fileName, type: 'image/png' }, (p) => setUploadProgress(tempId, p));
       uploadTasks.current.delete(fileName);
@@ -1593,10 +1692,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       }, (ack) => {
         if (ack?.ok) {
           setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-            addKnownId(ack.message && ack.message.id);
-            bumpCursor(ack.message && ack.message.id);
-          pendingScrollToBottomRef.current = true;
-          scrollToLatestInstant();
+          addKnownId(ack.message && ack.message.id);
+          bumpCursor(ack.message && ack.message.id);
           if (onDone) onDone();
         } else {
           setMessages((prev) => prev.filter((m) => m.id !== tempId));
@@ -1694,6 +1791,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
   // adjustResize, so the keyboard draws over a window that never shrank.
   const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 8;
   bottomInsetRef.current = bottomPad;
+  const jumpBottom = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 12;
 
   return (
     <KeyboardAvoidingView
@@ -1871,7 +1969,20 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           onPlayVoice={toggleVoicePlayback}
           playingVoiceId={playingVoiceId}
           voiceProgress={voiceProgress}
+          entryMap={listMeta.entryMap}
         />
+      {!atBottomNear && pendingCount > 0 && (
+        <TouchableOpacity
+          onPress={jumpToLatest}
+          style={[styles.jumpLatest, { bottom: jumpBottom, backgroundColor: theme.primary }]}
+          accessibilityLabel="Jump to latest message"
+        >
+          <Icon name="arrow-down" size={fs(18)} color="#fff" />
+          <View style={styles.jumpBadge}>
+            <Text style={styles.jumpBadgeText}>{pendingCount > 99 ? '99+' : pendingCount}</Text>
+          </View>
+        </TouchableOpacity>
+      )}
       {/* More emojis (reached via the + on the reaction bar). Reactions only. */}
       {reactionMenu && (
         <View style={styles.menuOverlay}>
@@ -2229,12 +2340,30 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyRef, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice }) {
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyRef, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, animateEntry, rowKey }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const revealOpacity = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
   const replied = useRef(false);
+  const entryOpacity = useRef(new Animated.Value(1)).current;
+  const entryTranslate = useRef(new Animated.Value(0)).current;
+  const entryScale = useRef(new Animated.Value(1)).current;
+  const entryRunRef = useRef(false);
+
+  useEffect(() => { entryRunRef.current = false; }, [rowKey]);
+  useEffect(() => {
+    if (!animateEntry || entryRunRef.current) return;
+    entryRunRef.current = true;
+    entryOpacity.setValue(0);
+    entryTranslate.setValue(isSent ? 10 : -10);
+    entryScale.setValue(0.96);
+    Animated.parallel([
+      Animated.timing(entryOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+      Animated.spring(entryTranslate, { toValue: 0, useNativeDriver: true, friction: 8, tension: 180 }),
+      Animated.spring(entryScale, { toValue: 1, useNativeDriver: true, friction: 9, tension: 200 }),
+    ]).start();
+  }, [animateEntry, rowKey, isSent, entryOpacity, entryTranslate, entryScale]);
 
   const swipeAction = (m) => (suggestEdit && onEditRow ? onEditRow(m) : onReply(m));
 
@@ -2332,7 +2461,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   }
 
   return (
-    <View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start' }]}>
+    <Animated.View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start', opacity: entryOpacity, transform: [{ translateX: entryTranslate }, { scale: entryScale }] }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
         {/* Swipe affordance revealed behind the bubble (reply, or edit for your own text) */}
         <Animated.View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)', opacity: revealOpacity }]}>
@@ -2546,8 +2675,8 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
             ))}
           </TouchableOpacity>
         )}
-        </View>
       </View>
+    </Animated.View>
   );
 }
 
@@ -2560,7 +2689,7 @@ const MessageRow = memo(MessageRowFn);
 function MessageListFn({
   messages, ownId, otherUserName, theme, listRef, bottomPad, onScroll, onContentSizeChange, onLayout,
   onOpenMedia, onLongPress, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice,
-  playingVoiceId, voiceProgress,
+  playingVoiceId, voiceProgress, entryMap,
 }) {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -2617,8 +2746,9 @@ function MessageListFn({
     const prev = index > 0 ? messagesRef.current[index - 1] : null;
     const grouped = !!prev && (prev.sender_id || 0) === safe.sender_id && !!prev.type && prev.type === safe.type;
     const replyRef = safe.reply_to ? (replyIndexRef.current.get(safe.reply_to) || null) : null;
+    const entry = entryMap.get(String(safe.id)) || { key: String(safe.id), animate: false };
     return (
-      <RowBoundary isSent={isSent} rowKey={String(safe.id)}>
+      <RowBoundary isSent={isSent} rowKey={entry.key}>
         <MessageRow
           message={safe}
           isSent={isSent}
@@ -2641,17 +2771,19 @@ function MessageListFn({
           voicePlaying={playingVoiceId === safe.id}
           voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
           onPlayVoice={onPlayVoice}
+          animateEntry={entry.animate}
+          rowKey={entry.key}
         />
       </RowBoundary>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, ownId, otherUserName, onLongPress, onOpenMedia, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice, jumpToMessage, highlightId, playingVoiceId, voiceProgress]);
+  }, [theme, ownId, otherUserName, onLongPress, onOpenMedia, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice, jumpToMessage, highlightId, playingVoiceId, voiceProgress, entryMap]);
 
   return (
     <FlatList
       ref={listRef}
       data={messages}
-      keyExtractor={(item, idx) => String(item.id || `tmp-${idx}`)}
+      keyExtractor={(item, idx) => (entryMap.get(String(item.id)) || {}).key || String(item.id || `tmp-${idx}`)}
       onContentSizeChange={onContentSizeChange}
       onScroll={onScroll}
       onScrollToIndexFailed={onScrollToIndexFailed}
@@ -2821,6 +2953,9 @@ const styles = StyleSheet.create({
   headerMenuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, justifyContent: 'flex-start' },
   headerMenu: { alignSelf: 'flex-end', marginTop: fs(62), marginRight: 8, borderRadius: fs(14), minWidth: fs(200), paddingVertical: 6, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
   headerMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(12) },
+  jumpLatest: { position: 'absolute', right: fs(14), width: fs(44), height: fs(44), borderRadius: fs(22), alignItems: 'center', justifyContent: 'center', zIndex: 18, elevation: 8, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } },
+  jumpBadge: { position: 'absolute', top: -4, right: -4, minWidth: fs(20), height: fs(20), borderRadius: fs(10), backgroundColor: '#E53935', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4, borderWidth: 2, borderColor: '#fff' },
+  jumpBadgeText: { color: '#fff', fontSize: fs(10), fontWeight: '700' },
   composer: { borderTopWidth: 1, padding: fs(10), paddingBottom: Platform.OS === 'ios' ? fs(20) : fs(12) },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: fs(6) },
   composerBtn: { width: fs(40), height: fs(40), borderRadius: fs(20), alignItems: 'center', justifyContent: 'center' },

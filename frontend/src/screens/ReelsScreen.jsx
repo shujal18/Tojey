@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { RefreshCw, AlertTriangle, ArrowLeft, Settings } from 'lucide-react';
+import { RefreshCw, AlertTriangle, ArrowLeft, MoreVertical, Music2, Settings } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
 import { streamUrl, ytEgressBlocked, noteEgressBlocked } from '../components/YoutubePlayer';
 import YouTubeEmbed from '../components/YouTubeEmbed';
@@ -23,6 +23,12 @@ function sanitizeVideoId(videoId) {
   if (!videoId || typeof videoId !== 'string') return null;
   const trimmed = videoId.trim();
   return /^[a-zA-Z0-9_-]{11}$/.test(trimmed) ? trimmed : null;
+}
+
+function avatarUrlFor(item) {
+  if (!item) return '';
+  const value = item.avatar || item.channelAvatar || item.avatarUrl;
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
 function fmtLen(seconds) {
@@ -49,6 +55,66 @@ function thumbnailUrlFor(item, quality = 'maxresdefault') {
 function mediaSrc(videoId, token, nonce, quality) {
   const base = streamUrl(videoId, 'best', token, maxHeightFor(quality));
   return nonce ? `${base}&_=${nonce}` : base;
+}
+
+async function readJson(response) {
+  const type = (response.headers && response.headers.get && response.headers.get('content-type')) || '';
+  const html = /html/i.test(type);
+  let data = {};
+  let parsed = false;
+  if (!html) {
+    try {
+      const value = await response.json();
+      if (value && typeof value === 'object') data = value;
+      parsed = true;
+    } catch (e) {
+      parsed = false;
+    }
+  }
+  return { data, parseFailed: html || !parsed };
+}
+
+function canUseFeedFallback(response, parseFailed) {
+  return parseFailed || response.status === 404 || response.status === 405;
+}
+
+function sessionExpiredError() {
+  const err = new Error('Session expired. Please sign in again.');
+  err.sessionExpired = true;
+  return err;
+}
+
+function extractItems(data) {
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.videos)) return data.videos;
+  return [];
+}
+
+async function fetchShortsPayload(baseUrl, request) {
+  const response = await fetch(`${baseUrl}/api/shorts/refresh`, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(request.body),
+  });
+  const parsed = await readJson(response);
+  if (response.status === 401) throw sessionExpiredError();
+  if (canUseFeedFallback(response, parsed.parseFailed)) {
+    const feedResponse = await fetch(
+      `${baseUrl}/api/shorts/feed?category=${encodeURIComponent(request.category)}&refresh=1`,
+      { method: 'GET', headers: request.headers },
+    );
+    const feedParsed = await readJson(feedResponse);
+    if (feedResponse.status === 401) throw sessionExpiredError();
+    if (feedParsed.parseFailed) throw new Error('Feed fallback returned an invalid response');
+    if (!feedResponse.ok) {
+      throw new Error(feedParsed.data.error || feedParsed.data.detail || `Feed request failed (${feedResponse.status})`);
+    }
+    return { data: feedParsed.data, usedFallback: true };
+  }
+  if (!response.ok) {
+    throw new Error(parsed.data.error || parsed.data.detail || 'Failed to refresh reels');
+  }
+  return { data: parsed.data, usedFallback: false };
 }
 
 const FALLBACK_CATEGORIES = [
@@ -82,6 +148,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   const [quality, setQuality] = useState('auto');
   const [speed, setSpeed] = useState(1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [captionExpanded, setCaptionExpanded] = useState(false);
+  const [usingFeedFallback, setUsingFeedFallback] = useState(false);
 
   const shellRef = useRef(null);
   const toastTimerRef = useRef(null);
@@ -185,18 +254,16 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
         ...failedVideoIdsRef.current,
       ])).slice(-300);
       const nonce = opts.nonce || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const response = await fetch(`${API}/api/shorts/refresh`, {
-        method: 'POST',
+      const { data, usedFallback } = await fetchShortsPayload(API, {
+        category: cat,
         headers: authHeaders,
-        body: JSON.stringify({ category: cat, seeds, exclude, nonce, requestId: nonce }),
+        body: { category: cat, seeds, exclude, nonce, requestId: nonce },
       });
-      const data = await response.json().catch(() => ({}));
       if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
-      if (!response.ok) throw new Error(data.error || data.detail || 'Failed to refresh reels');
 
       const ids = new Set();
       const unique = [];
-      for (const raw of (Array.isArray(data.items) ? data.items : [])) {
+      for (const raw of extractItems(data)) {
         const id = sanitizeVideoId(raw && raw.videoId);
         if (!id || ids.has(id)) continue;
         if (failedVideoIdsRef.current.has(id)) continue;
@@ -209,7 +276,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       unique.forEach((item) => seenVideoIdsRef.current.add(item.videoId));
       videosRef.current = unique;
       setVideos(unique);
-      setCycleId(data.cycleId || null);
+      setCycleId(usedFallback ? null : (data.cycleId || null));
+      setUsingFeedFallback(usedFallback);
       activeIdxRef.current = 0;
       setActiveIdx(0);
       setPaused(false);
@@ -220,7 +288,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
       nativeBrokenRef.current = ytEgressBlocked();
       loadedVideoIdBySlotRef.current = [null, null];
       if (shellRef.current) shellRef.current.scrollTop = 0;
-      if (data.message) showToast(data.message);
+      showToast(usedFallback ? 'Feed fallback active' : (data.message || ''));
     } catch (e) {
       if (!isMountedRef.current || currentRequestId !== requestIdRef.current) return;
       setError(e.message);
@@ -450,6 +518,8 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
 
   useEffect(() => {
     setPaused(false);
+    setMenuOpen(false);
+    setCaptionExpanded(false);
   }, [activeIdx]);
 
   const handleEmbedError = useCallback((code) => {
@@ -524,7 +594,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
   }, []);
 
   const activeItem = videos[activeIdx];
+  const creatorArtwork = avatarUrlFor(activeItem);
   const activeVideoId = sanitizeVideoId(activeItem && activeItem.videoId);
+  const audioArt = activeVideoId ? thumbnailUrlFor(activeItem) : '';
   const overlayVideoId = activeVideoId && !failedVideoIdsRef.current.has(activeVideoId)
     ? activeVideoId
     : null;
@@ -661,25 +733,6 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   />
                 )}
 
-                {overlayVideoId && (
-                  <>
-                    <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 170, zIndex: 5, pointerEvents: 'none', background: 'linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0))' }} />
-                    <div style={{ position: 'absolute', left: 16, right: 16, bottom: 18, zIndex: 6, pointerEvents: 'none' }}>
-                      <div style={{
-                        color: '#fff', fontSize: 15, fontWeight: 700, lineHeight: 1.3,
-                        textShadow: '0 1px 6px rgba(0,0,0,0.9)', overflow: 'hidden', display: '-webkit-box',
-                        WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-                      }}>
-                        {activeItem?.title || ''}
-                      </div>
-                      <div style={{ color: 'rgba(255,255,255,0.9)', fontSize: 13, marginTop: 4, textShadow: '0 1px 6px rgba(0,0,0,0.9)' }}>
-                        {activeItem?.channelTitle || ''}
-                        {fmtLen(activeItem?.durationSeconds || progress.duration) ? `  •  ${fmtLen(activeItem?.durationSeconds || progress.duration)}` : ''}
-                      </div>
-                    </div>
-                  </>
-                )}
-
                 <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, zIndex: 7, background: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }}>
                   <div style={{ height: '100%', width: `${progress.duration ? Math.min(100, (progress.current / progress.duration) * 100) : 0}%`, background: '#fff', transition: 'width 0.25s linear' }} />
                 </div>
@@ -692,6 +745,60 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
                   </div>
                 )}
               </div>
+
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 120, zIndex: 5, pointerEvents: 'none', background: 'linear-gradient(to bottom, rgba(0,0,0,0.55), rgba(0,0,0,0))' }} />
+              <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 190, zIndex: 5, pointerEvents: 'none', background: 'linear-gradient(to top, rgba(0,0,0,0.88), rgba(0,0,0,0))' }} />
+
+              {overlayVideoId && activeItem ? (
+                <>
+                  <div style={{ position: 'absolute', left: 16, bottom: 20, width: 'calc(100% - 88px)', zIndex: 6 }}>
+                    {activeItem.channelTitle || activeItem.channelId ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        {creatorArtwork ? (
+                          <img src={creatorArtwork} alt="" style={{ width: 28, height: 28, borderRadius: 14, objectFit: 'cover' }} />
+                        ) : (
+                          <div style={{ width: 28, height: 28, borderRadius: 14, background: 'rgba(255,255,255,0.24)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 800 }}>
+                            {(activeItem.channelTitle || '?').trim().charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                        {activeItem.channelTitle ? (
+                          <span style={{ color: '#fff', fontSize: 13, fontWeight: 700, textShadow: '0 1px 6px rgba(0,0,0,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {activeItem.channelTitle}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => { e.stopPropagation(); setCaptionExpanded((value) => !value); }}
+                      style={{
+                        color: '#fff', fontSize: 14, fontWeight: 600, lineHeight: 1.35, cursor: 'pointer',
+                        textShadow: '0 1px 6px rgba(0,0,0,0.9)',
+                        overflow: captionExpanded ? 'visible' : 'hidden',
+                        display: captionExpanded ? 'block' : '-webkit-box',
+                        WebkitLineClamp: captionExpanded ? undefined : 3,
+                        WebkitBoxOrient: 'vertical',
+                      }}
+                    >
+                      {activeItem.title || ''}
+                    </div>
+                    {captionExpanded ? (
+                      <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 6, textShadow: '0 1px 6px rgba(0,0,0,0.9)' }}>
+                        {fmtLen(activeItem.durationSeconds || progress.duration)}
+                        {usingFeedFallback ? '  -  Feed fallback active' : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div title="Audio" style={{ position: 'absolute', right: 16, bottom: 20, width: 40, height: 40, borderRadius: 12, zIndex: 6, overflow: 'hidden', background: 'rgba(255,255,255,0.16)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                    {audioArt ? (
+                      <img src={audioArt} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    ) : (
+                      <Music2 size={18} />
+                    )}
+                  </div>
+                </>
+              ) : null}
             </div>
 
             {onBack && (
@@ -706,26 +813,44 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               </button>
             )}
 
-            {videos.length > 0 && (
-              <div style={{
-                position: 'absolute', top: 18, right: 12, zIndex: 50, padding: '5px 9px', borderRadius: 12,
-                background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, fontWeight: 700,
-              }}>
-                {activeIdx + 1}/{videos.length}
-              </div>
-            )}
-
-            <button
-              onClick={(e) => { e.stopPropagation(); setSettingsOpen(true); }}
-              title="Video settings"
-              style={{
-                position: 'absolute', top: 58, right: 12, zIndex: 50,
-                width: 38, height: 38, borderRadius: 19, background: 'rgba(0,0,0,0.55)', color: '#fff',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer',
-              }}
-            >
-              <Settings size={19} />
-            </button>
+            <div style={{ position: 'absolute', top: 14, right: 12, zIndex: 50 }}>
+              <button
+                onClick={(e) => { e.stopPropagation(); setMenuOpen((value) => !value); }}
+                title="More options"
+                aria-label="More options"
+                style={{
+                  width: 38, height: 38, borderRadius: 19, background: 'rgba(0,0,0,0.55)', color: '#fff',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer',
+                }}
+              >
+                <MoreVertical size={20} />
+              </button>
+              {menuOpen ? (
+                <div style={{
+                  marginTop: 8, width: 208, borderRadius: 14, padding: '6px 0', zIndex: 51,
+                  background: 'rgba(18,18,22,0.94)', color: '#fff', boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                }}>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setSettingsOpen(true); }}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', border: 'none', background: 'transparent', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', textAlign: 'left' }}
+                  >
+                    <Settings size={18} /> Quality & speed
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); refreshCycle(); }}
+                    disabled={refreshing}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', border: 'none', background: 'transparent', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', textAlign: 'left' }}
+                  >
+                    <RefreshCw size={18} className={refreshing ? 'spin' : ''} /> {refreshing ? 'Refreshing...' : 'Refresh feed'}
+                  </button>
+                  <div style={{ height: 1, background: 'rgba(255,255,255,0.14)', margin: '4px 0' }} />
+                  <div style={{ padding: '8px 14px', fontSize: 11, color: 'rgba(255,255,255,0.7)' }}>
+                    {videos.length ? `${activeIdx + 1}/${videos.length} in cycle` : 'No cycle loaded'}
+                    {usingFeedFallback ? ' - feed fallback active' : ''}
+                  </div>
+                </div>
+              ) : null}
+            </div>
 
             {activeIdx === videos.length - 1 && videos.length > 0 && (
               <button
@@ -792,7 +917,9 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
               ))}
             </div>
             <div style={{ marginTop: 16, fontSize: 11, color: '#9A93A8', textAlign: 'center' }}>
-              Cycle {cycleId ? 'ready' : 'loading'} — {REEL_CYCLE_SIZE} reels per refresh
+              {usingFeedFallback
+                ? 'Feed fallback active - no cycle id from server'
+                : `Cycle ${cycleId ? 'ready' : 'loading'} — ${REEL_CYCLE_SIZE} reels per refresh`}
             </div>
           </div>
         </div>
@@ -800,7 +927,7 @@ export default function ReelsScreen({ token, refreshTick = 0, onBack }) {
 
       {toast && (
         <div onClick={() => setToast('')} style={{
-          position: 'absolute', bottom: 40, left: 24, right: 24, zIndex: 60,
+          position: 'absolute', bottom: 78, left: 24, right: 24, zIndex: 60,
           background: 'rgba(20,20,26,0.92)', color: '#fff', padding: '10px 14px', borderRadius: 10,
           fontSize: 13, textAlign: 'center', cursor: 'pointer', boxShadow: '0 4px 18px rgba(0,0,0,0.5)',
         }}>

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useChat } from '../services/ChatContext';
 import { useCall } from '../services/CallContext';
 import { useAuth } from '../services/AuthContext';
@@ -6,7 +6,7 @@ import { useTheme } from '../theme/ThemeContext';
 import {
   ArrowLeft, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
   Copy, Pencil, Trash, Check, CheckCheck, Lock, Image as ImageIcon, Video, FileText,
-  MoreVertical, ChevronRight, Bell,
+  MoreVertical, ChevronRight, Bell, ChevronDown,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
@@ -88,13 +88,132 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const typingStopTimerRef = useRef(null);
   const typingActiveRef = useRef(false);
   const recordGenRef = useRef(0);
+  const nearBottomRef = useRef(true);
+  const unseenRef = useRef(0);
+  const messageDiffRef = useRef({ prev: null, aliases: new Map() });
+  const scrollIntentRef = useRef(null);
+  const prevConversationIdRef = useRef(conversation.id);
+  const historyPendingRef = useRef(true);
 
   const [waveBars, setWaveBars] = useState([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
+  const [unseenCount, setUnseenCount] = useState(0);
+
+  const scrollList = useCallback((behavior) => {
+    requestAnimationFrame(() => {
+      const list = listRef.current;
+      if (!list) return;
+      if (behavior === 'smooth' && typeof list.scrollTo === 'function') {
+        list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+      } else {
+        list.scrollTop = list.scrollHeight;
+      }
+    });
+  }, []);
+
+  const markOwnSend = useCallback(() => {
+    nearBottomRef.current = true;
+    unseenRef.current = 0;
+    setUnseenCount(0);
+  }, []);
+
+  const handleListScroll = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+    const near = distance <= 80;
+    nearBottomRef.current = near;
+    if (near && unseenRef.current > 0) {
+      unseenRef.current = 0;
+      setUnseenCount(0);
+    }
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    unseenRef.current = 0;
+    setUnseenCount(0);
+    nearBottomRef.current = true;
+    scrollList('smooth');
+  }, [scrollList]);
+
+  const messageView = useMemo(() => {
+    const state = messageDiffRef.current;
+    const conversationChanged = prevConversationIdRef.current !== conversation.id;
+    if (conversationChanged) {
+      state.aliases.clear();
+      historyPendingRef.current = true;
+    }
+    const prev = state.prev;
+    if (prev && messages.length === 0) historyPendingRef.current = true;
+    const aliases = state.aliases;
+    const prevByIdentity = new Set();
+    if (prev) {
+      prev.forEach((m, i) => {
+        prevByIdentity.add(m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`);
+      });
+    }
+    const raw = messages.map((m, i) => {
+      const prevAt = prev ? prev[i] : null;
+      if (prevAt && !m._tempId && m.id != null && prevAt._tempId && prevAt.sender_id === m.sender_id) {
+        aliases.set(`s:${m.id}`, `t:${prevAt._tempId}`);
+      }
+      let key = m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`;
+      if (aliases.has(key)) key = aliases.get(key);
+      return { key, message: m, isNew: !!prev && prev.length > 0 && !prevByIdentity.has(key) };
+    });
+    const added = raw.filter(e => e.isNew).length;
+    const addedSent = raw.filter(e => e.isNew && e.message.sender_id === currentUser.id).length;
+    const nextKeys = new Set(raw.map(e => e.key));
+    let removed = 0;
+    if (prev) {
+      prev.forEach((m, i) => {
+        let key = m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`;
+        if (aliases.has(key)) key = aliases.get(key);
+        if (!nextKeys.has(key)) removed += 1;
+      });
+    }
+    const load = !prev || prev.length === 0 || added > 1 || removed > 0 || conversationChanged || historyPendingRef.current;
+    scrollIntentRef.current = {
+      token: messages,
+      kind: load ? 'load' : added > 0 ? 'append' : 'none',
+      added,
+      addedSent,
+    };
+    return raw.map(e => ({
+      key: e.key,
+      message: e.message,
+      animate: e.isNew && added === 1,
+    }));
+  }, [messages, currentUser.id, conversation.id]);
 
   useEffect(() => {
-    const list = listRef.current;
-    if (list) list.scrollTop = list.scrollHeight;
-  }, [messages.length, viewing]);
+    const intent = scrollIntentRef.current;
+    if (!intent || intent.token !== messages) return;
+    if (intent.kind === 'load') {
+      unseenRef.current = 0;
+      setUnseenCount(0);
+      nearBottomRef.current = true;
+      scrollList('instant');
+    } else if (intent.kind === 'append' && intent.added > 0) {
+      if (intent.addedSent > 0) {
+        nearBottomRef.current = true;
+        unseenRef.current = 0;
+        setUnseenCount(0);
+        scrollList('smooth');
+      } else if (nearBottomRef.current) {
+        scrollList('smooth');
+      } else {
+        unseenRef.current += intent.added - intent.addedSent;
+        setUnseenCount(unseenRef.current);
+      }
+    }
+    messageDiffRef.current.prev = messages;
+    prevConversationIdRef.current = conversation.id;
+    if (messages.length) historyPendingRef.current = false;
+  }, [messages, conversation.id, scrollList]);
+
+  useEffect(() => {
+    scrollList('instant');
+  }, [viewing, scrollList]);
 
   // Auto-grow the message box up to ~5 lines, then scroll internally. Keeps the
   // composer a comfortable fixed bar at the bottom without clipping long text.
@@ -197,6 +316,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   const sendText = () => {
     if (!text.trim()) return;
+    markOwnSend();
     stopTypingNow();
     if (editing) {
       window.__socket.emit('message:edit', { messageId: editing.id, content: text.trim() });
@@ -348,6 +468,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   };
 
   const uploadVoice = async (blob, duration, bars) => {
+    markOwnSend();
     try {
       const wave = buildWaveform(waveSamplesRef.current, bars);
       const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
@@ -396,6 +517,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
 
   const sendAttachments = async () => {
     if (!pendingMedia.length || isSendingMedia) return;
+    markOwnSend();
     setIsSendingMedia(true);
     stopTypingNow();
     // Each item is sent independently; successful ones are dropped from the pending
@@ -577,45 +699,72 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       </div>
 
       {/* Messages */}
-      <div ref={listRef} style={{
-        flex: '1 1 0%', overflowY: 'auto', overscrollBehavior: 'contain',
-        WebkitOverflowScrolling: 'touch',
-        padding: '12px 14px', paddingBottom: 12,
-        display: 'flex', flexDirection: 'column', gap: 4,
-        minHeight: 0,
-      }}>
-        {messages.length === 0 && (
-          <div style={{ textAlign: 'center', marginTop: 40, color: theme.textSecondary }}>
-            <Lock size={28} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
-            <p style={{ fontSize: 14 }}>Messages are private</p>
-            <p style={{ fontSize: 12, opacity: 0.7 }}>Say hello to {otherUser.display_name}</p>
-          </div>
-        )}
+      <div style={{ flex: '1 1 0%', minHeight: 0, position: 'relative', display: 'flex' }}>
+        <div ref={listRef} onScroll={handleListScroll} style={{
+          flex: '1 1 0%', overflowY: 'auto', overscrollBehavior: 'contain',
+          WebkitOverflowScrolling: 'touch',
+          padding: '12px 14px', paddingBottom: 12,
+          display: 'flex', flexDirection: 'column', gap: 4,
+          minHeight: 0,
+        }}>
+          {messages.length === 0 && (
+            <div style={{ textAlign: 'center', marginTop: 40, color: theme.textSecondary }}>
+              <Lock size={28} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
+              <p style={{ fontSize: 14 }}>Messages are private</p>
+              <p style={{ fontSize: 12, opacity: 0.7 }}>Say hello to {otherUser.display_name}</p>
+            </div>
+          )}
 
-        {messages.map((m, idx) => {
-          const isSent = m.sender_id === currentUser.id;
-          const prev = messages[idx - 1];
-          const grouped = prev && prev.sender_id === m.sender_id;
-          return (
-            <MessageRow
-              key={m.id || idx}
-              message={m}
-              myId={currentUser.id}
-              isSent={isSent}
-              grouped={grouped}
-              theme={theme}
-              senderName={isSent ? 'You' : otherUser.display_name}
-              repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
-              onLongPress={handleLongPress}
-              onReply={() => { setReplyingTo(m); setReactionBar(null); }}
-              onCopy={() => { if (m.content) navigator.clipboard?.writeText(m.content); setReactionBar(null); }}
-              onEdit={() => { setText(m.content || ''); setReactionBar(null); }}
-              onDelete={(mode) => { deleteMessage(m.id, mode); setReactionBar(null); }}
-              onReact={() => setReactionBar(m)}
-              onOpenMedia={() => setViewing(m)}
-            />
-          );
-        })}
+          {messageView.map((entry, idx) => {
+            const m = entry.message;
+            const isSent = m.sender_id === currentUser.id;
+            const prev = messages[idx - 1];
+            const grouped = prev && prev.sender_id === m.sender_id;
+            return (
+              <MessageRow
+                key={entry.key}
+                message={m}
+                myId={currentUser.id}
+                isSent={isSent}
+                grouped={grouped}
+                theme={theme}
+                senderName={isSent ? 'You' : otherUser.display_name}
+                repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
+                onLongPress={handleLongPress}
+                onReply={() => { setReplyingTo(m); setReactionBar(null); }}
+                onCopy={() => { if (m.content) navigator.clipboard?.writeText(m.content); setReactionBar(null); }}
+                onEdit={() => { setText(m.content || ''); setReactionBar(null); }}
+                onDelete={(mode) => { deleteMessage(m.id, mode); setReactionBar(null); }}
+                onReact={() => setReactionBar(m)}
+                onOpenMedia={() => setViewing(m)}
+                entryClass={entry.animate ? (isSent ? 'message-enter-sent' : 'message-enter-received') : ''}
+              />
+            );
+          })}
+        </div>
+        {unseenCount > 0 && (
+          <button
+            onClick={jumpToLatest}
+            aria-label="Jump to latest message"
+            style={{
+              position: 'absolute', right: 14, bottom: 14, zIndex: 8,
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '7px 11px', borderRadius: 20,
+              background: theme.card, color: theme.text,
+              border: `1px solid ${theme.border}`,
+              boxShadow: '0 6px 20px rgba(0,0,0,0.28)',
+              fontSize: 12, fontWeight: 700,
+            }}
+          >
+            <ChevronDown size={16} />
+            <span style={{
+              minWidth: 18, height: 18, padding: '0 5px', borderRadius: 9,
+              background: 'linear-gradient(135deg,#6C3CE9,#4E22B8)',
+              color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11,
+            }}>{unseenCount > 99 ? '99+' : unseenCount}</span>
+          </button>
+        )}
       </div>
 
       {/* Reactions bar */}
@@ -957,7 +1106,7 @@ function TypingDots() {
   );
 }
 
-function MessageRow({ message, myId, isSent, grouped, theme, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia }) {
+function MessageRow({ message, myId, isSent, grouped, theme, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia, entryClass }) {
   return (
     <div style={{
       display: 'flex',
@@ -971,6 +1120,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
         alignItems: isSent ? 'flex-end' : 'flex-start',
       }}>
         <div
+          className={entryClass}
           onContextMenu={(e) => onLongPress(e, message)}
           onDoubleClick={(e) => onLongPress(e, message)}
           style={{
@@ -990,7 +1140,6 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
               : theme.isDark
               ? '0 2px 8px rgba(0,0,0,0.30)'
               : '0 2px 8px rgba(31,15,70,0.07)',
-            animation: 'message-enter 0.25s ease',
             position: 'relative',
             userSelect: 'text',
             wordBreak: 'break-word',

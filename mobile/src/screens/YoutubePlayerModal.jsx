@@ -409,7 +409,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               style={styles.playerSettingsFab}
               accessibilityLabel="Video settings"
             >
-              <Icon name="settings-outline" size={20} color="#fff" />
+              <Icon name="options-outline" size={20} color="#fff" />
             </TouchableOpacity>
           )}
           {playerSettingsOpen && !loading && !playError && !!stream && (
