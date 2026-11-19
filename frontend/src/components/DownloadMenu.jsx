@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme/ThemeContext';
-import { X, Download, Film, Music, Check } from 'lucide-react';
+import { X, Download, Film, Music } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -43,6 +43,7 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
   const [audioOptions, setAudioOptions] = useState(BASE_AUDIO);
   const [exact, setExact] = useState(false);
   const [picked, setPicked] = useState('');
+  const [starting, setStarting] = useState(false);
   const closeTimerRef = useRef(null);
 
   useEffect(() => {
@@ -118,6 +119,7 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
     a.click();
     a.remove();
     setPicked(f.key);
+    setStarting(true);
     // Give the browser a beat to start the download, then close.
     closeTimerRef.current = setTimeout(() => { if (onClose) onClose(); }, 350);
   }
@@ -178,7 +180,7 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
         <div style={{ overflowY: 'auto', padding: '6px 12px 14px' }}>
           {options.map((f) => {
             const isAudio = tab === 'audio';
-            const isPicked = picked === f.key;
+            const isPicked = starting && picked === f.key;
             return (
               <button
                 key={`${tab}-${f.key}`}
@@ -193,9 +195,11 @@ export default function DownloadMenu({ videoId, token, title, onClose }) {
               >
                 <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   <span style={{ color: theme.text, fontSize: 14, fontWeight: 700 }}>{f.label}</span>
-                  <span style={{ color: theme.textSecondary, fontSize: 11.5 }}>{f.note}</span>
+                  <span style={{ color: theme.textSecondary, fontSize: 11.5 }}>
+                    {isPicked ? 'Starting browser download…' : f.note}
+                  </span>
                 </span>
-                {isPicked ? <Check size={17} color={theme.primary} /> : <Download size={17} color={theme.primary} />}
+                {!isPicked && <Download size={17} color={theme.primary} />}
               </button>
             );
           })}

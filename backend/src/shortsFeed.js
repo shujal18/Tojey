@@ -15,6 +15,7 @@
 // Nothing here touches Neon: results are validated, deduped and cached briefly
 // in process memory only.
 
+const { randomUUID } = require('crypto');
 const yt = require('./ytInner');
 
 // A Short is a vertical clip. The innertube Shorts filter already leans that
@@ -65,11 +66,18 @@ const VIDEO_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
 // memory only, bounded, with a TTL - same policy the old YouTube Data API feed
 // used for the same problem.
 const FAILED_TTL_MS = 30 * 60 * 1000;
-const failedMemory = new Map(); // `${category}:${videoId}` -> { reason, expiresAt }
+const failedMemory = new Map(); // videoId -> { reason, expiresAt, categories }
 
 function markFailed(category, videoId, reason) {
-  const key = `${category}:${videoId}`;
-  failedMemory.set(key, { reason, expiresAt: Date.now() + FAILED_TTL_MS });
+  if (!VIDEO_ID_RE.test(videoId)) return;
+  const prev = failedMemory.get(videoId);
+  const categories = new Set(prev && Array.isArray(prev.categories) ? prev.categories : []);
+  if (category) categories.add(category);
+  failedMemory.set(videoId, {
+    reason: String(reason || 'playback failed').slice(0, 120),
+    categories: [...categories].slice(-10),
+    expiresAt: Date.now() + FAILED_TTL_MS,
+  });
   if (failedMemory.size > 200) {
     const oldest = failedMemory.keys().next().value;
     if (oldest !== undefined) failedMemory.delete(oldest);
@@ -77,10 +85,10 @@ function markFailed(category, videoId, reason) {
 }
 
 function isFailed(category, videoId) {
-  const e = failedMemory.get(`${category}:${videoId}`);
+  const e = failedMemory.get(videoId);
   if (!e) return false;
   if (e.expiresAt < Date.now()) {
-    failedMemory.delete(`${category}:${videoId}`);
+    failedMemory.delete(videoId);
     return false;
   }
   return true;
@@ -174,6 +182,186 @@ function cacheSet(key, value) {
     if (oldest !== undefined) cache.delete(oldest);
   }
   cache.set(key, { at: Date.now(), ...value });
+}
+
+// ---- 50-reel discovery cycle -------------------------------------------------
+
+const CYCLE_SIZE = 50;
+const CYCLE_MAX_CALLS = 14;
+const CYCLE_MAX_PAGES_PER_SEED = 3;
+const CYCLE_TTL_MS = 5 * 60 * 1000;
+const cycleInflight = new Map();
+
+function cleanSeeds(raw, limit) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const value of raw) {
+    const s = String(value || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function normalizedChannel(item) {
+  return String(item.channelTitle || item.channelId || '').trim().toLowerCase();
+}
+
+function scoreCandidate(item, source, rank, nonce) {
+  const base = source === 'personal' ? 45 : source === 'category' ? 30 : source === 'fresh' ? 22 : 16;
+  const views = Math.min(12, Math.log10(Math.max(10, Number(item.views) || 0)) * 2);
+  const published = Date.parse(item.publishedAt || '');
+  const freshness = Number.isFinite(published) ? Math.max(0, 8 - (Date.now() - published) / (1000 * 60 * 60 * 24 * 30)) : 3;
+  const jitter = ((hashString(`${item.videoId}:${nonce}`) % 1000) / 1000) * 9;
+  return base + views + freshness + jitter - Math.min(8, rank * 0.35);
+}
+
+function seedsForCycle(cat, opts) {
+  const base = CATEGORY_SEEDS[cat] || CATEGORY_SEEDS.trending;
+  const personal = cleanSeeds(opts.seeds, 8);
+  const rotation = Math.abs(hashString(String(opts.nonce || ''))) % Math.max(1, base.length);
+  const rotatedBase = [...base.slice(rotation), ...base.slice(0, rotation)];
+  if (cat === 'trending') {
+    return [
+      ...personal.map((s) => ({ seed: s, source: 'personal' })),
+      ...rotatedBase.slice(0, 3).map((s) => ({ seed: s, source: 'category' })),
+      ...rotatedBase.slice(3, 5).map((s) => ({ seed: s, source: 'fresh' })),
+      { seed: 'new shorts discoveries', source: 'explore' },
+      { seed: 'must watch shorts', source: 'explore' },
+    ];
+  }
+  return [
+    ...rotatedBase.slice(0, 5).map((s) => ({ seed: s, source: 'category' })),
+    ...personal.slice(0, 2).map((s) => ({ seed: s, source: 'personal' })),
+    ...rotatedBase.slice(5, 7).map((s) => ({ seed: s, source: 'fresh' })),
+  ];
+}
+
+async function searchCycleSeed(entry, opts, state) {
+  const out = [];
+  let token = null;
+  for (let page = 0; page < CYCLE_MAX_PAGES_PER_SEED; page += 1) {
+    if (state.calls >= CYCLE_MAX_CALLS || out.length >= 20) break;
+    state.calls += 1;
+    let response;
+    try {
+      response = await yt.search(entry.seed, token, undefined, {
+        skipCache: opts.skipCache === true,
+        nonce: `${opts.nonce || ''}:${page}`,
+      });
+    } catch (e) {
+      break;
+    }
+    const raw = Array.isArray(response.items) ? response.items : [];
+    out.push(...raw);
+    if (response.hasMore && response.nextToken && response.nextToken !== token) token = response.nextToken;
+    else break;
+  }
+  return out.map((it, rank) => {
+    const mapped = mapItem(it);
+    if (!mapped) return null;
+    return { ...mapped, source: entry.source, rank, score: scoreCandidate(mapped, entry.source, rank, opts.nonce || '') };
+  }).filter(Boolean);
+}
+
+async function generateCycle(cat, opts) {
+  const servedKey = `${cat}|${opts.key || ''}`;
+  const served = servedFor(servedKey);
+  const excluded = new Set(
+    cleanIds(opts.exclude).concat([...served.ids])
+  );
+  const entries = seedsForCycle(cat, opts);
+  const state = { calls: 0 };
+  const groups = await Promise.all(entries.map((entry) => searchCycleSeed(entry, opts, state)));
+
+  const byId = new Map();
+  for (const group of groups) {
+    for (const candidate of group) {
+      if (excluded.has(candidate.videoId) || isFailed(cat, candidate.videoId)) continue;
+      const prev = byId.get(candidate.videoId);
+      if (!prev || candidate.score > prev.score) byId.set(candidate.videoId, candidate);
+    }
+  }
+
+  const ranked = [...byId.values()].sort((a, b) => b.score - a.score);
+  const selected = [];
+  const deferred = [];
+  const channels = new Map();
+  for (const candidate of ranked) {
+    if (selected.length >= CYCLE_SIZE) break;
+    const channel = normalizedChannel(candidate);
+    if (channel && (channels.get(channel) || 0) >= 4) {
+      deferred.push(candidate);
+      continue;
+    }
+    if (channel) channels.set(channel, (channels.get(channel) || 0) + 1);
+    selected.push(candidate);
+  }
+  for (const candidate of deferred) {
+    if (selected.length >= CYCLE_SIZE) break;
+    selected.push(candidate);
+  }
+
+  const videos = selected.map(({ source: _s, rank: _r, score: _score, ...item }) => item);
+  for (const v of videos) served.ids.add(v.videoId);
+  served.at = Date.now();
+  if (served.ids.size > SERVED_MAX) {
+    served.ids = new Set([...served.ids].slice(-Math.floor(SERVED_MAX * 0.75)));
+  }
+
+  return {
+    cycleId: randomUUID(),
+    category: cat,
+    videos,
+    totalCount: videos.length,
+    complete: videos.length >= CYCLE_SIZE,
+    nextRefreshAvailable: true,
+    createdAt: new Date().toISOString(),
+    recommendationCategories: cleanSeeds(opts.seeds, 8),
+    feedVersion: 'reels-cycle-v1',
+    calls: state.calls,
+    message: videos.length >= CYCLE_SIZE ? '' : 'No more distinct playable Shorts were found right now.',
+  };
+}
+
+function cleanIds(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const v of raw) {
+    const id = String(v || '');
+    if (VIDEO_ID_RE.test(id)) out.push(id);
+    if (out.length >= 300) break;
+  }
+  return out;
+}
+
+function cycle(category, opts = {}) {
+  const cat = isKnownCategory(category) ? category : 'trending';
+  const requestKey = `${cat}|${opts.key || ''}|${opts.nonce || ''}`;
+  const existing = cycleInflight.get(requestKey);
+  if (existing && Date.now() - existing.at < CYCLE_TTL_MS) return existing.promise;
+  const promise = generateCycle(cat, opts).catch((e) => {
+    const err = new Error(`reel cycle failed: ${e && e.message ? e.message : 'unknown'}`);
+    err.code = e && e.code ? e.code : 'CYCLE_FAILED';
+    throw err;
+  });
+  cycleInflight.set(requestKey, { at: Date.now(), promise });
+  promise.finally(() => setTimeout(() => cycleInflight.delete(requestKey), CYCLE_TTL_MS));
+  return promise;
 }
 
 // ---- public service API ------------------------------------------------------
@@ -289,6 +477,8 @@ async function feed(category, nextToken, refresh, opts = {}) {
 module.exports = {
   categories,
   feed,
+  cycle,
+  CYCLE_SIZE,
   isKnownCategory,
   markFailed,
   isFailed,

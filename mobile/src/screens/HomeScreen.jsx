@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState, memo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet, FlatList, Image, Modal, Platform, ActivityIndicator,
 } from 'react-native';
@@ -20,14 +20,36 @@ import BottomTabBar from '../components/BottomTabBar';
 export default function HomeScreen({ socket, user, token, setUser, onOpenChat, onOpenSettings, activeChatId, watchRequest, onWatchRequestHandled, registerBackHandler }) {
   const { theme } = useTheme();
   const [tab, setTab] = useState('chats');
+  const tabStackRef = useRef(['chats']);
+  const youtubeBackRef = useRef(null);
+  const registerYoutubeBack = useCallback((fn) => { youtubeBackRef.current = fn; }, []);
+  const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
+  const [homeRefreshTick, setHomeRefreshTick] = useState(0);
+
+  const switchTab = useCallback((next) => {
+    setTab((prev) => {
+      if (prev === next) return prev;
+      tabStackRef.current = [...tabStackRef.current.filter((t) => t !== next), prev].slice(-10);
+      return next;
+    });
+    if (next === 'shorts') setReelsRefreshTick((t) => t + 1);
+    if (next === 'home') setHomeRefreshTick((t) => t + 1);
+  }, []);
+
   useEffect(() => {
     if (typeof registerBackHandler !== 'function') return undefined;
     registerBackHandler(() => {
+      if (youtubeBackRef.current && youtubeBackRef.current()) return true;
+      const previous = tabStackRef.current.pop();
+      if (previous && previous !== tab) {
+        setTab(previous);
+        return true;
+      }
       if (tab !== 'chats') {
         setTab('chats');
         return true;
       }
-      return false;
+      return true;
     });
     return () => {
       if (typeof registerBackHandler === 'function') registerBackHandler(null);
@@ -40,12 +62,10 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   useEffect(() => {
     if (!watchRequest || !watchRequest.key) return;
     setPendingWatch(watchRequest);
-    setTab('home');
+    switchTab('home');
     if (onWatchRequestHandled) onWatchRequestHandled();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchRequest && watchRequest.key]);
-  const [reelsRefreshTick, setReelsRefreshTick] = useState(0);
-  const [homeRefreshTick, setHomeRefreshTick] = useState(0);
   const [users, setUsers] = useState([]);
   const [presence, setPresence] = useState({});
   const [onCall, setOnCall] = useState({});
@@ -356,7 +376,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
           <View style={[styles.header, { backgroundColor: theme.background }]}>
             <Text style={[styles.title, { color: theme.primaryDeep }]}>Tojey</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity onPress={() => setTab('home')} style={styles.headerBtn}>
+              <TouchableOpacity onPress={() => switchTab('home')} style={styles.headerBtn}>
                 <Icon name="play-circle-outline" size={24} color={theme.primary} />
               </TouchableOpacity>
               <TouchableOpacity onPress={onOpenSettings} style={[styles.headerBtn, { marginLeft: 4 }]}>
@@ -400,20 +420,21 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         <YoutubeHomeScreen
           token={token}
           refreshTick={homeRefreshTick}
-          onOpenChats={() => setTab('chats')}
+          onOpenChats={() => switchTab('chats')}
           onOpenSettings={onOpenSettings}
-          onChangeToShorts={() => setTab('shorts')}
+          onChangeToShorts={() => switchTab('shorts')}
           initialWatch={pendingWatch}
           onInitialWatchConsumed={() => setPendingWatch(null)}
+          registerBackHandler={registerYoutubeBack}
         />
       )}
 
       {tab === 'shorts' && (
-        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => setTab('home')} />
+        <ReelsScreen token={token} user={user} refreshTick={reelsRefreshTick} onBack={() => switchTab('home')} />
       )}
 
       {tab === 'downloads' && (
-        <DownloadsScreen onBack={() => setTab('home')} />
+        <DownloadsScreen onBack={() => switchTab('home')} />
       )}
 
       {/* Long-press actions: send notification / clear messages */}
@@ -514,17 +535,10 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         </View>
       </Modal>
 
-      {tab !== 'chats' && (
+      {tab !== 'chats' && tab !== 'shorts' && (
         <BottomTabBar
           active={tab}
-          onChange={(k) => {
-            if (k === tab) {
-              if (k === 'home') setHomeRefreshTick((t) => t + 1);
-              else if (k === 'shorts') setReelsRefreshTick((t) => t + 1);
-            } else {
-              setTab(k);
-            }
-          }}
+          onChange={(k) => switchTab(k)}
           theme={theme}
         />
       )}

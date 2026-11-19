@@ -35,7 +35,7 @@ const FEED_CACHE_KEY = 'yt_home_feed_v1';
 const STRIP_CACHE_KEY = 'yt_home_shorts_strip_v1';
 const SUBFEED_CACHE_KEY = 'yt_home_subfeed_v1';
 
-export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed }) {
+export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats, onOpenSettings, onChangeToShorts, initialWatch, onInitialWatchConsumed, registerBackHandler }) {
   const { theme } = useTheme();
   const [category, setCategory] = useState('recommended');
   const [videos, setVideos] = useState([]);
@@ -58,6 +58,24 @@ export default function YoutubeHomeScreen({ token, refreshTick = 0, onOpenChats,
   const [playlistRoute, setPlaylistRoute] = useState(null);
   const [watch, setWatch] = useState(null);
   const lastInitialWatchRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof registerBackHandler !== 'function') return undefined;
+    registerBackHandler(() => {
+      if (watch) {
+        setWatch(null);
+        return true;
+      }
+      if (view !== 'home') {
+        setView('home');
+        return true;
+      }
+      return false;
+    });
+    return () => {
+      if (typeof registerBackHandler === 'function') registerBackHandler(null);
+    };
+  }, [watch, view, registerBackHandler]);
 
   // Open a video requested by the Watch Together room exactly once.
   useEffect(() => {

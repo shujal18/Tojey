@@ -651,7 +651,7 @@ async function home(category, token) {
   };
 }
 
-async function search(query, token, filter) {
+async function search(query, token, filter, opts = {}) {
   const params = filter === 'videos'
     ? 'EgIQAQ%3D%3D'
     : filter === 'channels' ? 'EgIQAg%3D%3D'
@@ -659,10 +659,18 @@ async function search(query, token, filter) {
     : filter === 'shorts' ? 'EgIQAUICSAE%3D'
     : undefined;
   let j;
+  const skipCache = opts.skipCache === true;
+  const nonce = skipCache ? `:${opts.nonce || Date.now()}` : '';
   if (token) {
-    j = await call('search', { continuation: token }, { cacheKey: `search:${token.slice(0, 24)}` });
+    j = await call('search', { continuation: token }, {
+      cacheKey: `search:${token.slice(0, 24)}${nonce}`,
+      skipCache,
+    });
   } else {
-    j = await call('search', { query, params }, { cacheKey: `search:${query}:${filter || 'all'}` });
+    j = await call('search', { query, params }, {
+      cacheKey: `search:${query}:${filter || 'all'}${nonce}`,
+      skipCache,
+    });
   }
 
   const items = [];

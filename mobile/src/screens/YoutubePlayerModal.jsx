@@ -58,6 +58,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [descOpen, setDescOpen] = useState(false);
   const [showPlaylist, setShowPlaylist] = useState(false);
   const [showDl, setShowDl] = useState(false);
+  const [playerSettingsOpen, setPlayerSettingsOpen] = useState(false);
   const [pip, setPip] = useState(false);
   const [pipOk, setPipOk] = useState(false);
   const [nextVideo, setNextVideo] = useState(null);
@@ -130,6 +131,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setPlayError(null);
     setAudioOnly(false);
     setUseDash(false);
+    setPlayerSettingsOpen(false);
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
     addHistory(v).catch(() => {});
@@ -167,6 +169,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
       }
     } catch (e) {}
     setStreaming(false);
+    setPlayerSettingsOpen(false);
   };
 
   const onProgress = (p) => {
@@ -399,13 +402,66 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               ignoreSilentSwitch="ignore"
               mixWithOthers="inherit"
             />
-          ) : (
+          ) : null}
+          {!loading && !playError && !!stream && (
+            <TouchableOpacity
+              onPress={() => setPlayerSettingsOpen((v) => !v)}
+              style={styles.playerSettingsFab}
+              accessibilityLabel="Video settings"
+            >
+              <Icon name="settings-outline" size={20} color="#fff" />
+            </TouchableOpacity>
+          )}
+          {playerSettingsOpen && !loading && !playError && !!stream && (
+            <View style={styles.playerSettingsPanel}>
+              <View style={styles.playerSettingsHead}>
+                <Text style={[styles.playerSettingsTitle, { color: theme.text }]}>Video settings</Text>
+                <TouchableOpacity onPress={() => setPlayerSettingsOpen(false)}>
+                  <Icon name="close" size={18} color={theme.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              <Text style={[styles.playerSettingsGroup, { color: theme.textSecondary }]}>
+                Quality{stream?.height ? ` (current ${stream.height}p)` : ''}
+              </Text>
+              <View style={styles.playerSettingsOptions}>
+                {QUALITIES.map((h) => (
+                  <TouchableOpacity
+                    key={h}
+                    disabled={streaming}
+                    onPress={() => selectQuality(h)}
+                    style={[styles.playerSettingsOption, { backgroundColor: maxHeight === h ? theme.primary : theme.inputBg }]}
+                  >
+                    <Text style={{ color: maxHeight === h ? '#fff' : theme.text, fontSize: fs(12), fontWeight: '700' }}>{h}p</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={[styles.playerSettingsGroup, { color: theme.textSecondary }]}>Speed</Text>
+              <View style={styles.playerSettingsOptions}>
+                {SPEEDS.map((s) => (
+                  <TouchableOpacity
+                    key={s}
+                    disabled={inRoom}
+                    onPress={() => setSpeed(s)}
+                    style={[styles.playerSettingsOption, { backgroundColor: speed === s ? theme.primary : theme.inputBg }]}
+                  >
+                    <Text style={{ color: speed === s ? '#fff' : theme.text, fontSize: fs(12), fontWeight: '700' }}>{s}×</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {inRoom && (
+                <Text style={[styles.playerSettingsNote, { color: theme.textSecondary }]}>
+                  Host controls playback speed in Watch Together.
+                </Text>
+              )}
+            </View>
+          )}
+          {loading || playError || !stream ? (
             <View style={styles.videoLoading}>
               <Text style={{ color: theme.textSecondary, fontSize: fs(13), textAlign: 'center', paddingHorizontal: 24 }}>
                 No playable stream for this video.
               </Text>
             </View>
-          )}
+          ) : null}
           {streaming && (
             <View style={styles.streamingBadge}>
               <ActivityIndicator color="#fff" size="small" />
@@ -636,23 +692,6 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               </View>
             )}
 
-            <View style={styles.speedRow}>
-              <Text style={[styles.speedLabel, { color: theme.textSecondary }]}>Speed</Text>
-              {SPEEDS.map((s) => (
-                <TouchableOpacity key={s} style={[styles.speedChip, { backgroundColor: speed === s ? theme.primary : theme.inputBg }]} onPress={() => setSpeed(s)}>
-                  <Text style={{ color: speed === s ? '#fff' : theme.text, fontSize: fs(12), fontWeight: '700' }}>{s}×</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.speedRow}>
-              <Text style={[styles.speedLabel, { color: theme.textSecondary }]}>Quality</Text>
-              {QUALITIES.map((h) => (
-                <TouchableOpacity key={h} style={[styles.speedChip, { backgroundColor: maxHeight === h ? theme.primary : theme.inputBg }]} onPress={() => selectQuality(h)}>
-                  <Text style={{ color: maxHeight === h ? '#fff' : theme.text, fontSize: fs(12), fontWeight: '700' }}>{h}p</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
             {dur > 0 && (
               <View style={styles.progressRow}>
                 <Text style={[styles.progressText, { color: theme.textSecondary }]}>{fmt(pos)}</Text>
@@ -828,9 +867,34 @@ const styles = StyleSheet.create({
   playlistPanel: { borderRadius: 12, padding: 12, marginTop: 12 },
   playlistTitle: { fontSize: fs(13), fontWeight: '800', marginBottom: 8 },
   playlistRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
-  speedRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 14 },
-  speedLabel: { fontSize: fs(12), fontWeight: '700', marginRight: 4 },
-  speedChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14 },
+  playerSettingsFab: {
+    position: 'absolute',
+    right: 12,
+    top: 12,
+    zIndex: 12,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playerSettingsPanel: {
+    position: 'absolute',
+    right: 10,
+    top: 58,
+    zIndex: 13,
+    width: Math.min(340, Dimensions.get('window').width - 24),
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(12,10,18,0.94)',
+  },
+  playerSettingsHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  playerSettingsTitle: { fontSize: fs(14), fontWeight: '800' },
+  playerSettingsGroup: { fontSize: fs(11), fontWeight: '700', marginTop: 8, marginBottom: 6 },
+  playerSettingsOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  playerSettingsOption: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14 },
+  playerSettingsNote: { fontSize: fs(10), marginTop: 8 },
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
   progressText: { fontSize: fs(11), fontWeight: '600' },
   progressTrack: { flex: 1, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },

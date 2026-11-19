@@ -24,7 +24,6 @@ class MainApplication : Application(), ReactApplication {
           val list = PackageList(this).packages.toMutableList()
           list.add(TojeyChatHeadPackage())
           list.add(TojeyBatteryPackage())
-          list.add(TojeyKeepAlivePackage())
           list.add(TojeyPipPackage())
           return list
         }
@@ -82,7 +81,6 @@ class MainApplication : Application(), ReactApplication {
       }
     }
     SoLoader.init(this, false)
-    TojeyKeepAliveService.ensureChannel(this)
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
       load()
     }

@@ -38,8 +38,9 @@ export function noteEgressBlocked() {
   egressBlockedUntil = Date.now() + EGRESS_BLOCK_MEMO_MS;
 }
 
-export function streamUrl(videoId, itag, token) {
-  return `${API}/api/yt/media/${videoId}?itag=${itag}&token=${encodeURIComponent(token || '')}`;
+export function streamUrl(videoId, itag, token, maxHeight = 0) {
+  const cap = maxHeight > 0 ? `&maxHeight=${encodeURIComponent(maxHeight)}` : '';
+  return `${API}/api/yt/media/${videoId}?itag=${itag}&token=${encodeURIComponent(token || '')}${cap}`;
 }
 
 export function downloadUrl(videoId, itag, token, mux) {
@@ -129,8 +130,8 @@ export default function YoutubePlayer({
   const [volume, setVolume] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
-const [playbackRate, setPlaybackRate] = useState(1);
-   const [availableCaptions, setAvailableCaptions] = useState([]);
+  const [playbackRate, setPlaybackRate] = useState(1);
+    const [availableCaptions, setAvailableCaptions] = useState([]);
    const [selectedCaption, setSelectedCaption] = useState(null);
    const [miniPlayerOpen, setMiniPlayerOpen] = useState(false);
    const [isSeeking, setIsSeeking] = useState(false);
@@ -145,6 +146,15 @@ const resetControlsTimeout = useCallback(() => {
        if (playing && !qualityMenuOpen && !isSeeking) setShowControls(false);
      }, 3000);
    }, [playing, qualityMenuOpen, isSeeking]);
+
+  const changePlaybackRate = useCallback((rate) => {
+    setPlaybackRate(rate);
+    const v = videoRef.current;
+    if (v) {
+      try { v.playbackRate = rate; } catch (e) {}
+    }
+    resetControlsTimeout();
+  }, [resetControlsTimeout]);
 
   const toggleMute = useCallback(() => {
     const v = videoRef.current;
@@ -663,12 +673,6 @@ const resetControlsTimeout = useCallback(() => {
               <button onClick={toggleMute} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}>
                 {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
               </button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12 }}>
-                <button onClick={() => { const v = videoRef.current; if (v) { const newRate = playbackRate >= 2 ? 1 : playbackRate + 0.25; setPlaybackRate(newRate); if (v.playbackRate !== newRate) v.playbackRate = newRate; } resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 3, fontSize: 11 }}>
-                  {playbackRate >= 1 ? '×' + playbackRate.toFixed(1) : playbackRate.toFixed(2)+'×'}
-                </button>
-                <span style={{ fontSize: 11, color: '#888' }}>Speed</span>
-              </div>
               {availableCaptions.length > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12 }}>
                   <button onClick={() => setSelectedCaption(selectedCaption === null ? availableCaptions[0].lang : null)} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 3, fontSize: 11 }}>
@@ -679,14 +683,21 @@ const resetControlsTimeout = useCallback(() => {
               <div style={{ position: 'relative' }}>
                 <button onClick={() => { setQualityMenuOpen(!qualityMenuOpen); resetControlsTimeout(); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                   <Settings size={18} />
-                  <span style={{ fontSize: 11 }}>{level < 0 ? 'Auto' : `${levels.find((l) => l.index === level)?.height || ''}p`}</span>
+                  <span style={{ fontSize: 11 }}>{level < 0 ? 'Auto' : `${levels.find((l) => l.index === level)?.height || ''}p`} · {playbackRate}x</span>
                 </button>
                 {qualityMenuOpen && (
-                  <div style={{ position: 'absolute', bottom: 30, right: 0, background: 'rgba(0,0,0,0.95)', borderRadius: 8, overflow: 'hidden', minWidth: 100 }}>
+                  <div style={{ position: 'absolute', bottom: 30, right: 0, background: 'rgba(0,0,0,0.95)', borderRadius: 8, overflow: 'hidden', minWidth: 130, maxHeight: 260, overflowY: 'auto' }}>
+                    <div style={{ padding: '6px 10px', fontSize: 10, color: '#aaa', textTransform: 'uppercase', letterSpacing: 0.6 }}>Quality</div>
                     <button onClick={() => chooseLevel(-1)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', fontSize: 12, background: level < 0 ? theme.primary : 'transparent', color: '#fff' }}>Auto</button>
                     {levels.map((l) => (
                       <button key={l.index} onClick={() => chooseLevel(l.index)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', fontSize: 12, background: level === l.index ? theme.primary : 'transparent', color: '#fff' }}>
                         {l.height}p
+                      </button>
+                    ))}
+                    <div style={{ padding: '8px 10px 4px', fontSize: 10, color: '#aaa', textTransform: 'uppercase', letterSpacing: 0.6 }}>Speed</div>
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                      <button key={rate} onClick={() => changePlaybackRate(rate)} style={{ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', padding: '6px 10px', fontSize: 12, background: playbackRate === rate ? theme.primary : 'transparent', color: '#fff' }}>
+                        {rate}x
                       </button>
                     ))}
                   </div>

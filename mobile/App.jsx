@@ -19,9 +19,6 @@ import ChatRoomScreen from './src/screens/ChatRoomScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import BatteryGuideScreen from './src/screens/BatteryGuideScreen';
 import { isAggressiveOem } from './src/services/battery';
-import {
-  supportsKeepAlive, getKeepAliveEnabled, startKeepAlive, stopKeepAlive, isKeepAliveActive,
-} from './src/services/keepAlive';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { TojeyColors } from './src/theme';
 import {
@@ -132,22 +129,11 @@ function Shell() {
     }
   };
 
-  // Foreground keep-alive service: on by default after login on supported builds so
-  // the process survives backgrounding and messages deliver instantly over the socket
-  // on every device/OEM (FCM stays the backstop). Off when the user disables it.
-  const maybeStartKeepAlive = async () => {
-    try {
-      if (!supportsKeepAlive()) return;
-      if (await getKeepAliveEnabled()) startKeepAlive();
-    } catch (e) {}
-  };
-
   const handleLogin = (user, token) => {
     setSession({ user, token });
     setAuthToken(token);
     setSocket(connect(token));
     startPush(token).catch(() => {});
-    maybeStartKeepAlive().catch(() => {});
   };
 
   // A Watch Together room became active (invitation accepted or reconnect):
@@ -168,7 +154,6 @@ function Shell() {
     setAuthToken('');
     disconnect();
     stopPush();
-    stopKeepAlive();
     try { await deactivateToken(); } catch (e) { console.warn('logout deactivate failed', e); }
     setSession(null);
     setSocket(null);
@@ -189,7 +174,6 @@ function Shell() {
           setAuthToken(s.token);
           setSocket(connect(s.token));
           startPush(s.token).catch(() => {});
-          maybeStartKeepAlive().catch(() => {});
         }
         const lockEnabled = await AsyncStorage.getItem(APP_LOCK_KEY);
         const pin = await AsyncStorage.getItem(APP_LOCK_PIN_KEY);
@@ -230,14 +214,11 @@ function Shell() {
       const s = getSocket();
       if (!s) return;
       const active = AppState.currentState === 'active';
-      // When backgrounded on a keep-alive device, the server routes over the socket
-      // (client renders the popup locally - instant on any OEM) instead of FCM.
-      const keepAlive = active ? false : isKeepAliveActive();
-      Promise.all([getDeviceId(), nextDeviceSeq(), keepAlive])
-        .then(([deviceId, seq, ka]) => {
+      Promise.all([getDeviceId(), nextDeviceSeq()])
+        .then(([deviceId, seq]) => {
           const so = getSocket();
           if (!so || !so.connected) return;
-          so.emit(active ? 'app:foreground' : 'app:background', { deviceId, seq, keepAlive: active ? undefined : ka });
+          so.emit(active ? 'app:foreground' : 'app:background', { deviceId, seq });
         })
         .catch(() => {});
     };
@@ -368,13 +349,28 @@ function Shell() {
     };
   }, []);
 
-  const backStateRef = useRef({ activeChat: null, showSettings: false });
-  backStateRef.current = { activeChat, showSettings };
+  const backStateRef = useRef({
+    activeChat: null,
+    showSettings: false,
+    showBatteryGuide: false,
+    showLockScreen: false,
+    incomingBanner: null,
+  });
+  backStateRef.current = { activeChat, showSettings, showBatteryGuide, showLockScreen, incomingBanner };
 
-  // Android hardware back: chat → chats, settings → home, else exit
+  // Android hardware back always moves through app surfaces; it never closes the app.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       const state = backStateRef.current;
+      if (state.showBatteryGuide) {
+        setShowBatteryGuide(false);
+        return true;
+      }
+      if (state.showLockScreen) return true;
+      if (state.incomingBanner) {
+        setIncomingBanner(null);
+        return true;
+      }
       if (state.activeChat) {
         setActiveChat(null);
         return true;
@@ -384,7 +380,7 @@ function Shell() {
         return true;
       }
       if (homeBackRef.current && homeBackRef.current()) return true;
-      return false;
+      return true;
     });
     return () => sub.remove();
   }, []);

@@ -480,22 +480,18 @@ app.get('/api/fcm/status', authMiddleware, async (req, res) => {
   }
 });
 
-// Build/version diagnostic: proves which deploy is live and whether keep-alive
-// devices are reaching the in-memory router. Harmless counters only, no PII.
+// Build/version diagnostic: proves which deploy is live. Harmless counters only, no PII.
 app.get('/api/version', (req, res) => {
   let trackedDevices = 0;
-  let keepAliveDevices = 0;
   let foregroundDevices = 0;
   for (const st of deviceStateMap.values()) {
     trackedDevices++;
-    if (st.keepAlive) keepAliveDevices++;
     if (st.state === 'foreground') foregroundDevices++;
   }
   res.json({
     version: 'v1.17.0',
     deployment: process.env.RENDER_DEPLOYMENT_ID || null,
     trackedDevices,
-    keepAliveDevices,
     foregroundDevices,
     now: new Date().toISOString(),
   });
@@ -714,6 +710,19 @@ function parseSeedList(raw) {
     if (out.length >= 20) break;
   }
   return out;
+}
+
+function parseIdList(raw) {
+  if (!raw) return [];
+  let arr = raw;
+  if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try { arr = JSON.parse(raw); } catch (e) { arr = raw.split(','); }
+  }
+  const list = Array.isArray(arr) ? arr : String(arr).split(',');
+  return list
+    .map((v) => String(v || '').trim())
+    .filter((v) => YTID.test(v))
+    .slice(0, 300);
 }
 
 function recQueries(seeds, nonce) {
@@ -981,15 +990,72 @@ function mediaAuth(req, res, next) {
   next();
 }
 
-function pickFormat(streams, itag) {
+function pickFormat(streams, itag, maxHeight = 0) {
   const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
-  if (itag) {
+  if (itag && String(itag) !== 'best') {
     const f = all.find((x) => String(x.itag) === String(itag));
     if (f) return f;
   }
   const muxed = (streams.formats || []).filter((f) => f.hasVideo && f.hasAudio);
+  const capped = maxHeight > 0
+    ? muxed.filter((f) => !f.height || f.height <= maxHeight)
+    : muxed;
+  if (capped.length) return capped.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
   if (muxed.length) return muxed.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
   return (streams.formats || [])[0] || all[0] || null;
+}
+
+async function ytdlpStreams(videoId) {
+  const yf = await ytFormat.getFormats(videoId);
+  const progressive = [];
+  const adaptive = [];
+  for (const f of yf.formats) {
+    const isM4a = f.ext === 'm4a' || /mp4a/.test(f.acodec || '');
+    const mimeType = f.hasVideo
+      ? (/webm/.test(f.ext) ? 'video/webm' : 'video/mp4')
+      : (isM4a ? 'audio/mp4' : 'audio/webm');
+    const entry = {
+      itag: `ytdlp:${f.formatId}`,
+      ytdlpFormatId: f.formatId,
+      url: f.url,
+      hasVideo: f.hasVideo,
+      hasAudio: f.hasAudio,
+      mimeType,
+      codecs: f.hasVideo ? (f.vcodec || '') : (f.acodec || ''),
+      bitrate: f.hasVideo ? Math.round((f.tbr || 0) * 1000) : Math.round((f.abr || 0) * 1000),
+      contentLength: f.filesize || 0,
+      width: f.width,
+      height: f.height,
+      fps: f.fps,
+    };
+    if (f.hasVideo && f.hasAudio) progressive.push(entry);
+    else adaptive.push(entry);
+  }
+  if (!progressive.length && !adaptive.length) throw new Error('no formats');
+  const progressiveByHeight = new Map();
+  for (const f of progressive.sort((a, b) => /avc1/.test(b.codecs || '') - /avc1/.test(a.codecs || ''))) {
+    if (!progressiveByHeight.has(f.height || 0)) progressiveByHeight.set(f.height || 0, f);
+  }
+  return {
+    videoId,
+    status: 'OK',
+    reason: '',
+    expiresInSeconds: 0,
+    hlsManifestUrl: '',
+    dashManifestUrl: '',
+    formats: [...progressiveByHeight.values()],
+    adaptiveFormats: adaptive,
+  };
+}
+
+async function downloadStreams(videoId) {
+  try {
+    const streams = await yt.playerStreams(videoId, true);
+    if (streams && streams.status === 'OK' && (
+      (streams.formats && streams.formats.length) || (streams.adaptiveFormats && streams.adaptiveFormats.length)
+    )) return streams;
+  } catch (e) {}
+  return ytdlpStreams(videoId);
 }
 
 app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
@@ -1015,49 +1081,7 @@ app.get('/api/yt/streams/:videoId', authMiddleware, async (req, res) => {
       return s;
     };
 
-    const getYtdlp = async () => {
-      const yf = await ytFormat.getFormats(videoId);
-      const prog = [];
-      const adaptive = [];
-      for (const f of yf.formats) {
-        const isM4a = f.ext === 'm4a' || /mp4a/.test(f.acodec || '');
-        const mimeType = f.hasVideo
-          ? (/webm/.test(f.ext) ? 'video/webm' : 'video/mp4')
-          : (isM4a ? 'audio/mp4' : 'audio/webm');
-        const entry = {
-          itag: `ytdlp:${f.formatId}`,
-          ytdlpFormatId: f.formatId,
-          url: f.url,
-          hasVideo: f.hasVideo,
-          hasAudio: f.hasAudio,
-          mimeType,
-          codecs: f.hasVideo ? (f.vcodec || '') : (f.acodec || ''),
-          bitrate: f.hasVideo ? Math.round((f.tbr || 0) * 1000) : Math.round((f.abr || 0) * 1000),
-          contentLength: f.filesize || 0,
-          width: f.width,
-          height: f.height,
-          fps: f.fps,
-        };
-        if (f.hasVideo && f.hasAudio) prog.push(entry);
-        else adaptive.push(entry);
-      }
-      if (!prog.length && !adaptive.length) throw new Error('no formats');
-      // Deduplicate progressive by height, preferring H.264.
-      const progByHeight = new Map();
-      for (const f of prog.sort((a, b) => /avc1/.test(b.codecs || '') - /avc1/.test(a.codecs || ''))) {
-        if (!progByHeight.has(f.height || 0)) progByHeight.set(f.height || 0, f);
-      }
-      return {
-        videoId,
-        status: 'OK',
-        reason: '',
-        expiresInSeconds: 0,
-        hlsManifestUrl: '',
-        dashManifestUrl: '',
-        formats: [...progByHeight.values()],
-        adaptiveFormats: adaptive,
-      };
-    };
+    const getYtdlp = () => ytdlpStreams(videoId);
 
     if (preferYtdlp) {
       try { streams = await getYtdlp(); usedYtdlp = true; }
@@ -1139,9 +1163,15 @@ function streamDownloadFile(res, filePath, filename, contentType) {
   res.set('Cache-Control', 'private, no-store');
   res.set('Content-Disposition', `attachment; filename="${filename}"`);
   const rs = fs.createReadStream(filePath);
-  const done = () => mux.cleanup(filePath);
+  let cleaned = false;
+  const done = () => {
+    if (cleaned) return;
+    cleaned = true;
+    mux.cleanup(filePath);
+  };
   rs.on('close', done);
   rs.on('error', () => { try { res.destroy(); } catch (e) {} done(); });
+  res.on('close', done);
   rs.pipe(res);
 }
 
@@ -1149,6 +1179,7 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
   const videoId = String(req.params.videoId || '');
   if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
   const itag = req.query.itag ? String(req.query.itag).slice(0, 10) : '18';
+  const maxHeight = parseInt(req.query.maxHeight || '0', 10) || 0;
   const download = req.query.download === '1';
   const wantMux = req.query.mux === '1';
 
@@ -1275,9 +1306,7 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
 
   try {
     if (download) {
-      let streams = await yt.playerStreams(videoId, false);
-      const all = [...(streams.formats || []), ...(streams.adaptiveFormats || [])];
-      if (!all.some((f) => f.url)) streams = await yt.playerStreams(videoId, true);
+      const streams = await downloadStreams(videoId);
       return await downloadFormat(streams, pickFormat(streams, itag));
     }
 
@@ -1285,7 +1314,7 @@ app.get('/api/yt/media/:videoId', mediaAuth, async (req, res) => {
     // forward the client's Range so dash.js can seek.
     const attempt = async (skipCache) => {
       const streams = await yt.playerStreams(videoId, skipCache);
-      const fmt = pickFormat(streams, itag);
+      const fmt = pickFormat(streams, itag, maxHeight);
       if (!fmt || !fmt.url) return { upstream: null, fmt: null };
       const headers = { 'User-Agent': YT_UA, Accept: '*/*' };
       if (req.headers.range) headers.Range = req.headers.range;
@@ -1402,6 +1431,42 @@ app.get('/api/shorts/categories', authMiddleware, (req, res) => {
   }
 });
 
+app.post('/api/shorts/refresh', authMiddleware, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const category = String(body.category || 'trending').slice(0, 30);
+    const seeds = parseSeedList(body.seeds).slice(0, 8);
+    const exclude = parseIdList(body.exclude);
+    const nonce = String(body.nonce || body.requestId || '').slice(0, 80) || String(Date.now());
+    const result = await shortsFeed.cycle(category, {
+      seeds,
+      exclude,
+      nonce,
+      key: (req.user && req.user.username) || 'anon',
+      skipCache: true,
+    });
+    res.json({
+      cycleId: result.cycleId,
+      category: result.category,
+      items: result.videos,
+      totalCount: result.totalCount,
+      complete: result.complete,
+      nextRefreshAvailable: result.nextRefreshAvailable,
+      createdAt: result.createdAt,
+      recommendationCategories: result.recommendationCategories,
+      feedVersion: result.feedVersion,
+      message: result.message,
+    });
+  } catch (e) {
+    console.error('shorts:refresh error', e.code || '', e.message);
+    res.status(502).json({
+      error: 'refresh unavailable',
+      code: e.code || null,
+      detail: String(e.message || '').slice(0, 200),
+    });
+  }
+});
+
 app.get('/api/shorts/feed', authMiddleware, async (req, res) => {
   try {
     const category = String(req.query.category || 'trending').slice(0, 30);
@@ -1410,7 +1475,7 @@ app.get('/api/shorts/feed', authMiddleware, async (req, res) => {
     // Personalisation inputs from the device's search/watch history. Bounded so
     // a hostile query string cannot turn into unbounded work.
     const seeds = parseSeedList(req.query.seeds).slice(0, 8);
-    const exclude = parseSeedList(req.query.exclude).filter((v) => YTID.test(v)).slice(0, 300);
+    const exclude = parseIdList(req.query.exclude);
     const opts = { seeds, exclude, key: (req.user && req.user.username) || 'anon' };
     const result = await shortsFeed.feed(category, nextToken, refresh, opts);
     res.json({
@@ -1571,9 +1636,6 @@ function deviceIsForeground(deviceId) {
 // Record a device's foreground/background report with out-of-order protection.
 // Each device sends a monotonic seq (persisted across app restarts) so a stale
 // duplicate (reconnect echo, two processes) can never downgrade a newer report.
-// A background report may carry `keepAlive: true` - the device's foreground
-// keep-alive service is running, so the socket stays connected and the CLIENT
-// renders popups locally; the server then skips FCM for it.
 function setDeviceState(deviceId, state, meta) {
   if (!deviceId || typeof deviceId !== 'string') return;
   const now = Date.now();
@@ -1586,20 +1648,7 @@ function setDeviceState(deviceId, state, meta) {
     if (seq >= 0 && cur.seq >= 0 && seq <= cur.seq) return; // duplicate / out-of-order
     if (seq < 0 && now <= cur.ts) return;                   // legacy client, ts fallback
   }
-  const keepAlive = state === 'background' && !!(meta && meta.keepAlive);
-  deviceStateMap.set(deviceId, { state, seq, ts: now, keepAlive });
-}
-
-// A device with a live foreground keep-alive service: backgrounded but still connected,
-// so the client renders message popups locally over the socket. Treat it like foreground
-// for FCM purposes - sending a GMS popup too would double-notify.
-function deviceHasKeepAlive(deviceId) {
-  if (!deviceId || typeof deviceId !== 'string') return false;
-  const sockets = deviceSockets.get(deviceId);
-  if (!sockets || sockets.size === 0) return false;
-  const st = deviceStateMap.get(deviceId);
-  if (!st || st.state !== 'background' || !st.keepAlive) return false;
-  return true;
+  deviceStateMap.set(deviceId, { state, seq, ts: now });
 }
 
 function addDeviceSocket(socketId, deviceId) {
@@ -1657,13 +1706,11 @@ function removeSocket(userId, socketId) {
 function tokensNeedingFcm(rows, userId, legacyHasSocket) {
   const tokens = [];
   let phoneForeground = 0;
-  let keepAliveSkip = 0;
   let legacySkip = 0;
   for (const r of rows) {
     if (!r || !r.fcm_token) continue;
     if (r.device_id) {
       if (deviceIsForeground(r.device_id)) { phoneForeground += 1; continue; }
-      if (deviceHasKeepAlive(r.device_id)) { keepAliveSkip += 1; continue; }
       tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     } else {
       // Legacy rows: keep the old behavior - skip FCM only when the whole user is
@@ -1672,7 +1719,7 @@ function tokensNeedingFcm(rows, userId, legacyHasSocket) {
       tokens.push({ token: r.fcm_token, platform: r.platform || 'android' });
     }
   }
-  return { tokens, phoneForeground, keepAliveSkip, legacySkip };
+  return { tokens, phoneForeground, legacySkip };
 }
 
 // Short human-readable preview for a chat message push (media/call/system friendly).
