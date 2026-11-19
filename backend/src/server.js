@@ -1967,32 +1967,6 @@ io.on('connection', async (socket) => {
           }, 300);
         }
 
-        // Push to every receiver device/tab that is NOT currently foreground-with-socket
-        // (closed app, closed tab, backgrounded device), so messages pop like
-        // WhatsApp/Messenger even when the app is not on screen. Android receives a true
-        // system notification (rendered by Google Play Services, no app process needed);
-        // web tokens get data-only because the service worker renders its own popup.
-        deliverFcmPush(otherUserId, {
-          notification: {
-            title: dbUser.displayName || dbUser.username,
-            body: messagePreview(message).slice(0, 140),
-          },
-          data: {
-            type: 'tojey_chat',
-            messageId: String(message.id),
-            senderId: String(dbUser.userId),
-            senderUsername: dbUser.username,
-            senderName: dbUser.displayName || dbUser.username,
-            senderPic: dbProfilePic,
-            receiverId: String(otherUserId),
-            conversationId: String(convo.id),
-            msgType: message.type,
-            msgPreview: messagePreview(message).slice(0, 140),
-            body: messagePreview(message).slice(0, 140),
-            title: dbUser.displayName || dbUser.username,
-          },
-        });
-
         callback({ ok: true, message });
       } catch (e) {
         console.error('message:send error', e);
@@ -2301,34 +2275,6 @@ io.on('connection', async (socket) => {
       const id = String(callId || '');
       if (!id) return;
       relayVideo('video-call:media-state', target, { callId: id, cameraOn: cameraOn !== false, screenSharing: !!screenSharing });
-    });
-
-    socket.on('video-call:share-options', ({ targetUserId, callId, internalAudio, allowControl }) => {
-      const target = Number(targetUserId);
-      if (!validTarget(target)) return;
-      const id = String(callId || '');
-      if (!id) return;
-      relayVideo('video-call:share-options', target, {
-        callId: id,
-        internalAudio: !!internalAudio,
-        allowControl: !!allowControl,
-      });
-    });
-
-    socket.on('video-call:control-event', ({ targetUserId, callId, type, x, y, x2, y2, duration }) => {
-      const target = Number(targetUserId);
-      if (!validTarget(target)) return;
-      const id = String(callId || '');
-      if (!id) return;
-      relayVideo('video-call:control-event', target, {
-        callId: id,
-        type,
-        x,
-        y,
-        x2,
-        y2,
-        duration,
-      });
     });
 
     socket.on('video-call:end', ({ targetUserId, callId }) => {

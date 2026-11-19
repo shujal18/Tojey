@@ -71,19 +71,21 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         loadConversations(user.id),
       ]);
       if (!mounted) return;
-      if (cachedUsers.length) setUsers(cachedUsers.filter((u) => u.id !== user.id));
+      if (cachedUsers.length) setUsers(cachedUsers.filter((u) => String(u.id) !== String(user.id)));
       if (cachedConvs.length) {
-        const normalized = cachedConvs.map((c) => ({
-          ...c,
-          lastMsg: c.lastMsg ? { ...c.lastMsg, time: new Date(c.lastMsg.time || 0) } : null,
-        }));
+        const normalized = cachedConvs
+          .map((c) => ({
+            ...c,
+            lastMsg: c.lastMsg ? { ...c.lastMsg, time: new Date(c.lastMsg.time || 0) } : null,
+          }))
+          .filter((c) => c.other && String(c.other.id) !== String(user.id));
         setConversations(normalized);
       }
     })();
 
     fetchUsers().then((data) => {
       if (data && data.length) {
-        const others = data.filter((u) => u.id !== user.id);
+        const others = data.filter((u) => String(u.id) !== String(user.id));
         setUsers(others);
         saveUsers(user.id, others);
       }
@@ -92,19 +94,19 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     if (socket) {
       const refreshList = () => socket.emit('conversation:list');
       const hList = (list) => {
-        const mapped = list.map((c) => ({
-          conversationId: c.conversationId,
-          other: c.other,
-          lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
-        }));
+        const mapped = (Array.isArray(list) ? list : [])
+          .map((c) => ({
+            conversationId: c.conversationId,
+            other: c.other,
+            lastMsg: c.lastMessage ? { content: c.lastMessage.content, type: c.lastMessage.type, time: new Date(c.lastMessage.created_at) } : null,
+          }))
+          .filter((c) => c.other && String(c.other.id) !== String(user.id));
         setConversations(mapped);
         saveConversations(user.id, mapped);
         setPresence((prev) => {
           const next = { ...prev };
-          list.forEach((c) => {
-            if (c.other) {
-              next[c.other.id] = { isOnline: c.other.isOnline, lastSeen: c.other.last_seen };
-            }
+          mapped.forEach((c) => {
+            next[c.other.id] = { isOnline: c.other.isOnline, lastSeen: c.other.last_seen };
           });
           return next;
         });
@@ -126,9 +128,10 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
         });
       });
       socket.on('message:receive', ({ message, sender, conversationId }) => {
+        if (!sender?.userId || String(sender.userId) === String(user.id)) return;
         const senderPic = sender.profilePic || '';
         setConversations((prev) => {
-          const mine = prev.filter((c) => c.other.id !== sender.userId);
+          const mine = prev.filter((c) => String(c.other?.id) !== String(sender.userId));
           const next = [
             {
               conversationId,
@@ -179,7 +182,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   const clearChat = (contact) => {
     if (socket) socket.emit('conversation:clear', { otherUserId: contact.id });
     clearConversationCache(user.id, contact.id);
-    setConversations((prev) => prev.map((c) => (c.other.id === contact.id ? { ...c, lastMsg: null } : c)) || []);
+    setConversations((prev) => prev.map((c) => (String(c.other?.id) === String(contact.id) ? { ...c, lastMsg: null } : c)) || []);
     setClearTarget(null);
   };
 
@@ -288,12 +291,13 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   }, []);
 
   const chatRows = useMemo(() => {
+    const selfId = String(user?.id ?? '');
     const byId = new Map(users.map((u) => [String(u.id), u]));
     const conversationIds = new Set(conversations.map((c) => String(c.other?.id)));
     const rows = [];
     const makeRow = (source, preview) => {
       const id = source?.id;
-      if (id == null) return null;
+      if (id == null || String(id) === selfId) return null;
       const online = presence[id]?.isOnline ?? source.isOnline ?? source.is_online ?? source.online ?? false;
       const lastSeen = presence[id]?.lastSeen ?? source.lastSeen ?? source.last_seen ?? null;
       return {
@@ -329,7 +333,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
     return rows.filter((r) =>
       `${r.contact.display_name || ''} ${r.contact.username || ''} ${r.preview?.content || ''}`.toLowerCase().includes(q)
     );
-  }, [conversations, users, presence, onCall, unread, query]);
+  }, [conversations, users, presence, onCall, unread, query, user?.id]);
 
   const renderChatRow = useCallback(({ item }) => (
     <ConversationRow

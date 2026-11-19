@@ -8,7 +8,7 @@ import { loadUsers } from './src/services/cache';
 import { storeInvite } from './src/services/videoCall';
 import { setAuthToken } from './src/services/downloadsStore';
 import { Icon } from './src/components/AppIcon';
-import IncomingBanner, { messagePreviewText } from './src/components/IncomingBanner';
+import IncomingBanner from './src/components/IncomingBanner';
 import WatchTogetherBanner from './src/components/WatchTogetherBanner';
 import { WatchTogetherProvider } from './src/services/WatchTogetherContext';
 import { CallProvider } from './src/services/CallContext';
@@ -333,63 +333,6 @@ function Shell() {
       if (unsubFg) unsubFg();
     };
   }, [socket, session]);
-
-  // Heads-up banner for chat messages landing while the app is open: shows over ANY
-  // screen (home, settings, another chat) when the message is for a conversation that
-  // is not the one currently on screen. Socket already delivered the message, so this
-  // is instant and needs no FCM / permission / OEM cooperation.
-  useEffect(() => {
-    if (!socket || !session) return undefined;
-    const ownId = session.user && session.user.id;
-    const onMsg = async ({ message, sender, conversationId }) => {
-      if (!message || !sender || !sender.userId) return;
-      if (String(sender.userId) === String(ownId)) return;
-      // In the foreground and already viewing this chat: the UI shows the message.
-      // Anywhere else render a system popup - via this local path only on keep-alive
-      // devices (the server routes over the socket there, so GMS/FCM is not used).
-      if (
-        AppState.currentState === 'active' &&
-        activeChat && String(activeChat.id) === String(sender.userId)
-      ) return;
-      // Seated in any room: no in-app banner at all, not even for a different
-      // sender. The room is the user's current focus and a popup over the
-      // conversation is pure noise. This has to be a separate check from the one
-      // above, which only suppresses the conversation already on screen.
-      if (AppState.currentState === 'active' && activeChat) return;
-      const prefs = await getNotifPrefs().catch(() => null);
-      if (!prefs || !prefs.enabled) return;
-      const preview = messagePreviewText(message).slice(0, 90);
-      if (AppState.currentState !== 'active') {
-        // Not keep-alive -> the server sent an FCM popup (GMS renders it). Rendering
-        // here too would double-notify, so only render when the keep-alive service is
-        // actually running underneath this process.
-        const ka = await isKeepAliveActive().catch(() => false);
-        if (!ka) return;
-        showSystemNotification({
-          type: 'tojey_chat',
-          notificationId: message.id,
-          senderId: sender.userId,
-          senderUsername: sender.username || '',
-          senderName: sender.displayName || sender.username || 'Tojey',
-          receiverId: ownId,
-          conversationId,
-          message: preview,
-          title: sender.displayName || sender.username || 'Tojey',
-        });
-        return;
-      }
-      setIncomingBanner({
-        key: `${message.id || Date.now()}`,
-        senderId: sender.userId,
-        senderName: sender.displayName || sender.username || 'Tojey',
-        senderPic: sender.profilePic || '',
-        conversationId,
-        preview,
-      });
-    };
-    socket.on('message:receive', onMsg);
-    return () => socket.off('message:receive', onMsg);
-  }, [socket, session, activeChat]);
 
   const openBanner = () => {
     if (incomingBanner && incomingBanner.senderId) {

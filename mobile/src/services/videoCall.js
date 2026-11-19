@@ -37,7 +37,7 @@ const SCREEN_ENCODING = {
   degradationPreference: 'BALANCED',
 };
 const DISPLAY_CONSTRAINTS = {
-  audio: true,
+  audio: false,
   video: {
     width: { ideal: 1920 },
     height: { ideal: 1080 },
@@ -48,7 +48,6 @@ const DISPLAY_CONSTRAINTS = {
 let pc = null;
 let localStream = null;
 let screenStream = null;
-let screenAudioTrack = null;
 let remoteStream = null;
 let pendingCandidates = [];
 let addedCandidates = new Set();
@@ -56,7 +55,6 @@ let callbacks = {};
 let micMuted = false;
 let remoteAudioEnabled = true;
 let videoFacing = 'user';
-let screenShareOptions = { internalAudio: false, allowControl: false };
 
 // Incoming-call handoff for WhatsApp-style auto-open: App.jsx catches the
 // invite globally and calls storeInvite() before opening the chat; the mounted
@@ -306,31 +304,14 @@ export function getScreenStream() {
   return screenStream;
 }
 
-export function getScreenShareOptions() {
-  return screenShareOptions;
-}
-
-export async function startScreenShare(opts = {}) {
+export async function startScreenShare() {
   if (!pc || !localStream) throw new Error('Start the camera call first');
   if (screenStream) return screenStream;
 
-  const internalAudio = !!opts.internalAudio;
-  screenShareOptions = {
-    internalAudio,
-    allowControl: !!opts.allowControl,
-  };
-  screenAudioTrack = null;
-
   let stream;
   try {
-    stream = await mediaDevices.getDisplayMedia({
-      ...DISPLAY_CONSTRAINTS,
-      audio: internalAudio,
-    });
+    stream = await mediaDevices.getDisplayMedia(DISPLAY_CONSTRAINTS);
   } catch (e) {
-    screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
-    screenAudioTrack = null;
     throw e;
   }
   const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
@@ -338,9 +319,6 @@ export async function startScreenShare(opts = {}) {
     try {
       if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
     } catch (e) {}
-    screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
-    screenAudioTrack = null;
     throw new Error('Could not capture the screen');
   }
 
@@ -348,25 +326,11 @@ export async function startScreenShare(opts = {}) {
     if ('contentHint' in track) track.contentHint = 'detail';
   } catch (e) {}
 
-  if (internalAudio) {
-    try {
-      const audioTrack = stream && stream.getAudioTracks && stream.getAudioTracks()[0];
-      const audioSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
-      if (audioTrack && audioSender) {
-        await audioSender.replaceTrack(audioTrack);
-        screenAudioTrack = audioTrack;
-      }
-    } catch (e) {}
-  }
-
   const videoSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'video');
   if (!videoSender) {
     try {
       if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
     } catch (e) {}
-    screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
-    screenAudioTrack = null;
     throw new Error('Video sender is not ready');
   }
 
@@ -378,9 +342,6 @@ export async function startScreenShare(opts = {}) {
     try {
       if (stream && stream.getTracks) stream.getTracks().forEach((t) => t.stop());
     } catch (e3) {}
-    screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
-    screenAudioTrack = null;
     throw e;
   }
   screenStream = stream;
@@ -397,25 +358,12 @@ export async function stopScreenShare() {
     console.warn('replaceTrack back to camera failed', e && e.message);
   }
   if (videoSender && camTrack) await tuneSender(videoSender, CAMERA_ENCODING);
-  if (screenAudioTrack) {
-    try {
-      const micTrack = localStream && localStream.getAudioTracks && localStream.getAudioTracks()[0];
-      const audioSender = pc && pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
-      if (audioSender && micTrack) {
-        await audioSender.replaceTrack(micTrack);
-        micTrack.enabled = !micMuted;
-      }
-    } catch (e) {}
-    screenAudioTrack = null;
-  }
   try {
     if (screenStream && screenStream.getTracks) {
       screenStream.getTracks().forEach((t) => t.stop());
     }
   } catch (e) {}
   screenStream = null;
-  screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
 }
 
 export function cleanupCall() {
@@ -445,6 +393,4 @@ export function cleanupCall() {
   micMuted = false;
   remoteAudioEnabled = true;
   videoFacing = 'user';
-  screenShareOptions = { internalAudio: false, allowControl: false };
-  screenAudioTrack = null;
 }

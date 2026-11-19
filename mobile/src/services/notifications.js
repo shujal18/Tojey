@@ -32,15 +32,13 @@ export async function setNotifPrefs(patch) {
   return next;
 }
 
-// Show the floating chat head (and vibrate for nudges) from a background/headless
-// FCM data message - this is what lets chat / nudge work on devices whose process
-// is killed while the app is backgrounded (socket-only delivery would be lost).
+// Show the floating nudge chat head from a background/headless FCM data message.
+// Chat messages must never produce a notification surface.
 const ChatHeadMod = NativeModules.TojeyChatHead;
 async function handleBackgroundChatOrNudge(d, opts = {}) {
   const type = d && d.type;
-  const isChat = type === 'tojey_chat';
   const isNudge = type === 'tojey_nudge' || (d && d.nudge === '1');
-  if (!isChat && !isNudge) return false;
+  if (!isNudge) return false;
   try {
     if (isNudge) {
       const nudgVib = await getNudgeVibrationEnabled().catch(() => true);
@@ -547,7 +545,7 @@ export function registerBackgroundHandler() {
       }
       try {
         const payload = extractNotifPayload(remoteMessage);
-        if (payload) {
+        if (payload && payload.kind !== 'chat') {
           console.log(`[FCM] background render kind=${payload.kind} conversationId=${payload.conversationId} messageId=${payload.messageId}`);
           if (payload.kind === 'nudge') {
             await handleBackgroundChatOrNudge(remoteMessage.data, { tray: true });
@@ -557,6 +555,7 @@ export function registerBackgroundHandler() {
           }
         } else if (remoteMessage && remoteMessage.data) {
           const d = remoteMessage.data;
+          if (d.type === 'tojey_chat') return;
           if (await handleBackgroundChatOrNudge(d)) {
             console.log(`[FCM] background data-only ${d.type || 'nudge'} -> chat head/nudge handled`);
           } else {

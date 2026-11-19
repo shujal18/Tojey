@@ -26,7 +26,6 @@ class MainApplication : Application(), ReactApplication {
           list.add(TojeyBatteryPackage())
           list.add(TojeyKeepAlivePackage())
           list.add(TojeyPipPackage())
-          list.add(TojeyRemoteControlPackage())
           return list
         }
 
