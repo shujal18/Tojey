@@ -295,7 +295,7 @@ async function getFormat(videoId) {
 // Try one (client, selector) download; resolves true on success, or {err} so the
 // ladder can keep trying other clients / selectors. `needsMerge` selects
 // adaptive video+audio (requires ffmpeg); a single muxed stream needs no merge.
-function tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge) {
+function tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge, opts = {}) {
   return new Promise((resolve) => {
     const args = ['-o', dest, '-f', selector, '--no-playlist', '--no-warnings', '--no-part', '--no-mtime'];
     const cookies = resolveCookiePath();
@@ -307,19 +307,50 @@ function tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge) {
     if (clientArgs) args.unshift('--extractor-args', clientArgs);
     args.push(`https://www.youtube.com/watch?v=${videoId}`);
     let attempts = 0;
+    let child = null;
+    let progressTimer = null;
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      if (progressTimer) clearInterval(progressTimer);
+      progressTimer = null;
+      resolve(value);
+    };
+    const stopProgress = () => {
+      if (progressTimer) clearInterval(progressTimer);
+      progressTimer = null;
+    };
     const run = () => {
       attempts += 1;
       try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (e) { /* ignore */ }
-      execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
+      stopProgress();
+      progressTimer = setInterval(() => {
+        if (opts.isCancelled && opts.isCancelled()) {
+          try { if (child) child.kill('SIGTERM'); } catch (e) {}
+          const e = new Error('download cancelled');
+          e.cancelled = true;
+          settle({ ok: false, err: e, cancelled: true });
+          return;
+        }
+        if (opts.onProgress) {
+          let bytes = 0;
+          try { bytes = fs.existsSync(dest) ? fs.statSync(dest).size : 0; } catch (e) {}
+          opts.onProgress(bytes);
+        }
+      }, 500);
+      child = execFile(bin, args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => {
+        stopProgress();
+        if (settled) return;
         if (err) {
           const msg = String((err.stderr || '').split('\n').filter(Boolean).slice(-3).join(' | ') || err.message).slice(0, 300);
           const transient = /403|429|timed out|connection|temporar|fragment/i.test(msg);
           if (transient && attempts < 2) { run(); return; }
-          resolve({ ok: false, err: new Error(msg) });
+          settle({ ok: false, err: new Error(msg) });
         } else if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
-          resolve({ ok: true });
+          settle({ ok: true });
         } else {
-          resolve({ ok: false, err: new Error('download produced no file') });
+          settle({ ok: false, err: new Error('download produced no file') });
         }
       });
     };
@@ -332,7 +363,15 @@ function tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge) {
 // best available. Video-only sources are merged with the best audio in the same
 // pass; when ffmpeg is unavailable (e.g. some hosts) we fall back to a single
 // muxed stream so downloads still succeed. `kind: 'audio'` forces audio-only.
-async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}, dest) {
+async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}, dest, opts = {}) {
+  const cancelled = () => {
+    if (opts.isCancelled && opts.isCancelled()) {
+      const e = new Error('download cancelled');
+      e.cancelled = true;
+      throw e;
+    }
+  };
+  cancelled();
   const bin = await ensureBinary();
   const binDir = path.dirname(dest);
   fs.mkdirSync(binDir, { recursive: true });
@@ -350,7 +389,9 @@ async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}
     const selector = `bestaudio[ext=${audioExtFinal}]/bestaudio/best`;
     let lastErr = null;
     for (const clientArgs of clients) {
-      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, false);
+      cancelled();
+      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, false, opts);
+      if (res.cancelled) throw res.err;
       if (res.ok) return dest;
       lastErr = res.err;
     }
@@ -373,7 +414,9 @@ async function downloadFormat(videoId, { formatId, kind, height, audioExt } = {}
   let lastErr = null;
   for (const clientArgs of clients) {
     for (const [selector, needsMerge] of [[mergeSelector, true], [muxSelector, false]]) {
-      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge);
+      cancelled();
+      const res = await tryDownload(bin, videoId, dest, clientArgs, selector, needsMerge, opts);
+      if (res.cancelled) throw res.err;
       if (res.ok) return dest;
       lastErr = res.err;
     }

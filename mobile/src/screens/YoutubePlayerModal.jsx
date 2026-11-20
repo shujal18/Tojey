@@ -18,7 +18,7 @@ import { Icon } from '../components/AppIcon';
 import Toast from '../components/Toast';
 import { fs } from '../utils/size';
 import { thumbUrl } from '../services/downloadsStore';
-import { getProxyPlayback, dashProxyUrl } from '../services/ytPlayback';
+import { getProxyPlayback, dashProxyUrl, mediaProxyUrl } from '../services/ytPlayback';
 import { useWatchTogether } from '../services/WatchTogetherContext';
 import { pipSupported, enterPip } from '../services/pip';
 import makeYoutubeApi from '../services/youtubeApi';
@@ -63,7 +63,16 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const [pipOk, setPipOk] = useState(false);
   const [nextVideo, setNextVideo] = useState(null);
   const [useDash, setUseDash] = useState(false);
+  const [muxFallback, setMuxFallback] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const nextTimerRef = useRef(null);
+  const seekWidthRef = useRef(0);
+  const lastProgressRef = useRef(Date.now());
+  const recoveringRef = useRef(false);
+  const recoverRef = useRef(null);
+  const controlsTimerRef = useRef(null);
   const [wtText, setWtText] = useState('');
   const [wtRate, setWtRate] = useState(null);
   const suppressRef = useRef(0);
@@ -115,9 +124,10 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   const api = makeYoutubeApi(token);
 
-  const loadVideo = (v) => {
+  const loadVideo = (v, fromRoom = false) => {
     // Choosing a different video while sharing a room leaves that room first.
-    if (inRoomRef.current && roomVideoRef.current && roomVideoRef.current !== v.videoId) {
+    // A room-state change loads the host's video without dropping the room.
+    if (!fromRoom && inRoomRef.current && roomVideoRef.current && roomVideoRef.current !== v.videoId) {
       wt.leaveRoom();
     }
     setCur(v);
@@ -131,6 +141,12 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setPlayError(null);
     setAudioOnly(false);
     setUseDash(false);
+    setMuxFallback(false);
+    setMuted(false);
+    setBuffering(false);
+    setControlsVisible(true);
+    lastProgressRef.current = Date.now();
+    recoveringRef.current = false;
     setPlayerSettingsOpen(false);
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
@@ -140,7 +156,11 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     // getProxyPlayback falls back to itag=best, so the player can start even if
     // the metadata request fails entirely.
     getProxyPlayback(v.videoId, token, { maxHeight: 720 })
-      .then((s) => { setStream(s); setLoading(false); })
+      .then((s) => {
+        setStream(s);
+        setUseDash(inRoomRef.current && !!s.audioUrl && !s.videoHasAudio);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
     api.video(v.videoId)
       .then((i) => {
@@ -155,12 +175,19 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial.videoId]);
 
+  useEffect(() => {
+    if (!roomVideoId || roomVideoId === cur.videoId) return;
+    loadVideo({ videoId: roomVideoId, title: wt.room?.title || '' }, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomVideoId]);
+
   const selectQuality = async (height) => {
     if (height === maxHeight || loading) return;
     setStreaming(true);
     // The quality picker deals in progressive (muxed) tracks. Selecting a
     // height switches off DASH so the requested cap is actually enforced.
     setUseDash(false);
+    setMuxFallback(false);
     try {
       const s = await getProxyPlayback(cur.videoId, token, { maxHeight: height });
       if (s) {
@@ -176,6 +203,8 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     const t = p.currentTime || 0;
     posRef.current = t;
     setPos(t);
+    lastProgressRef.current = Date.now();
+    if (p.isBuffering === false) setBuffering(false);
     // Guests never seek locally: the host owns playback in a shared room.
     if (inRoomRef.current && !isHostRef.current) return;
     const segs = info?.sponsorSegments || [];
@@ -208,6 +237,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     const t = Number(e && (e.currentTime != null ? e.currentTime : e.seekTime)) || 0;
     posRef.current = t;
     setPos(t);
+    lastProgressRef.current = Date.now();
     if (inRoomRef.current && isHostRef.current) wt.reportLocal('seek', t);
   };
 
@@ -274,14 +304,87 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const dlIcon = (st) => (!st ? 'download-outline' : st.status === 'done' ? 'checkmark-circle' : st.status === 'error' ? 'close-circle' : 'time-outline');
   const dlColor = (st) => (!st ? theme.text : st.status === 'done' ? theme.primary : st.status === 'error' ? theme.danger : theme.textSecondary);
 
-  const streamSrc = (audioOnly ? stream?.audioUrl : stream?.videoUrl) || stream?.videoUrl;
-  // Prefer the adaptive manifest (HD video + separate audio, same as web).
-  // If Media3 rejects it, onError below falls back to the muxed progressive
-  // proxy without surfacing an error or interrupting Watch Together sync.
+  const needsDashAudio = !!stream?.audioUrl && stream.videoHasAudio === false;
+  const streamSrc = audioOnly
+    ? (stream?.audioUrl || stream?.videoUrl)
+    : (muxFallback ? mediaProxyUrl(cur.videoId, token, 'best', maxHeight) : (stream?.videoUrl || stream?.audioUrl));
+  // Prefer the adaptive manifest when the device resolver handed back separate
+  // audio and video tracks. If Media3 rejects it, onError falls back to the
+  // muxed progressive proxy instead of leaving the room silent.
   const dashSrc = dashProxyUrl(cur.videoId, token);
-  const usingDash = useDash && !audioOnly;
+  const usingDash = (useDash || (needsDashAudio && !muxFallback)) && !audioOnly;
   const sourceUri = usingDash ? dashSrc : streamSrc;
   const sourceType = usingDash ? 'mpd' : 'mp4';
+
+  const revealControls = () => {
+    setControlsVisible(true);
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    controlsTimerRef.current = setTimeout(() => setControlsVisible(false), 5000);
+  };
+
+  const seekTo = (raw) => {
+    if (!dur || isGuest || playError) return;
+    const target = Math.max(0, Math.min(dur, Number(raw) || 0));
+    if (target > dur - 0.15) { handleEnd(); return; }
+    try { if (videoRef.current) videoRef.current.seek(target); } catch (e) {}
+    posRef.current = target;
+    setPos(target);
+    lastProgressRef.current = Date.now();
+    if (inRoomRef.current && isHostRef.current) wt.reportLocal('seek', target);
+    revealControls();
+  };
+
+  const togglePlay = () => {
+    if (isGuest || playError) return;
+    const next = !playing;
+    setPlaying(next);
+    if (inRoomRef.current && isHostRef.current) wt.reportLocal(next ? 'play' : 'pause', posRef.current);
+    revealControls();
+  };
+
+  const toggleMute = () => {
+    setMuted((v) => !v);
+    revealControls();
+  };
+
+  const chooseSpeed = (s) => {
+    if (isGuest) return;
+    setSpeed(s);
+    if (inRoomRef.current && isHostRef.current) wt.reportLocal('speed', s);
+    setPlayerSettingsOpen(false);
+  };
+
+  const recoverPlayback = () => {
+    if (recoveringRef.current || loading || playError || !stream || playingRef.current === false) return;
+    recoveringRef.current = true;
+    lastProgressRef.current = Date.now();
+    if (!muxFallback) {
+      setMuxFallback(true);
+      setUseDash(false);
+      setPlayError(null);
+      setTimeout(() => { recoveringRef.current = false; }, 1500);
+      return;
+    }
+    getProxyPlayback(cur.videoId, token, { maxHeight, retry: true })
+      .then((s) => {
+        setStream(s);
+        setMuxFallback(false);
+        setUseDash(!!s.audioUrl && !s.videoHasAudio);
+      })
+      .catch(() => {})
+      .finally(() => { recoveringRef.current = false; lastProgressRef.current = Date.now(); });
+  };
+  recoverRef.current = recoverPlayback;
+
+  useEffect(() => {
+    if (!stream || loading || playError || !playing || isGuest) return undefined;
+    const iv = setInterval(() => {
+      if (Date.now() - lastProgressRef.current > 12000) recoverRef.current && recoverRef.current();
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [stream, loading, playError, playing, isGuest, cur.videoId]);
+
+  useEffect(() => () => { if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current); }, []);
 
   // Expose a controller to the Watch Together provider. Only local playback
   // state is driven imperatively; seeking/rate changes are buffered with a
@@ -379,16 +482,26 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               style={styles.video}
               paused={!playing}
               resizeMode="contain"
-              controls={!isGuest}
-              onLoad={(m) => { if (m.duration) setDur(m.duration); }}
+              controls={false}
+              muted={muted}
+              onLoad={(m) => { if (m.duration) setDur(m.duration); setBuffering(false); lastProgressRef.current = Date.now(); }}
+              onBuffer={({ isBuffering }) => setBuffering(!!isBuffering)}
               onProgress={onProgress}
               onSeek={onSeek}
               onPlaybackStateChanged={onPlaybackStateChanged}
               onEnd={handleEnd}
               onError={(p) => {
-                if (usingDash && streamSrc) {
+                if (usingDash) {
+                  setMuxFallback(true);
                   setUseDash(false);
                   setPlayError(null);
+                  lastProgressRef.current = Date.now();
+                  return;
+                }
+                if (!muxFallback && stream) {
+                  setMuxFallback(true);
+                  setPlayError(null);
+                  lastProgressRef.current = Date.now();
                   return;
                 }
                 setPlayError(
@@ -403,14 +516,55 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               mixWithOthers="inherit"
             />
           ) : null}
-          {!loading && !playError && !!stream && (
-            <TouchableOpacity
-              onPress={() => setPlayerSettingsOpen((v) => !v)}
-              style={styles.playerSettingsFab}
-              accessibilityLabel="Video settings"
-            >
-              <Icon name="options-outline" size={20} color="#fff" />
-            </TouchableOpacity>
+          {!loading && !playError && !!stream && sourceUri && (
+            <>
+              <TouchableOpacity style={StyleSheet.absoluteFillObject} activeOpacity={1} onPress={revealControls} />
+              {buffering && (
+                <View style={styles.bufferBadge} pointerEvents="none">
+                  <ActivityIndicator color="#fff" size="small" />
+                </View>
+              )}
+              {controlsVisible && (
+                <View style={styles.playerControls}>
+                  <TouchableOpacity
+                    style={styles.seekHit}
+                    activeOpacity={1}
+                    disabled={!dur || isGuest}
+                    onLayout={(e) => { seekWidthRef.current = e.nativeEvent.layout.width || 0; }}
+                    onPress={(e) => seekTo((Number(e.nativeEvent.locationX) / (seekWidthRef.current || 1)) * dur)}
+                    accessibilityLabel="Seek video"
+                  >
+                    <View style={styles.seekTrack}>
+                      <View style={[styles.seekFill, { width: `${dur ? Math.min(100, (pos / dur) * 100) : 0}%` }]} />
+                      <View style={[styles.seekKnob, { left: `${dur ? Math.min(100, (pos / dur) * 100) : 0}%` }]} />
+                    </View>
+                  </TouchableOpacity>
+                  <View style={styles.controlRow}>
+                    <TouchableOpacity onPress={() => seekTo(pos - 10)} disabled={isGuest || !dur} style={styles.controlBtn} accessibilityLabel="Back 10 seconds">
+                      <Icon name="play-back" size={20} color={isGuest ? 'rgba(255,255,255,0.45)' : '#fff'} />
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={togglePlay} disabled={isGuest} style={[styles.controlBtn, styles.playBtn]} accessibilityLabel={playing ? 'Pause' : 'Play'}>
+                      <Icon name={playing ? 'pause' : 'play'} size={24} color={isGuest ? 'rgba(255,255,255,0.45)' : '#fff'} />
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => seekTo(pos + 10)} disabled={isGuest || !dur} style={styles.controlBtn} accessibilityLabel="Forward 10 seconds">
+                      <Icon name="play-forward" size={20} color={isGuest ? 'rgba(255,255,255,0.45)' : '#fff'} />
+                    </TouchableOpacity>
+                    <Text style={styles.controlTime}>{fmt(pos)} / {fmt(dur)}</Text>
+                    <TouchableOpacity onPress={toggleMute} style={styles.controlBtn} accessibilityLabel={muted ? 'Unmute' : 'Mute'}>
+                      <Icon name={muted ? 'volume-mute' : 'volume-high'} size={19} color="#fff" />
+                    </TouchableOpacity>
+                    {pipOk && (
+                      <TouchableOpacity onPress={togglePip} style={styles.controlBtn} accessibilityLabel="Picture in picture">
+                        <Icon name="expand" size={19} color="#fff" />
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity onPress={() => { setPlayerSettingsOpen((v) => !v); revealControls(); }} style={styles.controlBtn} accessibilityLabel="Video settings">
+                      <Icon name="options-outline" size={19} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </>
           )}
           {playerSettingsOpen && !loading && !playError && !!stream && (
             <View style={styles.playerSettingsPanel}>
@@ -440,17 +594,17 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                 {SPEEDS.map((s) => (
                   <TouchableOpacity
                     key={s}
-                    disabled={inRoom}
-                    onPress={() => setSpeed(s)}
+                    disabled={isGuest}
+                    onPress={() => chooseSpeed(s)}
                     style={[styles.playerSettingsOption, { backgroundColor: speed === s ? theme.primary : theme.inputBg }]}
                   >
                     <Text style={{ color: speed === s ? '#fff' : theme.text, fontSize: fs(12), fontWeight: '700' }}>{s}×</Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              {inRoom && (
+              {isGuest && (
                 <Text style={[styles.playerSettingsNote, { color: theme.textSecondary }]}>
-                  Host controls playback speed in Watch Together.
+                  The host controls playback speed in Watch Together.
                 </Text>
               )}
             </View>
@@ -867,18 +1021,38 @@ const styles = StyleSheet.create({
   playlistPanel: { borderRadius: 12, padding: 12, marginTop: 12 },
   playlistTitle: { fontSize: fs(13), fontWeight: '800', marginBottom: 8 },
   playlistRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
-  playerSettingsFab: {
+  playerControls: {
     position: 'absolute',
-    right: 12,
-    top: 12,
+    left: 0,
+    right: 0,
+    bottom: 0,
     zIndex: 12,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingTop: 18,
+    paddingBottom: 10,
+    backgroundColor: 'rgba(6,4,12,0.86)',
   },
+  seekHit: { height: 22, justifyContent: 'center' },
+  seekTrack: { height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.28)' },
+  seekFill: { height: 4, borderRadius: 2, backgroundColor: '#8B5CF6' },
+  seekKnob: {
+    position: 'absolute',
+    top: -3,
+    width: 10,
+    height: 10,
+    marginLeft: -5,
+    borderRadius: 5,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOpacity: 0.5,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  controlRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  controlBtn: { width: 30, height: 32, alignItems: 'center', justifyContent: 'center' },
+  playBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.16)' },
+  controlTime: { color: '#fff', fontSize: fs(10), fontWeight: '700', flex: 1, marginHorizontal: 2 },
+  bufferBadge: { position: 'absolute', top: '45%', left: '50%', marginLeft: -14, marginTop: -14, zIndex: 11 },
   playerSettingsPanel: {
     position: 'absolute',
     right: 10,
@@ -945,7 +1119,7 @@ const styles = StyleSheet.create({
   wtGuestChip: {
     position: 'absolute',
     left: 10,
-    bottom: 10,
+    bottom: 78,
     zIndex: 8,
     flexDirection: 'row',
     alignItems: 'center',

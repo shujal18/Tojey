@@ -1330,6 +1330,24 @@ function replyPreview(m) {
   return m.content || 'Media message';
 }
 
+function emojiOnlyInfo(value) {
+  const empty = { only: false, count: 0, size: 56 };
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return empty;
+  let graphemes;
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    graphemes = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (p) => p.segment);
+  } else {
+    graphemes = Array.from(text);
+  }
+  const meaningful = graphemes.filter((g) => !/\s/u.test(g));
+  const emoji = /(?:[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Regional_Indicator}]|[#*0-9]\uFE0F?\u20E3)/u;
+  if (!meaningful.length || !meaningful.every((g) => emoji.test(g))) return empty;
+  const count = meaningful.length;
+  const size = count === 1 ? 68 : count === 2 ? 58 : count === 3 ? 50 : count <= 5 ? 42 : 34;
+  return { only: true, count, size };
+}
+
 function parseWallpaper(wp, theme) {
   if (!wp) return theme.background;
   if (wp.url.startsWith('linear') || wp.url.startsWith('radial')) return wp.url;
@@ -1362,6 +1380,7 @@ function TypingDots() {
 }
 
 function MessageRow({ message, myId, isSent, grouped, theme, senderName, avatarUrl, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia, entryClass }) {
+  const emojiInfo = message.type === 'TEXT' ? emojiOnlyInfo(message.content) : { only: false, count: 0, size: 56 };
   return (
     <div style={{
       display: 'flex',
@@ -1379,22 +1398,24 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, avatarU
           onContextMenu={(e) => onLongPress(e, message)}
           onDoubleClick={(e) => onLongPress(e, message)}
           style={{
-            background: isSent
+            background: emojiInfo.only
+              ? 'transparent'
+              : isSent
               ? `linear-gradient(135deg, ${getChatColor()} 0%, ${shadeColor(getChatColor(), -26)} 100%)`
               : theme.isDark
               ? 'rgba(42, 39, 51, 0.94)'
               : theme.receivedBubble,
             color: isSent ? '#fff' : theme.receivedText,
-            padding: message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '8px 12px',
-            borderRadius: 18,
+            padding: emojiInfo.only ? 0 : (message.type === 'IMAGE' || message.type === 'VIDEO' ? 4 : '8px 12px'),
+            borderRadius: emojiInfo.only ? 12 : 18,
             borderBottomRightRadius: isSent ? (grouped ? 10 : 6) : 18,
             borderBottomLeftRadius: isSent ? 18 : (grouped ? 10 : 6),
-            border: isSent ? '1px solid rgba(255,255,255,0.10)' : `1px solid ${theme.border}`,
-            boxShadow: isSent
+            border: emojiInfo.only ? '1px solid transparent' : (isSent ? '1px solid rgba(255,255,255,0.10)' : `1px solid ${theme.border}`),
+            boxShadow: emojiInfo.only ? 'none' : (isSent
               ? '0 4px 14px rgba(0,0,0,0.18)'
               : theme.isDark
               ? '0 2px 8px rgba(0,0,0,0.30)'
-              : '0 2px 8px rgba(31,15,70,0.07)',
+              : '0 2px 8px rgba(31,15,70,0.07)'),
             position: 'relative',
             userSelect: 'text',
             wordBreak: 'break-word',
@@ -1430,7 +1451,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, avatarU
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3, marginTop: 0, padding: '0 4px 1px' }}>
               {message.is_view_once && <Lock size={10} color={isSent ? '#fff' : '#9B96A8'} />}
               {message.is_edited && <span style={{ fontSize: 10, opacity: 0.7, color: isSent ? 'rgba(255,255,255,0.7)' : '#9B96A8' }}>edited</span>}
-              <span style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.75)' : '#9B96A8' }}>
+              <span style={{ fontSize: 10, color: isSent ? 'rgba(255,255,255,0.75)' : (emojiInfo.only ? 'rgba(255,255,255,0.85)' : '#9B96A8') }}>
                 {timeOf(message.created_at)}
               </span>
               {isSent && (message.status === 'READ'
@@ -1512,7 +1533,9 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, avatarU
           </div>
         );
       default:
-        return <span style={{ fontSize: 15, lineHeight: 1.45 }}>{m.content || ''}</span>;
+        return emojiInfo.only
+          ? <span style={{ fontSize: emojiInfo.size, lineHeight: 1.15, letterSpacing: emojiInfo.count > 1 ? -2 : 0 }}>{m.content}</span>
+          : <span style={{ fontSize: 15, lineHeight: 1.45 }}>{m.content || ''}</span>;
     }
   }
 }

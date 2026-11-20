@@ -48,6 +48,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
   const roomRef = useRef(null);
   roomRef.current = room;
   const controllerRef = useRef(null);
+  const lastSeqRef = useRef({ roomId: null, seq: -1 });
   const currentUserRef = useRef(currentUser);
   currentUserRef.current = currentUser;
 
@@ -112,17 +113,24 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     const c = controllerRef.current;
     if (!c || !c.isReady || !c.isReady()) return;
     const st = raw || {};
+    const roomId = st.roomId || '';
+    const seq = Number(st.seq) || 0;
+    if (roomId && lastSeqRef.current.roomId === roomId && seq < lastSeqRef.current.seq) return;
+    if (roomId && seq) lastSeqRef.current = { roomId, seq };
     const recvAt = Number.isFinite(st._recvAt) ? st._recvAt : Date.now();
-    const expected = (Number(st.position) || 0)
-      + (st.playing ? Math.max(0, (Date.now() - recvAt) / 1000) : 0);
+    const serverNow = Number(st.serverNow) || 0;
+    const lag = serverNow ? Math.min(1, Math.max(0, (recvAt - serverNow) / 1000)) : 0;
+    const elapsed = Math.max(0, (Date.now() - recvAt) / 1000) + lag;
+    const rate = Number(st.rate) > 0 ? Number(st.rate) : 1;
+    const expected = (Number(st.position) || 0) + (st.playing ? elapsed * rate : 0);
     const drift = (c.getTime() || 0) - expected;
     if (Math.abs(drift) > 2.0) {
       c.seek(expected);
-      if (c.setRate) c.setRate(1);
+      if (c.setRate) c.setRate(rate);
     } else if (st.playing && Math.abs(drift) > 0.5 && c.setRate) {
-      c.setRate(drift > 0 ? 0.95 : 1.05);
+      c.setRate(rate * (drift > 0 ? 0.95 : 1.05));
     } else if (c.setRate) {
-      c.setRate(1);
+      c.setRate(rate);
     }
     if (st.playing && c.isPaused()) c.play();
     else if (!st.playing && !c.isPaused()) c.pause();
@@ -348,6 +356,7 @@ export function WatchTogetherProvider({ socket, currentUser, children }) {
     if (action === 'play') sk.emit('wt:play', { roomId: r.roomId, position: pos });
     else if (action === 'pause') sk.emit('wt:pause', { roomId: r.roomId, position: pos });
     else if (action === 'seek') sk.emit('wt:seek', { roomId: r.roomId, position: pos });
+    else if (action === 'speed') sk.emit('wt:speed', { roomId: r.roomId, rate: pos || 1 });
   }, []);
 
   const resetPartnerLeft = useCallback(() => clearPartnerLeft(), [clearPartnerLeft]);

@@ -9,6 +9,7 @@ const { sendPush, deactivateTokens, fcmEnabled } = require('./fcm');
 const shortsFeed = require('./shortsFeed');
 const { attachWatchTogether } = require('./watchtogether');
 const path = require('path');
+const crypto = require('crypto');
 const { Readable } = require('stream');
 const { upload } = require('./media');
 
@@ -1360,9 +1361,189 @@ app.get('/api/yt/dash/:videoId', mediaAuth, async (req, res) => {
   }
 });
 
-// Downloads are opened as a plain browser navigation (a new tab / anchor), so
-// they cannot send an Authorization header. `mediaAuth` also accepts the signed
-// token from the query string, which is what the picker appends.
+// Canonical web download jobs. The browser creates a job, polls progress, then
+// navigates to the completed file. This replaces the old direct anchor download,
+// which had no real progress, cancellation or error surface.
+const downloadJobs = new Map();
+const DOWNLOAD_JOB_TTL_MS = 30 * 60 * 1000;
+
+function pruneDownloadJobs() {
+  const now = Date.now();
+  for (const [id, job] of downloadJobs) {
+    if (now - job.updatedAt <= DOWNLOAD_JOB_TTL_MS) continue;
+    downloadJobs.delete(id);
+    if (job.out) mux.cleanup(job.out).catch(() => {});
+  }
+}
+
+function downloadJobView(job) {
+  return {
+    jobId: job.id,
+    videoId: job.videoId,
+    title: job.title || '',
+    kind: job.kind,
+    ext: job.ext,
+    status: job.status,
+    phase: job.phase,
+    progress: job.progress,
+    bytesDone: job.bytesDone,
+    bytesTotal: job.bytesTotal,
+    error: job.error,
+    downloadUrl: job.downloadUrl,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function getDownloadJob(req, res) {
+  pruneDownloadJobs();
+  const job = downloadJobs.get(String(req.params.jobId || ''));
+  if (!job || job.owner !== req.user.username) {
+    res.status(404).json({ error: 'Download not found' });
+    return null;
+  }
+  return job;
+}
+
+async function runDownloadJob(job) {
+  job.status = 'downloading';
+  job.phase = 'Preparing download…';
+  job.updatedAt = Date.now();
+  try {
+    await ytFormat.downloadFormat(job.videoId, {
+      formatId: job.formatId,
+      kind: job.kind,
+      height: job.height,
+      audioExt: job.audioExt,
+    }, job.out, {
+      isCancelled: () => job.cancelled,
+      onProgress: (bytes) => {
+        job.bytesDone = Number(bytes) || 0;
+        if (job.bytesTotal > 0) {
+          job.progress = Math.min(95, Math.round((job.bytesDone / job.bytesTotal) * 100));
+        }
+        job.phase = job.bytesTotal > 0
+          ? `${Math.round((job.bytesDone / job.bytesTotal) * 100)}% downloaded`
+          : `${Math.max(0, Math.round(job.bytesDone / 1024 / 1024))} MB downloaded`;
+        job.updatedAt = Date.now();
+      },
+    });
+    if (job.cancelled) throw Object.assign(new Error('download cancelled'), { cancelled: true });
+    const stat = fs.statSync(job.out);
+    job.bytesDone = stat.size;
+    job.bytesTotal = job.bytesTotal || stat.size;
+    job.progress = 100;
+    job.phase = 'Ready';
+    job.status = 'done';
+  } catch (e) {
+    if (job.cancelled || e.cancelled) {
+      job.status = 'cancelled';
+      job.phase = 'Cancelled';
+    } else {
+      job.status = 'error';
+      job.phase = 'Failed';
+      job.error = String(e.message || 'download failed').slice(0, 200);
+      console.error('yt:download job error', job.videoId, String(e.message).slice(0, 200));
+    }
+    await mux.cleanup(job.out).catch(() => {});
+  } finally {
+    job.updatedAt = Date.now();
+  }
+}
+
+app.post('/api/yt/downloads', mediaAuth, (req, res) => {
+  pruneDownloadJobs();
+  const videoId = String(req.body?.videoId || '').slice(0, 16);
+  if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });
+  const kind = req.body?.kind === 'audio' ? 'audio' : 'video';
+  const formatId = req.body?.formatId ? String(req.body.formatId).slice(0, 32) : null;
+  const itag = req.body?.itag ? String(req.body.itag).slice(0, 24) : null;
+  const height = Math.min(4320, Math.max(0, Number(req.body?.height) || 0));
+  const audioExt = req.body?.ext === 'webm' ? 'webm' : 'm4a';
+  const ext = kind === 'audio' ? audioExt : 'mp4';
+  const id = crypto.randomBytes(12).toString('hex');
+  const out = mux.tmpFile(`.${ext}`);
+  const header = req.headers.authorization || '';
+  const headerToken = header.startsWith('Bearer ') ? header.slice(7) : header;
+  const token = headerToken || String(req.query.token || '');
+  const job = {
+    id,
+    owner: req.user.username,
+    videoId,
+    title: String(req.body?.title || '').slice(0, 200),
+    kind,
+    formatId: formatId || (itag && itag.startsWith('ytdlp:') ? itag.slice(6) : null),
+    height,
+    audioExt,
+    ext,
+    out,
+    cancelled: false,
+    status: 'queued',
+    phase: 'Starting…',
+    progress: 0,
+    bytesDone: 0,
+    bytesTotal: Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Number(req.body?.size) || 0)),
+    error: null,
+    downloadUrl: `/api/yt/downloads/${id}/file?token=${encodeURIComponent(token)}`,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  downloadJobs.set(id, job);
+  runDownloadJob(job).catch(() => {});
+  return res.status(202).json(downloadJobView(job));
+});
+
+app.get('/api/yt/downloads/:jobId', mediaAuth, (req, res) => {
+  const job = getDownloadJob(req, res);
+  if (!job) return;
+  return res.json(downloadJobView(job));
+});
+
+app.get('/api/yt/downloads/:jobId/status', mediaAuth, (req, res) => {
+  const job = getDownloadJob(req, res);
+  if (!job) return;
+  return res.json(downloadJobView(job));
+});
+
+app.post('/api/yt/downloads/:jobId/cancel', mediaAuth, (req, res) => {
+  const job = getDownloadJob(req, res);
+  if (!job) return;
+  if (job.status === 'done' || job.status === 'cancelled' || job.status === 'error') {
+    return res.json(downloadJobView(job));
+  }
+  job.cancelled = true;
+  job.phase = 'Cancelling…';
+  job.updatedAt = Date.now();
+  return res.json(downloadJobView(job));
+});
+
+app.get('/api/yt/downloads/:jobId/file', mediaAuth, (req, res) => {
+  const job = getDownloadJob(req, res);
+  if (!job) return;
+  if (job.status !== 'done') {
+    return res.status(409).json({ error: 'Download not ready', status: job.status });
+  }
+  const name = `tojey-${job.videoId}${job.kind === 'audio' ? '-audio' : ''}.${job.ext}`;
+  const mime = job.kind === 'audio'
+    ? (job.ext === 'webm' ? 'audio/webm' : 'audio/mp4')
+    : 'video/mp4';
+  let size = 0;
+  try { size = fs.statSync(job.out).size; } catch (e) {
+    return res.status(410).json({ error: 'Download expired' });
+  }
+  res.set('Content-Type', mime);
+  res.set('Content-Length', String(size));
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Content-Disposition', `attachment; filename="${name}"`);
+  const rs = fs.createReadStream(job.out);
+  rs.on('error', () => { try { res.destroy(); } catch (e) {} });
+  return rs.pipe(res);
+});
+
+// Legacy direct download, kept for compatibility with older web clients and
+// mobile's independently managed downloads. Downloads are opened as a plain
+// browser navigation (a new tab / anchor), so they cannot send an Authorization
+// header. `mediaAuth` also accepts the signed token from the query string.
 app.get('/api/yt/download/:videoId', mediaAuth, async (req, res) => {
   const videoId = String(req.params.videoId || '');
   if (!YTID.test(videoId)) return res.status(400).json({ error: 'Invalid video id' });

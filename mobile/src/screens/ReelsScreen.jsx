@@ -202,6 +202,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [subscribed, setSubscribed] = useState(false);
   const [activePaused, setActivePaused] = useState(false);
   const [resolved, setResolved] = useState(() => new Map());
+  const [streamEpoch, setStreamEpoch] = useState(() => new Map());
   const [quality, setQuality] = useState('auto');
   const [speed, setSpeed] = useState(1);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -225,6 +226,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const inflightStreamRef = useRef(new Map());
   const failedStreamsRef = useRef(new Set());
   const playErrorTriesRef = useRef(new Map());
+  const progressCacheRef = useRef(new Map());
+  const lastProgressRef = useRef(new Map());
+  const lastRecoveryRef = useRef(new Map());
   const thumbAnims = useRef(new Map());
   const suppressPauseRef = useRef(false);
   const videosRef = useRef([]);
@@ -375,6 +379,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       playErrorTriesRef.current.set(id, tries + 1);
       streamCacheRef.current.delete(id);
       inflightStreamRef.current.delete(id);
+      lastProgressRef.current.delete(id);
+      setStreamEpoch((prev) => new Map(prev).set(id, (prev.get(id) || 0) + 1));
+      lastRecoveryRef.current.set(id, Date.now());
       console.log(`[Reels] video error, re-resolving (${tries + 1}/2):`, id, detail);
       resolveFor(item, { retry: true }).then((entry) => {
         if (entry) playErrorTriesRef.current.set(id, 0);
@@ -652,6 +659,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       subscription.remove();
       streamCacheRef.current.clear();
       inflightStreamRef.current.clear();
+      progressCacheRef.current.clear();
+      lastProgressRef.current.clear();
+      lastRecoveryRef.current.clear();
       thumbAnims.current.clear();
     };
   }, []);
@@ -696,8 +706,12 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     savePreference(QUALITY_STORAGE_KEY, option.value);
     setSettingsOpen(false);
     setResolved(new Map());
+    setStreamEpoch(new Map());
     streamCacheRef.current.clear();
     inflightStreamRef.current.clear();
+    progressCacheRef.current.clear();
+    lastProgressRef.current.clear();
+    lastRecoveryRef.current.clear();
     const item = videosRef.current[activeIndexRef.current];
     if (item) resolveFor(item, { retry: true }).catch(() => {});
   }, [resolveFor]);
@@ -716,6 +730,21 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     ? resolved.get(activeItem.videoId).source.height
     : 0;
 
+  useEffect(() => {
+    if (!activeItem || activePaused || !appVisibleRef.current) return undefined;
+    const id = activeItem.videoId;
+    const iv = setInterval(() => {
+      if (!appVisibleRef.current || activePaused) return;
+      const now = Date.now();
+      const sinceProgress = now - (lastProgressRef.current.get(id) || now);
+      const sinceRecovery = now - (lastRecoveryRef.current.get(id) || 0);
+      if (sinceProgress < 12000 || sinceRecovery < 15000) return;
+      lastProgressRef.current.set(id, now);
+      handleVideoError(activeItem, activeIdx, { error: { code: 'stall', message: 'playback stalled' } });
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [activeItem, activeIdx, activePaused, handleVideoError]);
+
   const renderItem = useCallback(({ item, index }) => {
     const isActive = index === activeIdx;
     const inWindow = Math.abs(index - activeIdx) <= 1;
@@ -727,7 +756,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       <View style={styles.videoContainer}>
         {hasVideo ? (
           <Video
-            key={`${item.videoId}-${quality}-${res.itag}`}
+            key={`${item.videoId}-${quality}-${res.itag}-${streamEpoch.get(item.videoId) || 0}`}
             source={{ uri: res.source.url, ...(mt ? { type: mt } : {}) }}
             style={styles.video}
             resizeMode="cover"
@@ -736,8 +765,21 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
             rate={speed}
             repeat
             playInBackground={false}
-            onLoad={() => { playErrorTriesRef.current.delete(item.videoId); fadeOutThumb(item.videoId); }}
-            onReadyForDisplay={() => fadeOutThumb(item.videoId)}
+            onLoad={() => {
+              playErrorTriesRef.current.delete(item.videoId);
+              lastRecoveryRef.current.delete(item.videoId);
+              lastProgressRef.current.set(item.videoId, Date.now());
+              fadeOutThumb(item.videoId);
+            }}
+            onReadyForDisplay={() => { lastProgressRef.current.set(item.videoId, Date.now()); fadeOutThumb(item.videoId); }}
+            onProgress={(p) => {
+              const t = Number(p && p.currentTime) || 0;
+              const prev = Number(progressCacheRef.current.get(item.videoId)) || 0;
+              if (t > prev + 0.05) {
+                progressCacheRef.current.set(item.videoId, t);
+                lastProgressRef.current.set(item.videoId, Date.now());
+              }
+            }}
             onError={(payload) => handleVideoError(item, index, payload)}
           />
         ) : null}
@@ -746,7 +788,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         </Animated.View>
       </View>
     );
-  }, [activeIdx, activePaused, muted, quality, resolved, speed, ensureThumbAnim, fadeOutThumb, handleVideoError]);
+  }, [activeIdx, activePaused, muted, quality, resolved, speed, streamEpoch, ensureThumbAnim, fadeOutThumb, handleVideoError]);
 
   if (loading && !videos.length) {
     return (

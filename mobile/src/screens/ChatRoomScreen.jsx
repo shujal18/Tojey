@@ -45,8 +45,6 @@ const REC_BARS = 28;
 
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
-// Emoji quick-pick strip used by the composer's emoji button (unique set).
-const emojiQuick = ['😁','❤️','😂','😮','😢','🙏','🫂','🎉','🔥','😍','👏','💯','😄','😁','😘','🤗','😅','🙃','🫡','💀','👻','🎂','⚽','🎧','☕','🚗','✌️','🙌','🤝','🥳'];
 
 // Defensive shape guard: every row rendered by MessageRow goes through this, so a
 // single malformed/cached/legacy payload can never crash the whole chat screen.
@@ -318,7 +316,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const voiceLastTickRef = useRef(0);
   const voiceQueueBusyRef = useRef(false);
   const [showAttach, setShowAttach] = useState(false);
-  const [showEmoji, setShowEmoji] = useState(false);
   const [composerH, setComposerH] = useState(0);
   const [barHeights, setBarHeights] = useState({});
   const [kbOpen, setKbOpen] = useState(false);
@@ -2168,7 +2165,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
   // otherwise the newest message stays hidden behind the input bar after sending.
   const kbShrinkTaken = kbOpen ? Math.max(0, (msgAreaClosedH.current || msgAreaH || 0) - msgAreaH) : 0;
   const kbOverlap = kbOpen ? Math.max(0, kbHeight - kbShrinkTaken) : 0;
-  // The list lives inside msgArea (flex: 1), and the reply/edit/record/attach/emoji
+  // The list lives inside msgArea (flex: 1), and the reply/edit/record/attach
   // bars and the composer are SIBLINGS below it in the same flex column. Flex
   // already shrinks the list so it ends directly above whichever bars are showing,
   // in both keyboard states. So the list needs a small constant pad only, and
@@ -2178,7 +2175,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
   // adjustResize, so the keyboard draws over a window that never shrank.
   const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 12;
   bottomInsetRef.current = bottomPad;
-  const jumpBottom = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 12;
+  const jumpBottom = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 12;
 
   return (
     <KeyboardAvoidingView
@@ -2513,41 +2510,13 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
         </View>
       )}
 
-      {/* Emoji quick-pick strip (WhatsApp-style emoji button) */}
-      {showEmoji && !recording  && (
-        <View style={[styles.attachBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('emoji')}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            {emojiQuick.map((e) => (
-              <TouchableOpacity
-                key={e}
-                style={styles.emojiPickBtn}
-                onPress={() => {
-                  setText((prev) => prev + e);
-                  inputRef.current?.focus();
-                }}
-                accessibilityLabel={`Emoji ${e}`}
-              >
-                <ColorEmoji style={{ fontSize: fs(26) }}>{e}</ColorEmoji>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
-      )}
-
-      {/* Composer: [emoji] [input…………] [attachment] [mic/send] (camera lives in the attachment menu) */}
+      {/* Composer: [input…………] [attachment] [mic/send] (camera lives in the attachment menu) */}
       {!recording  && (
         <View
           style={[styles.composer, { backgroundColor: composerBg, borderTopColor: theme.border }]}
           onLayout={(e) => setComposerH(Math.round(e.nativeEvent.layout.height))}
         >
           <View style={styles.composerRow}>
-            <TouchableOpacity
-              style={[styles.composerBtn, { backgroundColor: showEmoji ? theme.primary : theme.inputBg }]}
-              onPress={() => { if (showAttach) setShowAttach(false); setShowEmoji(!showEmoji); inputRef.current?.focus(); }}
-              accessibilityLabel="Add emoji"
-            >
-              <Icon name="happy-outline" size={22} color={showEmoji ? '#fff' : theme.primary} />
-            </TouchableOpacity>
             <View style={[styles.inputWrap, { backgroundColor: theme.inputBg }]}>
               <TextInput
                 ref={inputRef}
@@ -2587,7 +2556,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
             </View>
             <TouchableOpacity
               style={[styles.composerBtn, { backgroundColor: showAttach ? theme.primary : theme.inputBg }]}
-              onPress={() => { if (showEmoji) setShowEmoji(false); setShowAttach(!showAttach); }}
+              onPress={() => setShowAttach(!showAttach)}
               accessibilityLabel="Add attachments"
             >
               <Icon name="attach-outline" size={20} color={showAttach ? '#fff' : theme.primary} />
@@ -2640,7 +2609,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
         />
       )}
 
-      <Toast message={nudgeToast} bottom={(barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 6} />
+      <Toast message={nudgeToast} bottom={(barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 6} />
     </View>
     </KeyboardAvoidingView>
   );
@@ -2924,7 +2893,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
         ? 'checkmark-done' : 'checkmark';
   const statusColor = message.status === 'READ' ? '#53C3FF' : (isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary);
 
-  const singleEmoji = message.type === 'TEXT' && isSingleEmoji(message.content);
+  const emojiInfo = message.type === 'TEXT' ? emojiOnlyInfo(message.content) : { only: false, count: 0, size: fs(56) };
   const mediaBase = Math.min(APP_W * 0.62, 250);
   const mw = message.media_width;
   const mh = message.media_height;
@@ -2991,7 +2960,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
               style={[
                 styles.bubble,
                 isSent ? [styles.sentBubble, { backgroundColor: theme.sentBubble }] : [styles.recvBubble, { backgroundColor: receivedBubble, borderColor: 'rgba(255,255,255,0.07)' }],
-                singleEmoji && styles.bubbleEmojiOnly,
+                emojiInfo.only && styles.bubbleEmojiOnly,
                 grouped && { borderBottomRightRadius: isSent ? 6 : 14, borderBottomLeftRadius: isSent ? 14 : 6 },
                 flash && { backgroundColor: 'rgba(255,255,255,0.08)' },
               ]}
@@ -3080,7 +3049,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               ) : (
                 <View>
-                  {singleEmoji ? (
+                  {emojiInfo.only ? (
                     <View style={styles.msgEmojiWrap}>
                       {message.reply_to && (
                         <TouchableOpacity
@@ -3096,7 +3065,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                           </Text>
                         </TouchableOpacity>
                       )}
-                      <EmojiOnlyView size={fs(56)}>
+                      <EmojiOnlyView size={emojiInfo.size}>
                         {message.content}
                       </EmojiOnlyView>
                     </View>
@@ -3132,13 +3101,13 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
               {!message.is_deleted_for_everyone && (
                 <View style={[
                   styles.msgMeta,
-                  singleEmoji && { justifyContent: isSent ? 'flex-end' : 'flex-start' },
-                  singleEmoji && styles.msgMetaPill,
-                  singleEmoji && { alignSelf: isSent ? 'flex-end' : 'flex-start' },
+                  emojiInfo.only && { justifyContent: isSent ? 'flex-end' : 'flex-start' },
+                  emojiInfo.only && styles.msgMetaPill,
+                  emojiInfo.only && { alignSelf: isSent ? 'flex-end' : 'flex-start' },
                 ]}>
                   {message.is_view_once && <Icon name="lock-closed" size={10} color={isSent ? '#fff' : theme.textSecondary} />}
                   {message.is_edited && <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.7)' }]}>edited</Text>}
-                  <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }, singleEmoji && !isSent && { color: 'rgba(255,255,255,0.85)' }]}>
+                  <Text style={[styles.metaText, isSent && { color: 'rgba(255,255,255,0.75)' }, emojiInfo.only && !isSent && { color: 'rgba(255,255,255,0.85)' }]}>
                     {message.created_at ? timeOf(message.created_at) : ''}
                   </Text>
                   {isSent && <Icon name={statusIcon} size={message.status === 'READ' ? 15 : 13} color={statusColor} style={message.status === 'READ' ? styles.readTick : null} />}
@@ -3344,26 +3313,32 @@ function fmtDur(totalSec) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// True when a TEXT message consists of emoji ONLY (one or more grapheme clusters)
-// -> WhatsApp-style large "emoji-only" rendering, no bubble. ZWJ families, skin
-// tones, flags and keycaps are kept intact as single clusters (never split by
-// code point). Text+emoji or anything with letters/digits -> normal bubble.
+// Emoji-only messages render without a bubble. Size steps down as the burst grows
+// so one emoji can be huge while a long run still fits the chat width.
 // Hermes-safe: no \p{...} property escapes; reuses the ColorEmoji run parser.
-function isSingleEmoji(s) {
-  if (!s || typeof s !== 'string') return false;
+function emojiOnlyInfo(s) {
+  const empty = { only: false, count: 0, size: fs(56) };
+  if (!s || typeof s !== 'string') return empty;
   const t = s.trim();
-  if (!t) return false;
+  if (!t) return empty;
   let emojiClusters = 0;
   let textChars = 0;
   for (const r of emojiRuns(t)) {
     if (r.emoji) {
       emojiClusters += splitEmoji(r.text).length;
     } else {
-      if (/[A-Za-z0-9]/.test(r.text)) return false;
-      textChars += Array.from(r.text).length;
+      const stripped = r.text.replace(/\s/g, '');
+      if (/[A-Za-z0-9]/.test(stripped)) return empty;
+      textChars += Array.from(stripped).length;
     }
   }
-  return emojiClusters > 0 && textChars === 0;
+  if (!emojiClusters || textChars) return empty;
+  const size = emojiClusters === 1 ? 68
+    : emojiClusters === 2 ? 58
+    : emojiClusters === 3 ? 50
+    : emojiClusters <= 5 ? 42
+    : 34;
+  return { only: true, count: emojiClusters, size: fs(size) };
 }
 
 function hexToRgba(hex, alpha) {
@@ -3453,7 +3428,6 @@ const styles = StyleSheet.create({
   composer: { borderTopWidth: 1, padding: fs(10), paddingBottom: Platform.OS === 'ios' ? fs(20) : fs(12) },
   composerRow: { flexDirection: 'row', alignItems: 'center', gap: fs(6) },
   composerBtn: { width: fs(40), height: fs(40), borderRadius: fs(20), alignItems: 'center', justifyContent: 'center' },
-  emojiPickBtn: { width: fs(44), height: fs(44), borderRadius: fs(12), alignItems: 'center', justifyContent: 'center' },
   attachBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(16), paddingVertical: fs(14), borderTopWidth: 1 },
   attachBtn: { alignItems: 'center', marginRight: fs(20) },
   attachIcon: { width: fs(52), height: fs(52), borderRadius: fs(16), alignItems: 'center', justifyContent: 'center' },

@@ -222,21 +222,29 @@ function Shell() {
         })
         .catch(() => {});
     };
-    const sendToServer = () => setTimeout(emitAppState, 600);
+    let stateTimer = null;
+    const sendToServer = () => {
+      if (stateTimer) clearTimeout(stateTimer);
+      stateTimer = setTimeout(emitAppState, 600);
+    };
     const onConnect = () => {
       emitAppState();
     };
-    const sub = AppState.addEventListener('change', emitAppState);
+    const onAppStateChange = () => {
+      sendToServer();
+      if (AppState.currentState === 'active') startPush(session.token).catch(() => {});
+    };
+    const sub = AppState.addEventListener('change', onAppStateChange);
     const so = getSocket();
     if (so) so.on('connect', onConnect);
-    const t = sendToServer();
+    sendToServer();
     // Foreground heartbeat: re-report while on-screen so the server's per-device
     // freshness window (FOREGROUND_TRUST_MS) never expires for a live app. If the
     // process is later killed (OPPO/OS, network cut) the heartbeat stops and the
     // server falls back to FCM for this device instead of suppressing push forever.
     const heartbeat = setInterval(emitAppState, 30 * 1000);
     return () => {
-      clearTimeout(t);
+      if (stateTimer) clearTimeout(stateTimer);
       clearInterval(heartbeat);
       sub.remove();
       if (so) so.off('connect', onConnect);

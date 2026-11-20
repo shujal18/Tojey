@@ -37,22 +37,8 @@ export function streamUrl(videoId, itag, token, maxHeight = 0) {
   return `${API}/api/yt/media/${videoId}?itag=${itag}&token=${encodeURIComponent(token || '')}${cap}`;
 }
 
-export function downloadUrl(videoId, itag, token, mux) {
-  const m = mux ? '&mux=1' : '';
-  return `${API}/api/yt/media/${videoId}?itag=${itag}&download=1${m}&token=${encodeURIComponent(token || '')}`;
-}
-
 export function dashUrl(videoId, token) {
   return `${API}/api/yt/dash/${videoId}?token=${encodeURIComponent(token || '')}`;
-}
-
-export function triggerDownload(videoId, token, itag = 'best', mux = false) {
-  const a = document.createElement('a');
-  a.href = downloadUrl(videoId, token, itag, mux);
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
 }
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
