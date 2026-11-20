@@ -6,7 +6,7 @@ import { useTheme } from '../theme/ThemeContext';
 import {
   ArrowLeft, Mic, Paperclip, Smile, Camera, Send, X, Reply as ReplyIcon,
   Copy, Pencil, Trash, Check, CheckCheck, Lock, Image as ImageIcon, Video, FileText,
-  MoreVertical, ChevronRight, Bell, ChevronDown,
+  MoreVertical, ChevronRight, Bell, ChevronDown, Play, Pause,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 import { VoiceBubble } from '../components/MessageBubble';
@@ -24,32 +24,16 @@ const FULL_REACTIONS = ['❤️', '😂', '😮', '😢', '🙏', '👍', '👎'
 export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const { theme } = useTheme();
   const { token } = useAuth();
-  const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation, showToast, clearConversation } = useChat();
+  const { conversation, presence, openConversation, sendMessage, sendNudge, setConversation, showToast, clearConversation, loadOlderMessages } = useChat();
   const { startCall } = useCall();
-  const { messages, typing, wallpaper } = conversation;
+  const { messages, typing, wallpaper, hasMore } = conversation;
 
   useEffect(() => {
     openConversation(otherUser);
   }, [otherUser?.id]);
 
   useEffect(() => {
-    return () => setConversation({ id: null, other: null, messages: [], typing: false });
-  }, []);
-
-  // Teardown a still-running recording if the chat unmounts mid-recording.
-  useEffect(() => {
-    return () => {
-      const mr = mediaRecorderRef.current;
-      mediaRecorderRef.current = null;
-      if (mr) {
-        mr.onstop = () => {};
-        try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
-      }
-      audioChunksRef.current = [];
-      if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
-      stopVoiceTracks();
-      stopTypingNow();
-    };
+    return () => setConversation({ id: null, other: null, messages: [], typing: false, hasMore: true });
   }, []);
 
   const [text, setText] = useState('');
@@ -60,6 +44,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const [replyingTo, setReplyingTo] = useState(null);
   const [reactionBar, setReactionBar] = useState(null);
   const [recording, setRecording] = useState(false);
+  const [recordPaused, setRecordPaused] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
   const [lockedRecord, setLockedRecord] = useState(false);
   const [pendingMedia, setPendingMedia] = useState([]);
@@ -71,50 +56,135 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
   const [notifMsg, setNotifMsg] = useState('');
   const [notifSending, setNotifSending] = useState(false);
   const [notifResult, setNotifResult] = useState(null);
+  const [waveBars, setWaveBars] = useState([]);
+  const [unseenCount, setUnseenCount] = useState(0);
 
   const listRef = useRef(null);
-  const recTimer = useRef(null);
-  const holdTimer = useRef(null);
+  const contentRef = useRef(null);
+  const recTimerRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const analyserRef = useRef(null);
   const audioCtxRef = useRef(null);
   const waveSamplesRef = useRef([]);
   const waveRAFRef = useRef(null);
+  const waveLastRef = useRef(0);
   const streamRef = useRef(null);
+  const mimeTypeRef = useRef('audio/webm');
+  const recordGenRef = useRef(0);
+  const startingRef = useRef(false);
+  const finishingRef = useRef(false);
+  const holdPendingRef = useRef(false);
+  const holdStartRef = useRef(0);
+  const pendingFinishRef = useRef(false);
+  const sendIntentRef = useRef(false);
+  const recordStartRef = useRef(0);
+  const pausedAtRef = useRef(0);
+  const pausedTotalRef = useRef(0);
+  const pendingDurationRef = useRef(0);
+  const pendingWaveRef = useRef([]);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const messageInputRef = useRef(null);
   const typingStopTimerRef = useRef(null);
   const typingActiveRef = useRef(false);
-  const recordGenRef = useRef(0);
   const nearBottomRef = useRef(true);
   const unseenRef = useRef(0);
-  const messageDiffRef = useRef({ prev: null, aliases: new Map() });
-  const scrollIntentRef = useRef(null);
+  const prevRowsRef = useRef(null);
   const prevConversationIdRef = useRef(conversation.id);
-  const historyPendingRef = useRef(true);
+  const planRef = useRef(null);
+  const scrollRafsRef = useRef([]);
+  const settleTimerRef = useRef(null);
+  const coalesceTimerRef = useRef(null);
+  const anchorTimerRef = useRef(null);
+  const smoothActiveRef = useRef(false);
+  const anchorRef = useRef(null);
+  const loadingOlderRef = useRef(false);
+  const paginationRetryAtRef = useRef(0);
+  const hasMoreRef = useRef(hasMore !== false);
 
-  const [waveBars, setWaveBars] = useState([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
-  const [unseenCount, setUnseenCount] = useState(0);
+  hasMoreRef.current = hasMore !== false;
 
-  const scrollList = useCallback((behavior) => {
-    requestAnimationFrame(() => {
-      const list = listRef.current;
-      if (!list) return;
-      if (behavior === 'smooth' && typeof list.scrollTo === 'function') {
-        list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
-      } else {
-        list.scrollTop = list.scrollHeight;
-      }
-    });
+  const cancelScrollJobs = useCallback(() => {
+    scrollRafsRef.current.forEach(id => cancelAnimationFrame(id));
+    scrollRafsRef.current = [];
+    if (settleTimerRef.current) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    if (coalesceTimerRef.current) {
+      clearTimeout(coalesceTimerRef.current);
+      coalesceTimerRef.current = null;
+    }
+    smoothActiveRef.current = false;
   }, []);
 
+  const clearAnchor = useCallback(() => {
+    if (anchorTimerRef.current) {
+      clearTimeout(anchorTimerRef.current);
+      anchorTimerRef.current = null;
+    }
+    anchorRef.current = null;
+  }, []);
+
+  const pinBottom = useCallback((behavior) => {
+    cancelScrollJobs();
+    const r1 = requestAnimationFrame(() => {
+      const r2 = requestAnimationFrame(() => {
+        scrollRafsRef.current = scrollRafsRef.current.filter(id => id !== r1 && id !== r2);
+        const list = listRef.current;
+        if (!list) return;
+        if (behavior === 'smooth' && typeof list.scrollTo === 'function') {
+          smoothActiveRef.current = true;
+          list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+          settleTimerRef.current = setTimeout(() => {
+            const el = listRef.current;
+            if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight;
+            smoothActiveRef.current = false;
+            settleTimerRef.current = null;
+          }, 420);
+        } else {
+          list.scrollTop = list.scrollHeight;
+        }
+      });
+      scrollRafsRef.current.push(r2);
+    });
+    scrollRafsRef.current.push(r1);
+  }, [cancelScrollJobs]);
+
+  const restoreAnchor = useCallback((anchor) => {
+    if (!anchor) return;
+    cancelScrollJobs();
+    anchorRef.current = anchor;
+    const apply = () => {
+      const list = listRef.current;
+      if (!list || !anchorRef.current) return;
+      const current = anchorRef.current;
+      list.scrollTop = Math.max(0, current.top + (list.scrollHeight - current.height));
+      const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+      nearBottomRef.current = distance <= 80;
+      if (anchorTimerRef.current) clearTimeout(anchorTimerRef.current);
+      anchorTimerRef.current = setTimeout(() => {
+        anchorRef.current = null;
+        anchorTimerRef.current = null;
+      }, 1200);
+    };
+    const r1 = requestAnimationFrame(() => {
+      const r2 = requestAnimationFrame(() => {
+        scrollRafsRef.current = scrollRafsRef.current.filter(id => id !== r1 && id !== r2);
+        apply();
+      });
+      scrollRafsRef.current.push(r2);
+    });
+    scrollRafsRef.current.push(r1);
+  }, [cancelScrollJobs]);
+
   const markOwnSend = useCallback(() => {
+    clearAnchor();
     nearBottomRef.current = true;
     unseenRef.current = 0;
     setUnseenCount(0);
-  }, []);
+  }, [clearAnchor]);
 
   const handleListScroll = useCallback(() => {
     const list = listRef.current;
@@ -126,94 +196,162 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       unseenRef.current = 0;
       setUnseenCount(0);
     }
-  }, []);
+    if (anchorRef.current && list.scrollTop > 48 && !loadingOlderRef.current && Date.now() - (anchorRef.current.setAt || 0) > 300) clearAnchor();
+    const beforeId = messages.find(m => m.id != null)?.id;
+    if (list.scrollTop > 48 || !beforeId || !hasMoreRef.current || loadingOlderRef.current || anchorRef.current || !prevRowsRef.current || Date.now() < paginationRetryAtRef.current) return;
+    loadingOlderRef.current = true;
+    anchorRef.current = { height: list.scrollHeight, top: list.scrollTop, setAt: Date.now() };
+    loadOlderMessages({ otherUserId: otherUser.id, beforeId, limit: 40 }).then((result) => {
+      if (!result || !result.ok || !Array.isArray(result.messages) || result.messages.length === 0) {
+        clearAnchor();
+        paginationRetryAtRef.current = Date.now() + 8000;
+        if (result && result.ok && Array.isArray(result.messages) && result.messages.length === 0) hasMoreRef.current = false;
+      }
+    }).catch(() => {
+      clearAnchor();
+      paginationRetryAtRef.current = Date.now() + 8000;
+    }).finally(() => {
+      loadingOlderRef.current = false;
+    });
+  }, [clearAnchor, loadOlderMessages, messages, otherUser.id]);
 
   const jumpToLatest = useCallback(() => {
+    clearAnchor();
     unseenRef.current = 0;
     setUnseenCount(0);
     nearBottomRef.current = true;
-    scrollList('smooth');
-  }, [scrollList]);
+    pinBottom('smooth');
+  }, [clearAnchor, pinBottom]);
 
   const messageView = useMemo(() => {
-    const state = messageDiffRef.current;
+    const prev = prevRowsRef.current;
     const conversationChanged = prevConversationIdRef.current !== conversation.id;
-    if (conversationChanged) {
-      state.aliases.clear();
-      historyPendingRef.current = true;
-    }
-    const prev = state.prev;
-    if (prev && messages.length === 0) historyPendingRef.current = true;
-    const aliases = state.aliases;
-    const prevByIdentity = new Set();
-    if (prev) {
-      prev.forEach((m, i) => {
-        prevByIdentity.add(m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`);
-      });
-    }
-    const raw = messages.map((m, i) => {
-      const prevAt = prev ? prev[i] : null;
-      if (prevAt && !m._tempId && m.id != null && prevAt._tempId && prevAt.sender_id === m.sender_id) {
-        aliases.set(`s:${m.id}`, `t:${prevAt._tempId}`);
-      }
-      let key = m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`;
-      if (aliases.has(key)) key = aliases.get(key);
-      return { key, message: m, isNew: !!prev && prev.length > 0 && !prevByIdentity.has(key) };
+    const seen = new Set();
+    const rows = [];
+    messages.forEach((m, i) => {
+      const client = m.client_id || m.clientId || m._clientId;
+      let key = client != null ? `c:${client}` : m.id != null ? `s:${m.id}` : m._tempId != null ? `t:${m._tempId}` : `i:${i}`;
+      if (seen.has(key)) key = `${key}:${i}`;
+      seen.add(key);
+      rows.push({ key, message: m });
     });
-    const added = raw.filter(e => e.isNew).length;
-    const addedSent = raw.filter(e => e.isNew && e.message.sender_id === currentUser.id).length;
-    const nextKeys = new Set(raw.map(e => e.key));
-    let removed = 0;
-    if (prev) {
-      prev.forEach((m, i) => {
-        let key = m._tempId ? `t:${m._tempId}` : m.id != null ? `s:${m.id}` : `i:${i}`;
-        if (aliases.has(key)) key = aliases.get(key);
-        if (!nextKeys.has(key)) removed += 1;
-      });
-    }
-    const load = !prev || prev.length === 0 || added > 1 || removed > 0 || conversationChanged || historyPendingRef.current;
-    scrollIntentRef.current = {
-      token: messages,
-      kind: load ? 'load' : added > 0 ? 'append' : 'none',
-      added,
-      addedSent,
+    const prevKeys = new Set((prev || []).map(e => e.key));
+    const overlap = rows.filter(e => prevKeys.has(e.key)).length;
+    const initial = !prev || prev.length === 0 || conversationChanged || (prev.length > 0 && overlap === 0);
+    let lastPrevIndex = -1;
+    rows.forEach((e, i) => { if (prevKeys.has(e.key)) lastPrevIndex = i; });
+    const prepend = !initial && lastPrevIndex >= 0 && rows.slice(0, lastPrevIndex + 1).some(e => !prevKeys.has(e.key));
+    const appended = initial ? [] : rows.slice(lastPrevIndex + 1).filter(e => !prevKeys.has(e.key));
+    const plan = {
+      kind: initial ? 'load' : appended.length ? 'append' : prepend ? 'prepend' : 'none',
+      prepend,
+      prepended: prepend,
+      appended,
+      sent: appended.filter(e => e.message.sender_id === currentUser.id).length,
+      received: appended.filter(e => e.message.sender_id !== currentUser.id).length,
     };
-    return raw.map(e => ({
+    planRef.current = plan;
+    return rows.map(e => ({
       key: e.key,
       message: e.message,
-      animate: e.isNew && added === 1,
+      animate: appended.some(a => a.key === e.key),
     }));
-  }, [messages, currentUser.id, conversation.id]);
+  }, [messages, conversation.id, currentUser.id]);
 
   useEffect(() => {
-    const intent = scrollIntentRef.current;
-    if (!intent || intent.token !== messages) return;
-    if (intent.kind === 'load') {
+    const plan = planRef.current;
+    if (!plan) return;
+    if (plan.kind === 'load') {
       unseenRef.current = 0;
       setUnseenCount(0);
       nearBottomRef.current = true;
-      scrollList('instant');
-    } else if (intent.kind === 'append' && intent.added > 0) {
-      if (intent.addedSent > 0) {
+      pinBottom('auto');
+    } else if (plan.prepend && anchorRef.current) {
+      restoreAnchor(anchorRef.current);
+    }
+    if (plan.appended.length > 0) {
+      if (plan.sent > 0) {
         nearBottomRef.current = true;
         unseenRef.current = 0;
         setUnseenCount(0);
-        scrollList('smooth');
+        pinBottom('smooth');
       } else if (nearBottomRef.current) {
-        scrollList('smooth');
+        if (coalesceTimerRef.current) clearTimeout(coalesceTimerRef.current);
+        coalesceTimerRef.current = setTimeout(() => {
+          coalesceTimerRef.current = null;
+          if (nearBottomRef.current) pinBottom('smooth');
+        }, 60);
       } else {
-        unseenRef.current += intent.added - intent.addedSent;
+        unseenRef.current += plan.received;
         setUnseenCount(unseenRef.current);
       }
     }
-    messageDiffRef.current.prev = messages;
+    prevRowsRef.current = messageView.map(e => ({ key: e.key }));
     prevConversationIdRef.current = conversation.id;
-    if (messages.length) historyPendingRef.current = false;
-  }, [messages, conversation.id, scrollList]);
+  }, [clearAnchor, messageView, conversation.id, pinBottom, restoreAnchor]);
 
   useEffect(() => {
-    scrollList('instant');
-  }, [viewing, scrollList]);
+    const list = listRef.current;
+    if (!list) return undefined;
+    let raf = 0;
+    const pinIfNear = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const el = listRef.current;
+        if (!el || smoothActiveRef.current) return;
+        if (anchorRef.current) {
+          const anchor = anchorRef.current;
+          const desired = Math.max(0, anchor.top + (el.scrollHeight - anchor.height));
+          if (Math.abs(el.scrollTop - desired) > 1) el.scrollTop = desired;
+          const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+          nearBottomRef.current = distance <= 80;
+          if (anchorTimerRef.current) clearTimeout(anchorTimerRef.current);
+          anchorTimerRef.current = setTimeout(() => {
+            anchorRef.current = null;
+            anchorTimerRef.current = null;
+          }, 1200);
+          return;
+        }
+        if (!nearBottomRef.current) return;
+        el.scrollTop = el.scrollHeight;
+      });
+    };
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(pinIfNear);
+    if (ro) {
+      ro.observe(list);
+      if (contentRef.current) ro.observe(contentRef.current);
+    }
+    list.addEventListener('load', pinIfNear, true);
+    list.addEventListener('loadedmetadata', pinIfNear, true);
+    const vv = window.visualViewport;
+    if (vv) vv.addEventListener('resize', pinIfNear);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (ro) ro.disconnect();
+      list.removeEventListener('load', pinIfNear, true);
+      list.removeEventListener('loadedmetadata', pinIfNear, true);
+      if (vv) vv.removeEventListener('resize', pinIfNear);
+    };
+  }, [messageView.length]);
+
+  useEffect(() => () => {
+    cancelScrollJobs();
+    clearAnchor();
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    sendIntentRef.current = false;
+    recordGenRef.current += 1;
+    if (mr) {
+      mr.onstop = null;
+      mr.ondataavailable = null;
+      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+    }
+    audioChunksRef.current = [];
+    if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
+    if (recTimerRef.current) clearInterval(recTimerRef.current);
+    stopVoiceTracks();
+    stopTypingNow();
+  }, []);
 
   // Auto-grow the message box up to ~5 lines, then scroll internally. Keeps the
   // composer a comfortable fixed bar at the bottom without clipping long text.
@@ -223,15 +361,6 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [text, editing]);
-
-  useEffect(() => {
-    if (recording) {
-      recTimer.current = setInterval(() => setRecordTime(t => t + 1), 1000);
-    } else if (recTimer.current) {
-      clearInterval(recTimer.current);
-    }
-    return () => clearInterval(recTimer.current);
-  }, [recording]);
 
   const emitTyping = () => {
     const s = window.__socket;
@@ -341,118 +470,24 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     messageInputRef.current?.focus();
   };
 
-  // ---- Voice recording (real MediaRecorder -> upload -> VOICE message) ----
-  const startRecording = async () => {
-    const gen = ++recordGenRef.current;
-    setRecording(true);
-    setRecordTime(0);
-    holdTimer.current = setTimeout(() => setLockedRecord(true), 500);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // The user may have cancelled while the permission prompt was open - bail out
-      // instead of silently re-activating the recorder.
-      if (gen !== recordGenRef.current) {
-        try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
-        return;
-      }
-      streamRef.current = stream;
-      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecorderRef.current = mr;
-      mr.ondataavailable = (e) => { if (e.data && e.data.size) audioChunksRef.current.push(e.data); };
-      mr.onstop = () => { const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' }); audioChunksRef.current = []; uploadVoice(blob); };
-      mr.start();
-      try {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        const ctx = new Ctx();
-        audioCtxRef.current = ctx;
-        const src = ctx.createMediaStreamSource(stream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        src.connect(analyser);
-        analyserRef.current = analyser;
-        waveSamplesRef.current = [];
-        const buf = new Uint8Array(analyser.frequencyBinCount);
-        const liveBars = [5, 9, 13, 18, 11, 7, 15, 20, 9, 14];
-        const sample = () => {
-          analyser.getByteTimeDomainData(buf);
-          let sum = 0;
-          for (let i = 0; i < buf.length; i++) { const d = (buf[i] - 128) / 128; sum += d * d; }
-          waveSamplesRef.current.push(Math.sqrt(sum / buf.length));
-          const rms = Math.sqrt(sum / buf.length);
-          const newBars = liveBars.map((b, i) => Math.max(4, Math.round(rms * 260 * (0.3 + (i % 3) * 0.3))));
-          setWaveBars(newBars);
-          waveRAFRef.current = requestAnimationFrame(sample);
-        };
-        waveRAFRef.current = requestAnimationFrame(sample);
-      } catch (e) {}
-    } catch (e) {
-      setRecording(false);
-      setLockedRecord(false);
-      setRecordTime(0);
-      showToast('Microphone access denied');
-    }
+  const supportedMime = () => {
+    if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+    return ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+      .find(type => MediaRecorder.isTypeSupported(type)) || '';
   };
 
-  const stopRecording = (cancel) => {
-    clearTimeout(holdTimer.current);
-    if (cancel) {
-      cancelVoice();
-      return;
-    }
-    if (recordTime < 1) {
-      cancelVoice();
-      return;
-    }
-    finalizeVoice(true);
+  const elapsedMs = () => {
+    const end = pausedAtRef.current || Date.now();
+    return Math.max(0, end - recordStartRef.current - pausedTotalRef.current);
   };
 
-  const handleHoldEnd = () => {
-    if (!lockedRecord) stopRecording(false);
-  };
-
-  const cancelVoice = () => {
-    cancelRecordingGen();
+  const resetRecordUi = () => {
     setRecording(false);
-    setLockedRecord(false);
+    setRecordPaused(false);
     setRecordTime(0);
-    setWaveBars([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
-    const mr = mediaRecorderRef.current;
-    mediaRecorderRef.current = null;
-    if (mr) {
-      // Neutralize the upload handler BEFORE stopping so a cancelled recording
-      // never gets sent.
-      mr.onstop = () => {};
-      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
-    }
-    audioChunksRef.current = [];
-    if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
-    waveRAFRef.current = null;
-    stopVoiceTracks();
-  };
-
-  const cancelRecordingGen = () => { recordGenRef.current += 1; };
-
-  const finalizeVoice = (send) => {
-    cancelRecordingGen();
-    if (waveRAFRef.current) cancelAnimationFrame(waveRAFRef.current);
-    const mr = mediaRecorderRef.current;
-    mediaRecorderRef.current = null;
-    setRecording(false);
     setLockedRecord(false);
-    const barsSnapshot = waveBars;
-    setWaveBars([5, 9, 13, 18, 11, 7, 15, 20, 9, 14]);
-    if (mr) {
-      mr.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        audioChunksRef.current = [];
-        if (send) {
-          uploadVoice(blob, recordTime, barsSnapshot);
-        }
-      };
-      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
-    }
-    setRecordTime(0);
-    stopVoiceTracks();
+    setWaveBars([]);
+    holdPendingRef.current = false;
   };
 
   const stopVoiceTracks = () => {
@@ -467,13 +502,16 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
     analyserRef.current = null;
   };
 
-  const uploadVoice = async (blob, duration, bars) => {
+  const uploadVoice = async (blob, duration, samples, mimeType) => {
+    if (!blob || !blob.size) return;
     markOwnSend();
     try {
-      const wave = buildWaveform(waveSamplesRef.current, bars);
-      const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
+      const wave = buildWaveform(samples, null);
+      const type = mimeType || 'audio/webm';
+      const ext = /mp4/.test(type) ? 'm4a' : /ogg/.test(type) ? 'ogg' : 'webm';
+      const file = new File([blob], `voice.${ext}`, { type });
       const up = await uploadFile(file);
-      const dur = duration || Math.max(1, Math.round(blob.size / 16000));
+      const dur = Math.max(1, Math.round(duration || Math.max(1, blob.size / 16000)));
       sendMessage({
         otherUserId: otherUser.id,
         type: 'VOICE',
@@ -489,6 +527,203 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       });
     } catch (e) {
       showToast('Voice upload failed');
+    }
+  };
+
+  const startRecording = async () => {
+    if (startingRef.current || mediaRecorderRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      showToast('Voice recording is not supported in this browser');
+      return;
+    }
+    startingRef.current = true;
+    const gen = ++recordGenRef.current;
+    holdPendingRef.current = true;
+    holdStartRef.current = Date.now();
+    setRecording(true);
+    setRecordPaused(false);
+    setRecordTime(0);
+    setLockedRecord(false);
+    setWaveBars(Array(28).fill(4));
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (gen !== recordGenRef.current) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+        return;
+      }
+      streamRef.current = stream;
+      const mimeType = supportedMime();
+      mimeTypeRef.current = mimeType || 'audio/webm';
+      const mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      audioChunksRef.current = [];
+      waveSamplesRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data && e.data.size) audioChunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        if (gen !== recordGenRef.current) return;
+        finishingRef.current = false;
+        const shouldSend = sendIntentRef.current;
+        sendIntentRef.current = false;
+        const blob = new Blob(audioChunksRef.current, { type: mimeTypeRef.current });
+        audioChunksRef.current = [];
+        stopVoiceTracks();
+        if (shouldSend && blob.size > 0) uploadVoice(blob, pendingDurationRef.current, pendingWaveRef.current, mimeTypeRef.current);
+      };
+      mr.start(250);
+      recordStartRef.current = Date.now();
+      pausedAtRef.current = 0;
+      pausedTotalRef.current = 0;
+      if (recTimerRef.current) clearInterval(recTimerRef.current);
+      recTimerRef.current = setInterval(() => {
+        if (pausedAtRef.current) return;
+        const sec = Math.floor(elapsedMs() / 1000);
+        setRecordTime(prev => (prev === sec ? prev : sec));
+      }, 200);
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        audioCtxRef.current = ctx;
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+        analyserRef.current = analyser;
+        const timeBuf = new Uint8Array(analyser.frequencyBinCount);
+        const freqBuf = new Uint8Array(analyser.frequencyBinCount);
+        waveLastRef.current = 0;
+        const sample = () => {
+          if (gen !== recordGenRef.current || !analyserRef.current) return;
+          const now = performance.now();
+          if (!pausedAtRef.current && now - waveLastRef.current >= 90) {
+            waveLastRef.current = now;
+            analyser.getByteTimeDomainData(timeBuf);
+            let sum = 0;
+            for (let i = 0; i < timeBuf.length; i++) { const d = (timeBuf[i] - 128) / 128; sum += d * d; }
+            waveSamplesRef.current.push(Math.sqrt(sum / timeBuf.length));
+            analyser.getByteFrequencyData(freqBuf);
+            setWaveBars(Array.from({ length: 28 }, (_, i) => {
+              const start = Math.floor((i * freqBuf.length) / 28);
+              const end = Math.max(start + 1, Math.floor(((i + 1) * freqBuf.length) / 28));
+              let max = 0;
+              for (let j = start; j < end; j++) max = Math.max(max, freqBuf[j] || 0);
+              return Math.max(4, Math.min(28, Math.round((max / 255) * 28)));
+            }));
+          }
+          waveRAFRef.current = requestAnimationFrame(sample);
+        };
+        waveRAFRef.current = requestAnimationFrame(sample);
+      } catch (e) {}
+    } catch (e) {
+      if (gen === recordGenRef.current) {
+        recordGenRef.current += 1;
+        pendingFinishRef.current = false;
+        if (stream) { try { stream.getTracks().forEach(t => t.stop()); } catch (err) {} }
+        streamRef.current = null;
+        resetRecordUi();
+        const name = e && e.name;
+        showToast(name === 'NotAllowedError' || name === 'PermissionDeniedError'
+          ? 'Microphone permission denied'
+          : name === 'NotFoundError' ? 'No microphone found' : 'Could not start recording');
+      }
+    } finally {
+      startingRef.current = false;
+      if (pendingFinishRef.current && mediaRecorderRef.current) {
+        pendingFinishRef.current = false;
+        finalizeVoice(true);
+      }
+    }
+  };
+
+  const onMicPointerDown = (e) => {
+    if (recording || startingRef.current || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    e.preventDefault();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+    startRecording();
+  };
+
+  const onMicPointerUp = (e) => {
+    if (!holdPendingRef.current) return;
+    e.preventDefault();
+    holdPendingRef.current = false;
+    if (Date.now() - holdStartRef.current < 350) {
+      setLockedRecord(true);
+      return;
+    }
+    finalizeVoice(true);
+  };
+
+  const onMicPointerCancel = () => {
+    if (!holdPendingRef.current) return;
+    cancelVoice();
+  };
+
+  const togglePause = () => {
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+    if (!pausedAtRef.current) {
+      if (mr.state === 'recording') { try { mr.pause(); } catch (e) {} }
+      pausedAtRef.current = Date.now();
+      setRecordPaused(true);
+    } else {
+      pausedTotalRef.current += Date.now() - pausedAtRef.current;
+      pausedAtRef.current = 0;
+      if (mr.state === 'paused') { try { mr.resume(); } catch (e) {} }
+      setRecordPaused(false);
+    }
+  };
+
+  const cancelVoice = () => {
+    if (!mediaRecorderRef.current && !startingRef.current) return;
+    holdPendingRef.current = false;
+    pendingFinishRef.current = false;
+    sendIntentRef.current = false;
+    recordGenRef.current += 1;
+    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
+    if (waveRAFRef.current) { cancelAnimationFrame(waveRAFRef.current); waveRAFRef.current = null; }
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    if (mr) {
+      mr.onstop = null;
+      try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+    }
+    audioChunksRef.current = [];
+    waveSamplesRef.current = [];
+    stopVoiceTracks();
+    resetRecordUi();
+    finishingRef.current = false;
+  };
+
+  const finalizeVoice = (send) => {
+    if (finishingRef.current) return;
+    holdPendingRef.current = false;
+    if (!mediaRecorderRef.current && startingRef.current) {
+      pendingFinishRef.current = true;
+      sendIntentRef.current = !!send;
+      return;
+    }
+    finishingRef.current = true;
+    pendingFinishRef.current = false;
+    pendingDurationRef.current = Math.max(1, Math.round(elapsedMs() / 1000));
+    pendingWaveRef.current = waveSamplesRef.current.slice();
+    sendIntentRef.current = !!send;
+    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
+    if (waveRAFRef.current) { cancelAnimationFrame(waveRAFRef.current); waveRAFRef.current = null; }
+    resetRecordUi();
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    if (!mr || mr.state === 'inactive') {
+      finishingRef.current = false;
+      const blob = new Blob(audioChunksRef.current, { type: mimeTypeRef.current });
+      audioChunksRef.current = [];
+      stopVoiceTracks();
+      if (send && blob.size > 0) uploadVoice(blob, pendingDurationRef.current, pendingWaveRef.current, mimeTypeRef.current);
+      return;
+    }
+    try { mr.stop(); } catch (e) {
+      finishingRef.current = false;
+      mr.onstop = null;
+      stopVoiceTracks();
     }
   };
 
@@ -703,51 +938,55 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
         <div ref={listRef} onScroll={handleListScroll} style={{
           flex: '1 1 0%', overflowY: 'auto', overscrollBehavior: 'contain',
           WebkitOverflowScrolling: 'touch',
-          padding: '12px 14px', paddingBottom: 12,
-          display: 'flex', flexDirection: 'column', gap: 4,
+          padding: '12px 14px', paddingBottom: 'calc(16px + env(safe-area-inset-bottom))',
+          display: 'flex', flexDirection: 'column',
           minHeight: 0,
         }}>
-          {messages.length === 0 && (
-            <div style={{ textAlign: 'center', marginTop: 40, color: theme.textSecondary }}>
-              <Lock size={28} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
-              <p style={{ fontSize: 14 }}>Messages are private</p>
-              <p style={{ fontSize: 12, opacity: 0.7 }}>Say hello to {otherUser.display_name}</p>
-            </div>
-          )}
+          <div ref={contentRef} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {messages.length === 0 && (
+              <div style={{ textAlign: 'center', marginTop: 40, color: theme.textSecondary }}>
+                <Lock size={28} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
+                <p style={{ fontSize: 14 }}>Messages are private</p>
+                <p style={{ fontSize: 12, opacity: 0.7 }}>Say hello to {otherUser.display_name}</p>
+              </div>
+            )}
 
-          {messageView.map((entry, idx) => {
-            const m = entry.message;
-            const isSent = m.sender_id === currentUser.id;
-            const prev = messages[idx - 1];
-            const grouped = prev && prev.sender_id === m.sender_id;
-            return (
-              <MessageRow
-                key={entry.key}
-                message={m}
-                myId={currentUser.id}
-                isSent={isSent}
-                grouped={grouped}
-                theme={theme}
-                senderName={isSent ? 'You' : otherUser.display_name}
-                repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
-                onLongPress={handleLongPress}
-                onReply={() => { setReplyingTo(m); setReactionBar(null); }}
-                onCopy={() => { if (m.content) navigator.clipboard?.writeText(m.content); setReactionBar(null); }}
-                onEdit={() => { setText(m.content || ''); setReactionBar(null); }}
-                onDelete={(mode) => { deleteMessage(m.id, mode); setReactionBar(null); }}
-                onReact={() => setReactionBar(m)}
-                onOpenMedia={() => setViewing(m)}
-                entryClass={entry.animate ? (isSent ? 'message-enter-sent' : 'message-enter-received') : ''}
-              />
-            );
-          })}
+            {messageView.map((entry, idx) => {
+              const m = entry.message;
+              const isSent = m.sender_id === currentUser.id;
+              const prev = messages[idx - 1];
+              const grouped = prev && prev.sender_id === m.sender_id;
+              return (
+                <MessageRow
+                  key={entry.key}
+                  message={m}
+                  myId={currentUser.id}
+                  isSent={isSent}
+                  grouped={grouped}
+                  theme={theme}
+                  senderName={isSent ? 'You' : otherUser.display_name}
+                  avatarUrl={isSent ? (currentUser.profile_pic_url || currentUser.profilePic || '') : (otherUser.profile_pic_url || '')}
+                  repliedMessage={m.reply_to ? messages.find(x => x.id === m.reply_to) || null : null}
+                  onLongPress={handleLongPress}
+                  onReply={() => { setReplyingTo(m); setReactionBar(null); }}
+                  onCopy={() => { if (m.content) navigator.clipboard?.writeText(m.content); setReactionBar(null); }}
+                  onEdit={() => { setText(m.content || ''); setReactionBar(null); }}
+                  onDelete={(mode) => { deleteMessage(m.id, mode); setReactionBar(null); }}
+                  onReact={() => setReactionBar(m)}
+                  onOpenMedia={() => setViewing(m)}
+                  entryClass={entry.animate ? (isSent ? 'message-enter-sent' : 'message-enter-received') : ''}
+                />
+              );
+            })}
+          </div>
         </div>
         {unseenCount > 0 && (
           <button
+            className="unread-fab"
             onClick={jumpToLatest}
             aria-label="Jump to latest message"
             style={{
-              position: 'absolute', right: 14, bottom: 14, zIndex: 8,
+              position: 'absolute', right: 14, bottom: 'calc(14px + env(safe-area-inset-bottom))', zIndex: 8,
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '7px 11px', borderRadius: 20,
               background: theme.card, color: theme.text,
@@ -773,7 +1012,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       )}
 
       {/* Replying bar */}
-      {replyingTo && (
+      {replyingTo && !recording && (
         <div style={{
           display: 'flex', alignItems: 'center',
           padding: '8px 14px', background: theme.card,
@@ -796,7 +1035,7 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       )}
 
       {/* Editing bar */}
-      {editing && (
+      {editing && !recording && (
         <div style={{
           display: 'flex', alignItems: 'center',
           padding: '8px 14px', background: theme.card,
@@ -819,145 +1058,161 @@ export default function ChatRoomScreen({ otherUser, currentUser, onBack }) {
       )}
 
       {/* Pending media strip */}
-      <MediaPreview
-        items={pendingMedia}
-        isSending={isSendingMedia}
-        onRemove={removePending}
-        onCancel={() => setPendingMedia([])}
-        onDraw={setDrawingItem}
-        onCaption={setCaption}
-        caption={caption}
-        onSend={sendAttachments}
-      />
+      {!recording && (
+        <MediaPreview
+          items={pendingMedia}
+          isSending={isSendingMedia}
+          onRemove={removePending}
+          onCancel={() => setPendingMedia([])}
+          onDraw={setDrawingItem}
+          onCaption={setCaption}
+          caption={caption}
+          onSend={sendAttachments}
+        />
+      )}
 
-      {/* Recording UI */}
       {recording && (
-        <div style={{
-          display: 'flex', alignItems: 'center',
-          padding: '12px 16px', background: theme.card,
-          borderTop: `1px solid ${theme.border}`,
+        <div className="recording-bar" style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px', paddingBottom: 'calc(10px + env(safe-area-inset-bottom))',
+          background: theme.card, borderTop: `1px solid ${theme.border}`,
+          flexShrink: 0,
         }}>
-          <button onClick={() => stopRecording(true)} style={{ color: theme.danger, marginRight: 12 }}>
-            <X size={22} />
+          <button onClick={cancelVoice} aria-label="Delete recording" style={{ color: theme.danger, display: 'flex', padding: 6 }}>
+            <Trash size={20} />
           </button>
-          {waveBars.map((h, i) => (
-            <span key={i} className="wave-bar" style={{
-              width: 3, height: `${h}px`,
-              background: theme.primary, marginRight: 2,
-              animationDelay: `${i * 0.08}s`,
-            }} />
-          ))}
-          <span style={{ marginLeft: 'auto', color: theme.text, fontWeight: 600, fontSize: 14 }}>
-            0:{String(recordTime).padStart(2, '0')}
+          <button onClick={togglePause} aria-label={recordPaused ? 'Resume recording' : 'Pause recording'} style={{ color: theme.primary, display: 'flex', padding: 6 }}>
+            {recordPaused ? <Play size={19} /> : <Pause size={19} />}
+          </button>
+          <button
+            onClick={() => { holdPendingRef.current = false; setLockedRecord(s => !s); }}
+            aria-label="Lock recording"
+            style={{ color: lockedRecord ? theme.primary : theme.textSecondary, display: 'flex', padding: 6 }}
+          >
+            <Lock size={17} />
+          </button>
+          <div className="recording-wave" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 2, height: 28, minWidth: 0, overflow: 'hidden', opacity: recordPaused ? 0.45 : 1 }}>
+            {waveBars.map((h, i) => (
+              <span key={i} className="rec-wave-bar" style={{ width: 3, height: `${h}px`, background: theme.primary }} />
+            ))}
+          </div>
+          <span style={{ color: theme.text, fontWeight: 600, fontSize: 13, flexShrink: 0 }}>
+            {Math.floor(recordTime / 60)}:{String(recordTime % 60).padStart(2, '0')}
           </span>
-        </div>
-      )}
-
-      {/* Composer + attachment menu */}
-      {showAttach && !recording && (
-        <div style={{
-          display: 'flex', gap: 6,
-          padding: '8px 14px', background: theme.card,
-          borderTop: `1px solid ${theme.border}`,
-        }}>
-          {[
-            { icon: <ImageIcon size={18} />, label: 'Gallery', action: () => fileInputRef.current?.click() },
-            { icon: <Camera size={18} />, label: 'Camera', action: () => cameraInputRef.current?.click() },
-            { icon: <FileText size={18} />, label: 'File', action: () => { const el = fileInputRef.current; if (el) { el.removeAttribute('accept'); el.click(); el.setAttribute('accept', ''); } } },
-          ].map(opt => (
-            <button key={opt.label} onClick={opt.action} style={{
-              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-              padding: '10px 0', borderRadius: 12, background: theme.inputBg, color: theme.text,
-              fontSize: 13, fontWeight: 600,
-            }}>
-              <span style={{ color: theme.primary }}>{opt.icon}</span>
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div style={{
-        background: theme.composerBg,
-        borderTop: `1px solid ${theme.border}`,
-        padding: '10px 12px',
-        paddingBottom: 'calc(14px + env(safe-area-inset-bottom))',
-        flexShrink: 0,
-      }}>
-        {showEmoji && (
-          <div style={{ marginBottom: 8, borderRadius: 12, overflow: 'hidden' }}>
-            <EmojiPicker onEmojiClick={(e) => setText(t => t + e.emoji)} width="100%" height={260} theme={theme.isDark ? 'dark' : 'light'} />
-          </div>
-        )}
-
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
-          <IconBtn onClick={() => setShowEmoji(!showEmoji)} icon={<Smile size={22} />} theme={theme} active={showEmoji} />
-          <IconBtn onClick={() => { setShowAttach(!showAttach); setShowEmoji(false); }} icon={<Paperclip size={20} />} theme={theme} active={showAttach} />
-
-          <div style={{
-            flex: 1, minWidth: 0, display: 'flex', alignItems: 'flex-end',
-            background: theme.inputBg, borderRadius: 22, padding: '10px 16px', minHeight: 44,
-          }}>
-            <textarea
-              ref={messageInputRef}
-              rows={1}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
-              }}
-              onInput={() => emitTyping()}
-              onBlur={() => stopTypingNow()}
-              placeholder="Message"
-              style={{
-                flex: 1, minWidth: 0, display: 'block', background: 'transparent',
-                color: theme.text, fontSize: 14, lineHeight: '20px',
-                maxHeight: 120, resize: 'none', overflowY: 'auto',
-                padding: 0, margin: 0, border: 'none',
-              }}
-            />
-          </div>
-
-          <IconBtn onClick={() => cameraInputRef.current?.click()} icon={<Camera size={22} />} theme={theme} />
-
-          {text.trim() ? (
-            <button onClick={sendText} style={{
-              flexShrink: 0, width: 42, height: 42, borderRadius: 21,
+          <button
+            className="voice-send"
+            onClick={() => finalizeVoice(true)}
+            aria-label="Send voice message"
+            style={{
+              width: 42, height: 42, borderRadius: 21, flexShrink: 0,
               background: 'linear-gradient(135deg, #6C3CE9 0%, #4E22B8 100%)',
               color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
               boxShadow: '0 3px 10px rgba(108,60,233,0.4)',
+            }}
+          >
+            <Send size={18} />
+          </button>
+        </div>
+      )}
+
+      {!recording && (
+        <>
+          {showAttach && (
+            <div style={{
+              display: 'flex', gap: 6,
+              padding: '8px 14px', background: theme.card,
+              borderTop: `1px solid ${theme.border}`,
             }}>
-              <Send size={18} />
-            </button>
-          ) : (
-            <div style={{ position: 'relative', flexShrink: 0 }}
-              onMouseDown={startRecording}
-              onMouseUp={handleHoldEnd}
-              onMouseLeave={() => recording && !lockedRecord && stopRecording(true)}
-            >
-              {recording ? (
-                <button onClick={() => stopRecording(false)} style={{
-                  width: 42, height: 42, borderRadius: 21,
-                  background: theme.danger, color: '#fff',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  animation: 'splashPulse 1s infinite',
+              {[
+                { icon: <ImageIcon size={18} />, label: 'Gallery', action: () => fileInputRef.current?.click() },
+                { icon: <Camera size={18} />, label: 'Camera', action: () => cameraInputRef.current?.click() },
+                { icon: <FileText size={18} />, label: 'File', action: () => { const el = fileInputRef.current; if (el) { el.removeAttribute('accept'); el.click(); el.setAttribute('accept', ''); } } },
+              ].map(opt => (
+                <button key={opt.label} onClick={opt.action} style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  padding: '10px 0', borderRadius: 12, background: theme.inputBg, color: theme.text,
+                  fontSize: 13, fontWeight: 600,
                 }}>
-                  <Send size={16} />
+                  <span style={{ color: theme.primary }}>{opt.icon}</span>
+                  {opt.label}
                 </button>
-              ) : (
-                <button style={{
-                  width: 42, height: 42, borderRadius: 21,
+              ))}
+            </div>
+          )}
+
+          <div style={{
+            background: theme.composerBg,
+            borderTop: `1px solid ${theme.border}`,
+            padding: '10px 12px',
+            paddingBottom: 'calc(14px + env(safe-area-inset-bottom))',
+            flexShrink: 0,
+          }}>
+            {showEmoji && (
+              <div style={{ marginBottom: 8, borderRadius: 12, overflow: 'hidden' }}>
+                <EmojiPicker onEmojiClick={(e) => setText(t => t + e.emoji)} width="100%" height={260} theme={theme.isDark ? 'dark' : 'light'} />
+              </div>
+            )}
+
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+              <IconBtn onClick={() => setShowEmoji(!showEmoji)} icon={<Smile size={22} />} theme={theme} active={showEmoji} />
+              <IconBtn onClick={() => { setShowAttach(!showAttach); setShowEmoji(false); }} icon={<Paperclip size={20} />} theme={theme} active={showAttach} />
+
+              <div style={{
+                flex: 1, minWidth: 0, display: 'flex', alignItems: 'flex-end',
+                background: theme.inputBg, borderRadius: 22, padding: '10px 16px', minHeight: 44,
+              }}>
+                <textarea
+                  ref={messageInputRef}
+                  rows={1}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+                  }}
+                  onInput={() => emitTyping()}
+                  onBlur={() => stopTypingNow()}
+                  placeholder="Message"
+                  style={{
+                    flex: 1, minWidth: 0, display: 'block', background: 'transparent',
+                    color: theme.text, fontSize: 14, lineHeight: '20px',
+                    maxHeight: 120, resize: 'none', overflowY: 'auto',
+                    padding: 0, margin: 0, border: 'none',
+                  }}
+                />
+              </div>
+
+              <IconBtn onClick={() => cameraInputRef.current?.click()} icon={<Camera size={22} />} theme={theme} />
+
+              {text.trim() ? (
+                <button onClick={sendText} style={{
+                  flexShrink: 0, width: 42, height: 42, borderRadius: 21,
                   background: 'linear-gradient(135deg, #6C3CE9 0%, #4E22B8 100%)',
                   color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   boxShadow: '0 3px 10px rgba(108,60,233,0.4)',
                 }}>
+                  <Send size={18} />
+                </button>
+              ) : (
+                <button
+                  aria-label="Hold to record voice message"
+                  onPointerDown={onMicPointerDown}
+                  onPointerUp={onMicPointerUp}
+                  onPointerCancel={onMicPointerCancel}
+                  onContextMenu={(e) => e.preventDefault()}
+                  style={{
+                    width: 42, height: 42, borderRadius: 21, flexShrink: 0, touchAction: 'none',
+                    background: 'linear-gradient(135deg, #6C3CE9 0%, #4E22B8 100%)',
+                    color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    boxShadow: '0 3px 10px rgba(108,60,233,0.4)',
+                  }}
+                >
                   <Mic size={18} />
                 </button>
               )}
             </div>
-          )}
-        </div>
-      </div>
+          </div>
+        </>
+      )}
 
       {viewing && (
         <MediaViewer
@@ -1106,7 +1361,7 @@ function TypingDots() {
   );
 }
 
-function MessageRow({ message, myId, isSent, grouped, theme, senderName, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia, entryClass }) {
+function MessageRow({ message, myId, isSent, grouped, theme, senderName, avatarUrl, repliedMessage, onLongPress, onReply, onCopy, onEdit, onDelete, onReact, onOpenMedia, entryClass }) {
   return (
     <div style={{
       display: 'flex',
@@ -1168,7 +1423,7 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
             </div>
           )}
 
-          {renderContent(message, isSent, theme, onOpenMedia)}
+          {renderContent(message, isSent, theme, onOpenMedia, avatarUrl, senderName)}
           {message.media_url && message.type === 'FILE' && <FileCard message={message} isSent={isSent} theme={theme} onOpen={() => window.open(resolveUrl(message.media_url), '_blank')} />}
 
           {!message.is_deleted_for_everyone && (
@@ -1216,10 +1471,10 @@ function MessageRow({ message, myId, isSent, grouped, theme, senderName, replied
     </div>
   );
 
-  function renderContent(m, sent, th, openMedia) {
+  function renderContent(m, sent, th, openMedia, avatar, name) {
     switch (m.type) {
       case 'VOICE':
-        return <div style={{ padding: '3px' }}><VoiceBubble message={m} isSent={sent} /></div>;
+        return <div style={{ padding: '3px' }}><VoiceBubble message={m} isSent={sent} avatarUrl={avatar} senderName={name} /></div>;
       case 'IMAGE':
         return (
           <div>

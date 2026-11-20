@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo, useLayoutEffect, memo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
@@ -24,19 +24,24 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 const sheetReactions = ['❤️', '😂', '😁', '😮', '😢', '🙏', '🫂', '🎉', '🔥', '😍', '👏', '💯'];
 import { absUrl, SERVER_URL, CHAT_BACKGROUND } from '../config';
 import Clipboard from '@react-native-clipboard/clipboard';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import RNFetchBlob from 'rn-fetch-blob';
 import DocumentPicker, { types as DocTypes } from 'react-native-document-picker';
-import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission } from '../services/permissions';
+import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission, getMicPermissionStatus } from '../services/permissions';
 import { useCall } from '../services/CallContext';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing, flushAllOutgoingQueues } from '../services/cache';
 import MediaViewer from '../components/MediaViewer';
 import MediaPreview from '../components/MediaPreview';
 import {
   startVoiceRecording, trackVoiceRecording, stopVoiceRecording, deleteVoiceFile,
-  playVoice, stopVoicePlayback, resetVoice,
+  playVoice, stopVoicePlayback, resetVoice, pauseVoiceRecording, resumeVoiceRecording,
+  getVoiceRecordingElapsedMs, parseDuration, voiceErrorMessage,
 } from '../services/voice';
 
 const { width: APP_W, height: APP_H } = Dimensions.get('window');
+const VOICE_QUEUE_KEY = '@tojey_voice_outbox';
+const VOICE_BARS = 34;
+const REC_BARS = 28;
 
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
@@ -66,10 +71,12 @@ function normalizeMessage(m) {
     thumb_url: base.thumb_url || '',
     file_name: base.file_name || '',
     media_size: Number(base.media_size) || 0,
-    duration: Number(base.duration) || 0,
+    duration: parseDuration(base.duration),
     status: base.status || 'SENT',
     reactions,
     created_at: base.created_at || null,
+    client_id: base.client_id || base.clientId || null,
+    _tempId: base._tempId || base.client_id || base.clientId || null,
   };
 }
 
@@ -80,6 +87,124 @@ function isServerId(m) {
 }
 function isLocalOnly(m) {
   return !!m && (!isServerId(m) || !!(m._queued || m._uploading || m._pending || m._uploadError));
+}
+function keepReceiptStatus(current, incoming) {
+  return current === 'READ' || current === 'DELIVERED' ? current : (incoming || 'SENT');
+}
+function resample(values, count) {
+  if (!values.length) return [];
+  const out = [];
+  for (let i = 0; i < count; i += 1) {
+    out.push(values[Math.min(values.length - 1, Math.floor((i * values.length) / count))]);
+  }
+  return out;
+}
+function parseWaveform(raw, count = VOICE_BARS) {
+  let list = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    const t = raw.trim();
+    if (t.startsWith('[')) {
+      try { list = JSON.parse(t); } catch (e) { list = []; }
+    } else {
+      list = t.split(',');
+    }
+  }
+  const nums = (Array.isArray(list) ? list : [])
+    .map((v) => Number(v && typeof v === 'object' ? (v.level ?? v.amplitude ?? v.value ?? v.v) : v))
+    .filter((v) => Number.isFinite(v))
+    .map((v) => Math.abs(v));
+  if (!nums.length) {
+    return {
+      real: false,
+      bars: Array.from({ length: count }, (_, i) => 0.22 + 0.16 * Math.abs(Math.sin(i * 0.9))),
+    };
+  }
+  const max = Math.max(...nums, 0.0001);
+  const bars = resample(nums, count).map((v) => Math.min(1, Math.max(0.12, v / max)));
+  return { real: true, bars };
+}
+function serializeWaveform(bars) {
+  if (!Array.isArray(bars) || !bars.length) return '';
+  return bars.map((b) => Math.max(1, Math.min(20, Math.round(Number(b) * 20 || 1)))).join(',');
+}
+async function readVoiceQueue() {
+  try {
+    const raw = await AsyncStorage.getItem(VOICE_QUEUE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+async function writeVoiceQueue(list) {
+  try {
+    await AsyncStorage.setItem(VOICE_QUEUE_KEY, JSON.stringify(Array.isArray(list) ? list : []));
+  } catch (e) {
+    console.warn('voice queue write failed', e);
+  }
+}
+function deriveRecordingLevel(elapsedMs) {
+  const t = Math.max(0, Number(elapsedMs) || 0);
+  return Math.min(1, Math.max(0.12, 0.2 + 0.62 * Math.abs(Math.sin(t / 210)) * (0.55 + 0.45 * Math.abs(Math.sin(t / 67)))));
+}
+function mergeServerRow(prev, incoming, ownId, allowUpdate = true) {
+  const m = normalizeMessage(incoming);
+  if (!isServerId(m)) return prev;
+  const id = Number(m.id);
+  const idx = prev.findIndex((x) => isServerId(x) && Number(x.id) === id);
+  if (idx >= 0) {
+    if (!allowUpdate) return prev;
+    const cur = prev[idx];
+    const same = cur.content === m.content && cur.type === m.type &&
+      (cur.media_url || '') === (m.media_url || '') && (cur.thumb_url || '') === (m.thumb_url || '') &&
+      cur.is_edited === m.is_edited && cur.is_deleted_for_everyone === m.is_deleted_for_everyone &&
+      cur.reply_to === m.reply_to && cur.is_view_once === m.is_view_once &&
+      (cur.file_name || '') === (m.file_name || '') && (cur.duration || 0) === (m.duration || 0) &&
+      (cur.waveform || '') === (m.waveform || '') && cur.status === m.status &&
+      JSON.stringify(cur.reactions || []) === JSON.stringify(m.reactions || []);
+    if (same) return prev;
+    const copy = prev.slice();
+    copy[idx] = {
+      ...m,
+      _local: cur._local,
+      _queued: cur._queued,
+      _uploading: cur._uploading,
+      _pending: cur._pending,
+      _uploadError: cur._uploadError,
+      _uploadProgress: cur._uploadProgress,
+      _tempId: cur._tempId || m._tempId || null,
+      status: keepReceiptStatus(cur.status, m.status),
+    };
+    return copy;
+  }
+  const tempIdx = m.client_id
+    ? prev.findIndex((x) => !isServerId(x) && String(x.client_id || x._tempId || '') === String(m.client_id))
+    : -1;
+  const row = { ...m, _local: m.sender_id === ownId };
+  if (tempIdx >= 0) {
+    const cur = prev[tempIdx];
+    const copy = prev.slice();
+    copy[tempIdx] = {
+      ...row,
+      _tempId: cur._tempId || row._tempId || null,
+      _queued: false,
+      _uploading: false,
+      _pending: false,
+      _uploadError: false,
+      _uploadProgress: 1,
+      status: keepReceiptStatus(cur.status, row.status),
+    };
+    return copy;
+  }
+  return insertSorted(prev, row);
+}
+function mergeServerBatch(prev, incoming, ownId, allowUpdate = true) {
+  if (!Array.isArray(incoming) || !incoming.length) return prev;
+  let next = prev;
+  for (const raw of incoming) next = mergeServerRow(next, raw, ownId, allowUpdate);
+  return next;
 }
 function sortKey(m) {
   const t = m && m.created_at ? new Date(m.created_at).getTime() : 0;
@@ -142,6 +267,15 @@ class RowBoundary extends React.Component {
 export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack }) {
   const { theme } = useTheme();
   const { callStatus, headerCallPress } = useCall();
+  const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
+  const otherUserId = safeOtherUser.id;
+  const otherUserName = safeOtherUser.display_name || safeOtherUser.username || 'Unknown';
+  const otherUsername = safeOtherUser.username || otherUserName;
+  const otherUserBio = safeOtherUser.bio || '';
+  const otherUserAvatar = safeOtherUser.profile_pic_url || '';
+  const otherUserOnline = safeOtherUser.online ?? false;
+  const otherUserLastSeen = safeOtherUser.last_seen ?? null;
+  const currentUserAvatar = (currentUser && (currentUser.profile_pic_url || currentUser.profilePic)) || '';
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
@@ -166,10 +300,23 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const appVisibleRef = useRef(true);
   const headUnreadRef = useRef(0);
   const [recording, setRecording] = useState(false);
+  const [recPaused, setRecPaused] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
+  const [recWaveform, setRecWaveform] = useState(() => Array.from({ length: REC_BARS }, () => 0.14));
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
   const [voiceProgress, setVoiceProgress] = useState(0);
+  const [voiceDurationMs, setVoiceDurationMs] = useState(0);
   const playingIdRef = useRef(null);
+  const recWaveRef = useRef([]);
+  const recHasMeteringRef = useRef(false);
+  const recDurationRef = useRef(0);
+  const recPausedRef = useRef(false);
+  const recStoppingRef = useRef(false);
+  const recLastUiRef = useRef(0);
+  const voiceNameRef = useRef(null);
+  const voiceProgressRef = useRef(0);
+  const voiceLastTickRef = useRef(0);
+  const voiceQueueBusyRef = useRef(false);
   const [showAttach, setShowAttach] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
   const [composerH, setComposerH] = useState(0);
@@ -221,6 +368,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const lastContentHeightRef = useRef(0);
   const bottomInsetRef = useRef(0);
   const scrollActionRef = useRef(null);
+  const scrollSettleTimerRef = useRef(null);
+  const bottomSeekRef = useRef(false);
+  const rafQueueRef = useRef([]);
+  const userDragRef = useRef(false);
   const pendingCountRef = useRef(0);
   const scrollModeRef = useRef(null);
   const mobileDiffRef = useRef({ prev: null, aliases: new Map(), chatId: null });
@@ -234,33 +385,77 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     if (l) l.scrollToEnd({ animated });
   }, []);
 
+  const scheduleRaf = useCallback((fn) => {
+    const id = requestAnimationFrame(() => {
+      rafQueueRef.current = rafQueueRef.current.filter((x) => x !== id);
+      fn();
+    });
+    rafQueueRef.current.push(id);
+    return id;
+  }, []);
+
+  const cancelScrollSettle = useCallback(() => {
+    if (scrollSettleTimerRef.current) {
+      clearTimeout(scrollSettleTimerRef.current);
+      scrollSettleTimerRef.current = null;
+    }
+    bottomSeekRef.current = false;
+  }, []);
+
+  const stopScrollFollow = useCallback(() => {
+    cancelScrollSettle();
+    scrollModeRef.current = null;
+    pendingScrollToBottomRef.current = false;
+  }, [cancelScrollSettle]);
+
+  const settleScrollToBottom = useCallback(() => {
+    if (scrollSettleTimerRef.current) {
+      clearTimeout(scrollSettleTimerRef.current);
+      scrollSettleTimerRef.current = null;
+    }
+    if (!bottomSeekRef.current) return;
+    bottomSeekRef.current = false;
+    scrollModeRef.current = null;
+    pendingScrollToBottomRef.current = false;
+    runScrollToEnd(false);
+  }, [runScrollToEnd]);
+
   const scrollToLatestInstant = useCallback(() => {
+    cancelScrollSettle();
     scrollModeRef.current = 'instant';
     if (scrollActionRef.current) return;
     scrollActionRef.current = 'instant';
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    scheduleRaf(() => {
+      scheduleRaf(() => {
         scrollActionRef.current = null;
         scrollModeRef.current = null;
         pendingScrollToBottomRef.current = false;
         runScrollToEnd(false);
       });
     });
-  }, [runScrollToEnd]);
+  }, [runScrollToEnd, cancelScrollSettle, scheduleRaf]);
 
   const scrollToLatestAnimated = useCallback(() => {
+    cancelScrollSettle();
     scrollModeRef.current = 'animated';
-    if (scrollActionRef.current) return;
+    bottomSeekRef.current = true;
+    if (scrollActionRef.current === 'animated') return;
+    if (scrollActionRef.current === 'instant') {
+      rafQueueRef.current.forEach((id) => cancelAnimationFrame(id));
+      rafQueueRef.current = [];
+      scrollActionRef.current = null;
+    }
     scrollActionRef.current = 'animated';
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    scheduleRaf(() => {
+      scheduleRaf(() => {
         scrollActionRef.current = null;
         scrollModeRef.current = null;
         pendingScrollToBottomRef.current = false;
         runScrollToEnd(true);
+        scrollSettleTimerRef.current = setTimeout(settleScrollToBottom, 320);
       });
     });
-  }, [runScrollToEnd]);
+  }, [runScrollToEnd, cancelScrollSettle, settleScrollToBottom, scheduleRaf]);
 
   const listMeta = useMemo(() => {
     const state = mobileDiffRef.current;
@@ -268,47 +463,43 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       state.chatId = otherUserId;
       state.aliases.clear();
       state.prev = null;
+      state.prevKeys = null;
     }
     const prev = state.prev;
     const aliases = state.aliases;
-    const prevKeys = new Set();
-    if (prev) {
-      prev.forEach((m) => {
-        let k = String(m.id);
-        if (aliases.has(k)) k = aliases.get(k);
-        prevKeys.add(k);
-      });
-    }
+    const prevKeys = state.prevKeys || new Set();
+    const seen = new Set();
     const raw = messages.map((m, i) => {
       const prevAt = prev ? prev[i] : null;
-      if (prevAt && String(prevAt.id).startsWith('tmp-') && !String(m.id).startsWith('tmp-') && prevAt.sender_id === m.sender_id) {
+      if (prevAt && isServerId(m) && String(prevAt.id).startsWith('tmp-') && prevAt.sender_id === m.sender_id) {
         aliases.set(String(m.id), String(prevAt.id));
       }
-      let key = String(m.id);
-      if (aliases.has(key)) key = aliases.get(key);
-      return { key, message: m, isNew: !!prev && prev.length > 0 && !prevKeys.has(key) };
+      const base = String(m._tempId || m.client_id || m.id);
+      let key = aliases.get(base) || base;
+      if (seen.has(key)) key = `${key}-${i}`;
+      seen.add(key);
+      const matched = aliases.has(base);
+      return { key, message: m, isNew: !!state.prevKeys && prevKeys.size > 0 && !prevKeys.has(key) && !matched };
     });
     const added = raw.filter(e => e.isNew).length;
     const addedSent = raw.filter(e => e.isNew && e.message.sender_id === currentUser.id).length;
     const addedReceived = added - addedSent;
     const nextKeys = new Set(raw.map(e => e.key));
     let removed = 0;
-    if (prev) {
-      prev.forEach((m) => {
-        let k = String(m.id);
-        if (aliases.has(k)) k = aliases.get(k);
-        if (!nextKeys.has(k)) removed += 1;
-      });
+    if (state.prevKeys) {
+      state.prevKeys.forEach((k) => { if (!nextKeys.has(k)) removed += 1; });
     }
     const userAppend = addedSent > 0 || (receiveIntentRef.current && addedReceived > 0);
     const replace = replaceIntentRef.current && added > 0;
-    const load = !prev || prev.length === 0 || messages.length === 0 || prependPendingRef.current || historyLoadRef.current || replace || (!userAppend && added > 1) || (removed > 0 && added === 0);
-    const kind = load ? 'instant' : addedSent > 0 ? 'own' : addedReceived > 0 ? 'receive' : 'none';
+    const prepend = prependPendingRef.current;
+    const load = !prev || prev.length === 0 || messages.length === 0 || historyLoadRef.current || replace || (!userAppend && added > 1) || (removed > 0 && added === 0);
+    const kind = prepend ? 'none' : load ? 'instant' : addedSent > 0 ? 'own' : addedReceived > 0 ? 'receive' : 'none';
     listIntentRef.current = { token: messages, kind };
     const entryMap = new Map();
     raw.forEach((e) => {
-      entryMap.set(String(e.message.id), { key: e.key, animate: !load && e.isNew && added === 1 });
+      entryMap.set(String(e.message.id), { key: e.key, animate: !load && !prepend && e.isNew && added === 1 });
     });
+    state.prevKeys = nextKeys;
     return { entryMap };
   }, [messages, currentUser.id, otherUserId]);
 
@@ -337,19 +528,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     replaceIntentRef.current = false;
   }, [messages, scrollToLatestInstant, scrollToLatestAnimated]);
 
+  useEffect(() => () => {
+    cancelScrollSettle();
+    rafQueueRef.current.forEach((id) => cancelAnimationFrame(id));
+    rafQueueRef.current = [];
+    scrollActionRef.current = null;
+    userDragRef.current = false;
+  }, [cancelScrollSettle]);
+
   // Send a message through the socket if connected, otherwise queue it for flush
   // on reconnect. Mirrors whatsapp's offline-queue behaviour.
   const socketReady = () => !!socket && socket.connected;
-
-  // Defensive: ensure otherUser has all required properties
-  const safeOtherUser = otherUser || { id: 0, display_name: 'Unknown', username: '', profile_pic_url: '', online: false, last_seen: null };
-  const otherUserId = safeOtherUser.id;
-  const otherUserName = safeOtherUser.display_name || safeOtherUser.username || 'Unknown';
-  const otherUsername = safeOtherUser.username || otherUserName;
-  const otherUserBio = safeOtherUser.bio || '';
-  const otherUserAvatar = safeOtherUser.profile_pic_url || '';
-  const otherUserOnline = safeOtherUser.online ?? false;
-  const otherUserLastSeen = safeOtherUser.last_seen ?? null;
 
   const mediaItems = useMemo(
     () => messages.filter((m) =>
@@ -405,6 +594,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     // Follow growth only when the user is at the bottom or a jump is explicitly owed.
     if ((atBottomRef.current || pendingScrollToBottomRef.current) && scrolledToEndOnMount.current) {
       pendingScrollToBottomRef.current = false;
+      if (bottomSeekRef.current) return;
       if (scrollModeRef.current === 'animated') scrollToLatestAnimated();
       else scrollToLatestInstant();
     }
@@ -414,16 +604,27 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // not be an inline arrow).
   const handleListLayout = useCallback(() => {
     if (atBottomRef.current || pendingScrollToBottomRef.current) {
+      if (bottomSeekRef.current) return;
       if (scrollModeRef.current === 'animated') scrollToLatestAnimated();
       else scrollToLatestInstant();
     }
   }, [scrollToLatestInstant, scrollToLatestAnimated]);
+
+  const handleScrollBeginDrag = useCallback(() => {
+    userDragRef.current = true;
+    stopScrollFollow();
+  }, [stopScrollFollow]);
+
+  const handleScrollEndDrag = useCallback(() => {
+    userDragRef.current = false;
+  }, []);
 
   const handleScroll = useCallback((e) => {
     const y = e.nativeEvent.contentOffset.y;
     const h = e.nativeEvent.layoutMeasurement.height;
     const cs = e.nativeEvent.contentSize.height;
     scrollMetricsRef.current = { y, contentH: cs, viewportH: h };
+    if (userDragRef.current && bottomSeekRef.current) stopScrollFollow();
     // The contentContainer carries extra bottom padding while the keyboard overlaps
     // (ColorOS/OPPO: window never shrinks). That padding pushes the true "latest"
     // beyond reach, so the FAB would light up even at the newest message. Measure
@@ -482,7 +683,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         loadingMoreRef.current = false;
       }
     }
-  }, [otherUserId]);
+  }, [otherUserId, stopScrollFollow]);
 
   const REACTPOP_H = 60;
   const handleLongPress = useCallback((msg, evt) => {
@@ -545,34 +746,98 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // (temp clientIds, _queued/_uploading/_pending/_uploadError) are preserved across
   // server snapshots and reconciled into their canonical message on ack.
   // ---------------------------------------------------------------------------
-  const knownIdsRef = useRef(null);        // Set<number> of known server ids (O(1) dedup)
-  const lastSyncedIdRef = useRef(null);    // incremental sync cursor (max server id seen)
+  const knownIdsRef = useRef(null);
+  const lastSyncedIdRef = useRef(null);
 
-  const trackIds = (list) => {
+  const trackIds = useCallback((list) => {
     const set = new Set();
     for (const m of list) if (isServerId(m)) set.add(Number(m.id));
     knownIdsRef.current = set;
     return set;
-  };
-  const addKnownId = (id) => {
+  }, []);
+  const addKnownId = useCallback((id) => {
     const n = Number(id);
     if (Number.isFinite(n) && n > 0) {
       if (!knownIdsRef.current) knownIdsRef.current = new Set();
       knownIdsRef.current.add(n);
     }
-  };
-  const bumpCursor = (id) => {
+  }, []);
+  const bumpCursor = useCallback((id) => {
     const n = Number(id);
     if (Number.isFinite(n) && n > 0 && n > (lastSyncedIdRef.current || 0)) {
       lastSyncedIdRef.current = n;
     }
-  };
+  }, []);
+
+  const applyMessage = useCallback((raw, options) => {
+    const m = normalizeMessage(raw);
+    if (!isServerId(m)) return;
+    addKnownId(m.id);
+    bumpCursor(m.id);
+    setMessages((prev) => mergeServerRow(prev, m, currentUser.id, !options || options.updateExisting !== false));
+  }, [addKnownId, bumpCursor, currentUser.id]);
+
+  const applyAck = useCallback((tempId, ackMessage, clientId) => {
+    if (!ackMessage || !isServerId(ackMessage)) return;
+    const canonical = normalizeMessage(ackMessage);
+    const id = Number(canonical.id);
+    const serverKey = String(id);
+    const aliases = [tempId, clientId].filter(Boolean).map(String);
+    aliases.forEach((key) => mobileDiffRef.current.aliases.set(serverKey, key));
+    addKnownId(id);
+    bumpCursor(id);
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => aliases.some((key) => String(m.id) === key || String(m.client_id || m._tempId || '') === key));
+      const row = {
+        ...canonical,
+        _tempId: tempId || canonical._tempId || null,
+        client_id: clientId || canonical.client_id || null,
+        _local: true,
+        _queued: false,
+        _uploading: false,
+        _pending: false,
+        _uploadError: false,
+        _uploadProgress: 1,
+      };
+      if (idx < 0) {
+        const serverIdx = prev.findIndex((m) => isServerId(m) && Number(m.id) === id);
+        if (serverIdx >= 0) {
+          const copy = prev.slice();
+          copy[serverIdx] = { ...copy[serverIdx], ...row, status: keepReceiptStatus(copy[serverIdx].status, row.status) };
+          return copy;
+        }
+        return insertSorted(prev, row);
+      }
+      const existing = prev[idx];
+      const next = [];
+      prev.forEach((m, i) => {
+        if (i !== idx && isServerId(m) && Number(m.id) === id) return;
+        if (i === idx) next.push({ ...row, status: keepReceiptStatus(existing.status, row.status) });
+        else next.push(m);
+      });
+      return next;
+    });
+  }, [addKnownId, bumpCursor]);
+
+  const updateStatus = useCallback((id, status) => {
+    if (id == null || !status) return;
+    const ids = (Array.isArray(id) ? id : [id]).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (!ids.length) return;
+    setMessages((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        if (!isServerId(m) || !ids.includes(Number(m.id)) || m.status === status) return m;
+        changed = true;
+        return { ...m, status };
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+
   useEffect(() => {
     const onCallMessage = (m) => {
       if (!m || !m.id) return;
-      setMessages((prev) => (prev.some((x) => String(x.id) === String(m.id)) ? prev : insertSorted(prev, m)));
-      addKnownId(m.id);
-      bumpCursor(m.id);
+      applyMessage(m);
     };
     const onToast = (message) => {
       if (message) setNudgeToast(message);
@@ -583,59 +848,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       subMsg.remove();
       subToast.remove();
     };
-  }, [addKnownId, bumpCursor]);
+  }, [applyMessage]);
 
   const computeSyncCursor = (list) => {
     let max = 0;
     for (const m of list) if (isServerId(m) && Number(m.id) > max) max = Number(m.id);
     return max || null;
   };
-  // Merge a batch of server rows into the local array: new ids are inserted (sorted),
-  // existing ids are updated in place WITHOUT regression of delivery status and WITHOUT
-  // dropping local flags. Returns a brand-new array only when something actually changed,
-  // preserving object identity of untouched rows so memo(MessageRow) skips them.
-  const incrementalAdvance = (prev, incoming) => {
+  const incrementalAdvance = useCallback((prev, incoming) => {
     if (!Array.isArray(incoming) || !incoming.length) return prev;
     const ids = knownIdsRef.current || trackIds(prev);
-    let next = prev;
     for (const raw of incoming) {
       const m = normalizeMessage(raw);
       if (!isServerId(m)) continue;
-      const id = Number(m.id);
-      if (ids.has(id)) {
-        // Update-in-place (edits/reactions/deletions or a status-carrying row).
-        const idx = next.findIndex((x) => isServerId(x) && Number(x.id) === id);
-        if (idx < 0) continue;
-        const cur = next[idx];
-        const same = cur.content === m.content && cur.type === m.type &&
-          (cur.media_url || '') === (m.media_url || '') && (cur.thumb_url || '') === (m.thumb_url || '') &&
-          cur.is_edited === m.is_edited && cur.is_deleted_for_everyone === m.is_deleted_for_everyone &&
-          cur.reply_to === m.reply_to && cur.is_view_once === m.is_view_once &&
-          (cur.file_name || '') === (m.file_name || '') && (cur.duration || 0) === (m.duration || 0) &&
-          JSON.stringify(cur.reactions || []) === JSON.stringify(m.reactions || []);
-        if (same) continue;
-        const merged = {
-          ...m,
-          _local: cur._local,
-          _queued: cur._queued,
-          _uploading: cur._uploading,
-          _pending: cur._pending,
-          _uploadError: cur._uploadError,
-          _uploadProgress: cur._uploadProgress,
-          status: (cur.status === 'DELIVERED' || cur.status === 'READ') ? cur.status : m.status,
-        };
-        const copy = next.slice();
-        copy[idx] = merged;
-        next = copy;
-      } else {
-        ids.add(id);
-        bumpCursor(id);
-        const norm = { ...m, _local: m.sender_id === currentUser.id };
-        next = insertSorted(next, norm);
-      }
+      ids.add(Number(m.id));
+      bumpCursor(m.id);
     }
-    return next;
-  };
+    return mergeServerBatch(prev, incoming, currentUser.id);
+  }, [bumpCursor, currentUser.id, trackIds]);
   // Server snapshot (conversation:open last-200). The server wins on every server-owned
   // row; rows that are still local-only (pending/queued/uploads) survive; cached rows that
   // no longer exist on the server (deleted for everyone / beyond the window) are dropped.
@@ -728,18 +958,13 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       // a sync/retry can never produce a second row. The updater re-checks the same set
       // so a concurrent duplicate is collapsed even between renders.
       if (!message || !isServerId(message)) return;
-      receiveIntentRef.current = true;
-      setMessages((prev) => {
-        const ids = knownIdsRef.current || trackIds(prev);
-        if (ids.has(message.id)) return prev;
-        ids.add(message.id);
+      const ids = knownIdsRef.current || trackIds([]);
+      if (ids.has(Number(message.id))) {
         bumpCursor(message.id);
-        const norm = normalizeMessage(message);
-        const row = { ...norm, _local: message.sender_id === currentUser.id };
-        const last = prev[prev.length - 1];
-        const append = !last || sortKey(last) < sortKey(row) || (sortKey(last) === sortKey(row) && (typeof last.id !== 'number' ? -1 : last.id) <= Number(row.id));
-        return append ? prev.concat(row) : insertSorted(prev, row);
-      });
+        return;
+      }
+      receiveIntentRef.current = true;
+      applyMessage(message);
       // Warm the image caches right away so scrolling to a fresh media message
       // never shows a loader (prefetch both thumb + full so zooming is ready too).
       if (message && (message.thumb_url || message.media_url)) {
@@ -759,15 +984,16 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           setPendingCount(pendingCountRef.current);
         } else {
           atBottomRef.current = true;
-          pendingScrollToBottomRef.current = true;
-          scrollToLatestAnimated();
         }
         socket.emit('message:read', { messageIds: [message.id], otherUserId: message.sender_id });
       }
     };
     const hDelivered = ({ messageId }) => updateStatus(messageId, 'DELIVERED');
-    const hRead = ({ messageIds }) => {
-      setMessages((prev) => prev.map((m) => (messageIds.includes(m.id) ? { ...m, status: 'READ' } : m)));
+    const hRead = ({ messageIds, messageId }) => updateStatus(messageIds || messageId, 'READ');
+    const hStatus = (payload) => {
+      if (!payload) return;
+      const id = payload.messageId != null ? payload.messageId : (payload.id != null ? payload.id : payload.messageIds);
+      if (id != null) updateStatus(id, payload.status);
     };
     const hTyping = ({ userId }) => { if (userId === otherUserId) setTyping(true); };
     const hTypingStop = ({ userId }) => { if (userId === otherUserId) setTyping(false); };
@@ -786,6 +1012,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     socket.on('message:receive', hReceive);
     socket.on('message:delivered', hDelivered);
     socket.on('message:read', hRead);
+    socket.on('message:status', hStatus);
     socket.on('typing:start', hTyping);
     socket.on('typing:stop', hTypingStop);
     socket.on('message:edited', hEdited);
@@ -842,6 +1069,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('message:receive', hReceive);
       socket.off('message:delivered', hDelivered);
       socket.off('message:read', hRead);
+      socket.off('message:status', hStatus);
       socket.off('typing:start', hTyping);
       socket.off('typing:stop', hTypingStop);
       socket.off('message:edited', hEdited);
@@ -853,7 +1081,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.off('connect', onReconnect);
       socket.io?.off('reconnect', onReconnect);
     };
-  }, [socket, otherUserId, currentUser.id]);
+  }, [socket, otherUserId, currentUser.id, applyMessage, bumpCursor, incrementalAdvance, trackIds, updateStatus]);
 
   // Single efficient persistence: only write when meaningful state changes
   // (status, reactions, edits, upload progress). Skip frequent _uploadProgress ticks.
@@ -1010,13 +1238,17 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
 
   useEffect(() => {
     return () => {
+      if (recListenUnsub.current) {
+        recListenUnsub.current();
+        recListenUnsub.current = null;
+      }
+      clearTimeout(typingTimer.current);
+      clearTimeout(sendFlashTimerRef.current);
+      clearTimeout(cameraTimeoutRef.current);
+      clearTimeout(loadingSafetyTimer.current);
       resetVoice().catch(() => {});
     };
   }, []);
-
-  function updateStatus(id, status) {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
-  }
 
   // Upload progress is emitted ~8x/sec by RNFetchBlob; we bucket it to 2.5% steps so a
   // row (and the list memo) only re-renders ~40 times per upload instead of on every tick.
@@ -1087,6 +1319,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       status: 'SENT',
       reply_to: replyingTo?.id || null,
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
     };
@@ -1116,11 +1350,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       socket.emit('typing:stop', { otherUserId });
       if (typingTimer.current) { clearTimeout(typingTimer.current); typingTimer.current = null; }
       socket.emit('message:send', payload, (ack) => {
-        if (ack?.ok) {
-          setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
-          addKnownId(ack.message && ack.message.id);
-          bumpCursor(ack.message && ack.message.id);
-        }
+        if (ack && ack.ok) applyAck(clientId, ack.message, clientId);
       });
     } else {
       // Offline: show the pending row immediately and queue the send for flush
@@ -1158,6 +1388,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       status: 'SENT',
       reply_to: target.id || null,
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
     };
@@ -1172,47 +1404,116 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setMessages((prev) => [...prev, localMsg]);
       scrollToLatestAnimated();
       socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
-        if (ack && ack.ok) {
-          setMessages((prev) => prev.map((m) => (m.id === clientId ? ack.message : m)));
-          addKnownId(ack.message && ack.message.id);
-          bumpCursor(ack.message && ack.message.id);
-        }
+        if (ack && ack.ok) applyAck(clientId, ack.message, clientId);
       });
     } else {
       setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
       scrollToLatestAnimated();
       enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
     }
-  }, [socket, otherUserId, currentUser.id, scrollToLatestAnimated]);
+  }, [socket, otherUserId, currentUser.id, scrollToLatestAnimated, applyAck]);
 
-  const sendVoiceMessage = useCallback((filePath, durationSec) => {
+  const queueVoiceItem = useCallback(async (item) => {
+    const queue = await readVoiceQueue();
+    await writeVoiceQueue(queue.filter((it) => it.clientId !== item.clientId).concat(item));
+  }, []);
+
+  const flushQueuedVoice = useCallback(async () => {
+    if (voiceQueueBusyRef.current || !socket || !socket.connected || !currentUser?.id) return;
+    voiceQueueBusyRef.current = true;
+    try {
+      let queue = await readVoiceQueue();
+      const pending = queue.slice();
+      for (const item of pending) {
+        if (!socket.connected) break;
+        try {
+          const upData = await uploadAsset({ uri: item.localPath, name: item.fileName, type: 'audio/mp4' });
+          uploadTasks.current.delete(item.fileName);
+          const ack = await new Promise((resolve) => {
+            socket.emit('message:send', {
+              otherUserId: item.otherUserId,
+              type: 'VOICE',
+              content: 'Voice message',
+              mediaUrl: upData.url,
+              duration: item.durationSec,
+              waveform: item.waveform || '',
+              clientId: item.clientId,
+            }, resolve);
+          });
+          if (ack && ack.ok) {
+            if (String(item.otherUserId) === String(otherUserId)) applyAck(item.clientId, ack.message, item.clientId);
+            queue = queue.filter((it) => it.clientId !== item.clientId);
+            await writeVoiceQueue(queue);
+            deleteVoiceFile(item.localPath).catch(() => {});
+          }
+        } catch (e) {
+          console.warn('queued voice send failed', e);
+          break;
+        }
+      }
+    } finally {
+      voiceQueueBusyRef.current = false;
+    }
+  }, [socket, otherUserId, currentUser.id, uploadAsset, applyAck]);
+
+  useEffect(() => {
+    flushQueuedVoice();
+    const onConnect = () => flushQueuedVoice();
+    if (socket) socket.on('connect', onConnect);
+    return () => { if (socket) socket.off('connect', onConnect); };
+  }, [socket, flushQueuedVoice]);
+
+  const sendVoiceMessage = useCallback((filePath, durationSec, waveformData) => {
     if (!filePath) return;
     const cleanPath = String(filePath).replace(/^file:\/\//, '');
-    const tempId = `tmp-${Date.now()}`;
+    const clientId = `tmp-${currentUser.id}-${Date.now()}`;
     const fileName = `voice_${Date.now()}.m4a`;
-    const waveform = '8,12,7,16,10,14,6,11,9,13,10,8,12,15,7,9,11,6';
+    const duration = Math.max(1, Math.round(parseDuration(durationSec) || 1));
+    const waveform = typeof waveformData === 'string' ? waveformData : '';
     const localMsg = {
-      id: tempId,
+      id: clientId,
       sender_id: currentUser.id,
       type: 'VOICE',
       content: 'Voice message',
       media_url: cleanPath,
       thumb_url: '',
-      duration: durationSec || 1,
+      duration,
       waveform,
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
       _uploading: true,
       _uploadKey: fileName,
       _uploadProgress: 0,
     };
-    setMessages((prev) => [...prev, localMsg]);
+    const queuedItem = {
+      clientId,
+      otherUserId,
+      localPath: cleanPath,
+      fileName,
+      durationSec: duration,
+      waveform,
+      createdAt: Date.now(),
+    };
     pendingScrollToBottomRef.current = true;
+    atBottomRef.current = true;
+    atBottomNearRef.current = true;
+    setAtBottomNear(true);
+    pendingCountRef.current = 0;
+    setPendingCount(0);
+    if (!socketReady()) {
+      setMessages((prev) => [...prev, { ...localMsg, _uploading: false, _queued: true }]);
+      scrollToLatestAnimated();
+      queueVoiceItem(queuedItem).catch((e) => console.warn('voice queue failed', e));
+      return;
+    }
+    setMessages((prev) => [...prev, localMsg]);
     scrollToLatestAnimated();
-    uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(tempId, p))
+    uploadAsset({ uri: cleanPath, name: fileName, type: 'audio/mp4' }, (p) => setUploadProgress(clientId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
         socket.emit('message:send', {
@@ -1220,15 +1521,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           type: 'VOICE',
           content: 'Voice message',
           mediaUrl: upData.url,
-          duration: durationSec || 1,
+          duration,
           waveform,
+          clientId,
         }, (ack) => {
-          if (ack?.ok) {
-            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true, _uploading: false } : m)));
-            addKnownId(ack.message && ack.message.id);
-            bumpCursor(ack.message && ack.message.id);
+          if (ack && ack.ok) {
+            applyAck(clientId, ack.message, clientId);
           } else {
-            setMessages((prev) => prev.filter((m) => m.id !== tempId));
+            setMessages((prev) => prev.filter((m) => m.id !== clientId));
             deleteVoiceFile(cleanPath).catch(() => {});
           }
         });
@@ -1236,35 +1536,92 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       .catch((e) => {
         uploadTasks.current.delete(fileName);
         console.error('voice upload failed:', e);
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
+        setMessages((prev) => prev.map((m) => (m.id === clientId ? { ...m, _uploading: false, _uploadError: true } : m)));
+        queueVoiceItem(queuedItem).catch((err) => console.warn('voice queue failed', err));
       });
-  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, scrollToLatestAnimated]);
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, scrollToLatestAnimated, applyAck, queueVoiceItem]);
+
+  const showMicPermissionAlert = async () => {
+    const status = await getMicPermissionStatus();
+    Alert.alert(
+      'Microphone permission',
+      status === 'blocked'
+        ? 'Microphone access is blocked. Open system settings to allow voice messages.'
+        : 'Microphone access is required to record voice messages.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Open settings', onPress: () => Linking.openSettings().catch(() => {}) },
+      ]
+    );
+  };
 
   const startRecording = async () => {
-    if (recording) return;
+    if (recording || recStoppingRef.current) return;
     const ok = await ensureMicPermission();
     if (!ok) {
-      alert('Microphone permission is required to record voice messages.');
+      showMicPermissionAlert();
       return;
     }
+    Keyboard.dismiss();
     try {
-      const { path } = await startVoiceRecording();
+      const { path, name } = await startVoiceRecording();
       voicePathRef.current = path;
+      voiceNameRef.current = name;
+      recWaveRef.current = [];
+      recHasMeteringRef.current = false;
+      recDurationRef.current = 0;
+      recPausedRef.current = false;
+      recStoppingRef.current = false;
+      recLastUiRef.current = 0;
       setRecordTime(0);
+      setRecPaused(false);
+      setRecWaveform(Array.from({ length: REC_BARS }, () => 0.14));
       setRecording(true);
       setShowAttach(false);
+      setShowEmoji(false);
       recListenUnsub.current = trackVoiceRecording((e) => {
-        if (e && e.currentPosition) {
-          setRecordTime(Math.max(0, Math.floor(e.currentPosition / 1000)));
-        }
+        if (!e) return;
+        recDurationRef.current = Math.max(recDurationRef.current, e.elapsedMs || e.currentPosition || 0);
+        if (e.hasMetering && typeof e.level === 'number') recHasMeteringRef.current = true;
+        const level = e.hasMetering && typeof e.level === 'number'
+          ? e.level
+          : deriveRecordingLevel(recDurationRef.current);
+        const now = Date.now();
+        if (now - recLastUiRef.current < 90) return;
+        recLastUiRef.current = now;
+        const next = recWaveRef.current.concat(level).slice(-REC_BARS);
+        while (next.length < REC_BARS) next.unshift(0.14);
+        recWaveRef.current = next;
+        setRecWaveform(next);
+        setRecordTime(recDurationRef.current);
       });
     } catch (e) {
       console.error('startRecording failed', e);
-      alert('Could not start recording: ' + (e.message || 'Unknown error'));
+      Alert.alert('Could not start recording', voiceErrorMessage(e));
+    }
+  };
+
+  const toggleRecordPause = async () => {
+    if (!recording || recStoppingRef.current) return;
+    try {
+      if (recPausedRef.current) {
+        await resumeVoiceRecording();
+        recPausedRef.current = false;
+        setRecPaused(false);
+      } else {
+        await pauseVoiceRecording();
+        recPausedRef.current = true;
+        setRecPaused(true);
+      }
+    } catch (e) {
+      console.error('record pause failed', e);
+      Alert.alert('Could not change recording', voiceErrorMessage(e));
     }
   };
 
   const stopRecording = async (cancel) => {
+    if (recStoppingRef.current) return;
+    recStoppingRef.current = true;
     const path = voicePathRef.current;
     voicePathRef.current = null;
     if (recListenUnsub.current) {
@@ -1272,53 +1629,76 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       recListenUnsub.current = null;
     }
     setRecording(false);
+    setRecPaused(false);
     setRecordTime(0);
 
-    let resolvedPath = null;
+    let result = null;
     try {
-      resolvedPath = await stopVoiceRecording();
+      result = await stopVoiceRecording();
     } catch (e) {
       console.warn('stopVoiceRecording failed', e);
+      result = { path, durationMs: recDurationRef.current };
     }
-    const filePath = resolvedPath || path;
+    const filePath = (result && result.path) || path;
+    const elapsedMs = (result && result.durationMs) || recDurationRef.current || getVoiceRecordingElapsedMs();
+    const waveform = recHasMeteringRef.current ? serializeWaveform(recWaveRef.current) : '';
+    const durationSec = Math.max(1, Math.round(elapsedMs / 1000));
+    recPausedRef.current = false;
+    recStoppingRef.current = false;
+    setRecWaveform(Array.from({ length: REC_BARS }, () => 0.14));
 
     if (cancel || !filePath) {
-      await deleteVoiceFile(filePath || path);
+      deleteVoiceFile(filePath || path).catch(() => {});
       return;
     }
-
-    if (recordTime < 1) {
-      await deleteVoiceFile(filePath);
+    if (elapsedMs < 900) {
+      deleteVoiceFile(filePath).catch(() => {});
       Alert.alert('Too short', 'Hold a little longer before sending.');
       return;
     }
-    sendVoiceMessage(filePath, Math.max(1, Math.round((recordTime * 1000) / 1000)));
+    sendVoiceMessage(filePath, durationSec, waveform);
   };
 
   const toggleVoicePlayback = useCallback(async (msg) => {
     if (!msg || !msg.media_url) return;
     if (msg._pending || msg._uploading || msg._uploadError) return;
-    const current = playingIdRef.current;
-    if (current === msg.id) {
+    const id = msg.id;
+    if (playingIdRef.current === id) {
       await stopVoicePlayback();
       playingIdRef.current = null;
       setPlayingVoiceId(null);
       setVoiceProgress(0);
+      setVoiceDurationMs(0);
+      voiceProgressRef.current = 0;
       return;
     }
+    await stopVoicePlayback();
+    playingIdRef.current = id;
+    setPlayingVoiceId(id);
+    setVoiceProgress(0);
+    setVoiceDurationMs(0);
+    voiceProgressRef.current = 0;
+    voiceLastTickRef.current = 0;
     try {
-      if (current) await stopVoicePlayback();
-      setVoiceProgress(0);
-      playingIdRef.current = msg.id;
-      setPlayingVoiceId(msg.id);
       await playVoice(absUrl(msg.media_url), (e) => {
-        const dur = (e && e.duration) || 0;
-        const pos = (e && e.currentPosition) || 0;
-        setVoiceProgress(dur > 0 ? Math.min(1, pos / dur) : 0);
+        if (playingIdRef.current !== id) return;
+        const fallbackMs = parseDuration(msg.duration) * 1000;
+        const totalMs = (e && e.durationMs) || fallbackMs;
+        const posMs = (e && e.positionMs) || 0;
+        const ratio = totalMs > 0 ? Math.min(1, Math.max(0, posMs / totalMs)) : 0;
+        if (totalMs > 0) setVoiceDurationMs((prev) => (prev === totalMs ? prev : totalMs));
+        const now = Date.now();
+        if ((Math.abs(ratio - voiceProgressRef.current) >= 0.02 && now - voiceLastTickRef.current >= 160) || (e && e.isFinished)) {
+          voiceProgressRef.current = ratio;
+          voiceLastTickRef.current = now;
+          setVoiceProgress(e && e.isFinished ? 0 : ratio);
+        }
         if (e && e.isFinished) {
           playingIdRef.current = null;
           setPlayingVoiceId(null);
           setVoiceProgress(0);
+          setVoiceDurationMs(0);
+          voiceProgressRef.current = 0;
         }
       });
     } catch (e) {
@@ -1326,9 +1706,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       playingIdRef.current = null;
       setPlayingVoiceId(null);
       setVoiceProgress(0);
-      Alert.alert('Could not play voice note', (e && e.message) || 'Unknown error');
+      setVoiceDurationMs(0);
+      voiceProgressRef.current = 0;
+      Alert.alert('Could not play voice note', voiceErrorMessage(e));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const reactTo = (id, reaction) => {
@@ -1382,7 +1763,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const fileName = asset.name || `file_${Date.now()}`;
     const fileSize = asset.size || 0;
     const mimeType = asset.type || 'application/octet-stream';
-    const tempId = `tmp-${Date.now()}`;
+    const tempId = `tmp-${currentUser.id}-${Date.now()}`;
+    const clientId = tempId;
     const localMsg = {
       id: tempId,
       sender_id: currentUser.id,
@@ -1393,6 +1775,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
       _uploading: true,
@@ -1412,11 +1796,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           fileName,
           mediaSize: fileSize,
           mediaUrl: upData.url,
+          clientId,
         }, (ack) => {
-          if (ack?.ok) {
-            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-            addKnownId(ack.message && ack.message.id);
-            bumpCursor(ack.message && ack.message.id);
+          if (ack && ack.ok) {
+            applyAck(clientId, ack.message, clientId);
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1557,7 +1940,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   const sendMediaAsset = (opts) => {
     if (!opts || !opts.uri) return;
     const isVideo = !!opts.isVideo;
-    const tempId = `tmp-${Date.now()}`;
+    const tempId = `tmp-${currentUser.id}-${Date.now()}`;
+    const clientId = tempId;
     const content = opts.caption && opts.caption.length ? opts.caption : (isVideo ? '🎬 Video' : '📷 Photo');
     const mimeType = opts.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
     const fileName = opts.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
@@ -1571,6 +1955,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
       _uploading: true,
@@ -1590,12 +1976,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           mediaUrl: upData.url,
           thumbUrl: upData.url,
           fileName,
+          clientId,
         };
         socket.emit('message:send', payload, (ack) => {
-          if (ack?.ok) {
-            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-            addKnownId(ack.message && ack.message.id);
-            bumpCursor(ack.message && ack.message.id);
+          if (ack && ack.ok) {
+            applyAck(clientId, ack.message, clientId);
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1615,7 +2000,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const isFile = msg.type === 'FILE' || msg.type === 'DOCUMENT';
     const isVideo = msg.type === 'VIDEO';
     const isVoice = msg.type === 'VOICE';
-    const tempId = `tmp-${Date.now()}-r`;
+    const tempId = `tmp-${currentUser.id}-${Date.now()}-r`;
+    const clientId = tempId;
     const fileName = isFile
       ? (msg.file_name || msg.content || `file_${Date.now()}`)
       : isVoice ? `voice_${Date.now()}.m4a`
@@ -1625,7 +2011,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       : isVoice ? 'audio/mp4'
       : isVideo ? 'video/mp4' : 'image/jpeg';
     replaceIntentRef.current = true;
-    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
+    setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, id: tempId, client_id: clientId, _tempId: clientId, _pending: true, _uploading: true, _uploadError: false, _uploadKey: fileName, _uploadProgress: 0 } : m)));
     pendingScrollToBottomRef.current = true;
     scrollToLatestInstant();
     uploadAsset({ uri: msg.media_url, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
@@ -1639,12 +2025,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           mediaUrl: upData.url,
           thumbUrl: isFile || isVoice ? '' : upData.url,
           fileName,
-          ...(isVoice ? { duration: msg.duration || 1, waveform: msg.waveform || '8,12,7,16,10,14,6,11,9,13' } : {}),
+          clientId,
+          ...(isVoice ? { duration: msg.duration || 1, waveform: msg.waveform || '' } : {}),
         }, (ack) => {
-          if (ack?.ok) {
-            setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-            addKnownId(ack.message && ack.message.id);
-            bumpCursor(ack.message && ack.message.id);
+          if (ack && ack.ok) {
+            applyAck(clientId, ack.message, clientId);
           } else {
             setMessages((prev) => prev.filter((m) => m.id !== tempId));
           }
@@ -1655,11 +2040,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         console.error('retry sendMedia failed:', e);
         setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
       });
-  }, [otherUserId, socket, currentUser.token, uploadAsset, setUploadProgress]);
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, applyAck]);
 
   const uploadDrawing = useCallback(async (filePath, onDone) => {
     if (!filePath) return;
-    const tempId = `tmp-draw-${Date.now()}`;
+    const tempId = `tmp-${currentUser.id}-draw-${Date.now()}`;
+    const clientId = tempId;
     const fileName = `drawing_${Date.now()}.png`;
     const localMsg = {
       id: tempId,
@@ -1671,6 +2057,8 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
+      client_id: clientId,
+      _tempId: clientId,
       _local: true,
       _pending: true,
       _uploading: true,
@@ -1689,11 +2077,10 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         content: '🖌️ Drawing',
         mediaUrl: upData.url,
         thumbUrl: upData.url,
+        clientId,
       }, (ack) => {
-        if (ack?.ok) {
-          setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...ack.message, _local: true } : m)));
-          addKnownId(ack.message && ack.message.id);
-          bumpCursor(ack.message && ack.message.id);
+        if (ack && ack.ok) {
+          applyAck(clientId, ack.message, clientId);
           if (onDone) onDone();
         } else {
           setMessages((prev) => prev.filter((m) => m.id !== tempId));
@@ -1704,7 +2091,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       console.error('uploadDrawing failed:', e);
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
     }
-  }, [otherUserId, socket, currentUser.token, uploadAsset, setUploadProgress]);
+  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, applyAck]);
 
   const downloadAndOpen = useCallback(async (message) => {
     if (!message || !message.media_url) return;
@@ -1789,7 +2176,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
   // message up by a full composer height and left a large empty gap above it.
   // Extra padding is still required in exactly one case: an OEM that ignores
   // adjustResize, so the keyboard draws over a window that never shrank.
-  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 8;
+  const bottomPad = kbOpen && kbOverlap > 10 ? 12 + kbOverlap : 12;
   bottomInsetRef.current = bottomPad;
   const jumpBottom = (barHeights.rec || 0) + (barHeights.attach || 0) + (barHeights.emoji || 0) + (barHeights.reply || 0) + (barHeights.edit || 0) + (composerH || 60) + 12;
 
@@ -1957,6 +2344,8 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           listRef={listRef}
           bottomPad={bottomPad}
           onScroll={handleScroll}
+          onScrollBeginDrag={handleScrollBeginDrag}
+          onScrollEndDrag={handleScrollEndDrag}
           onContentSizeChange={handleContentSizeChange}
           onLayout={handleListLayout}
           onOpenMedia={openMedia}
@@ -1969,6 +2358,10 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           onPlayVoice={toggleVoicePlayback}
           playingVoiceId={playingVoiceId}
           voiceProgress={voiceProgress}
+          voiceDurationMs={voiceDurationMs}
+          otherUserAvatar={otherUserAvatar}
+          otherUserName={otherUserName}
+          currentUserAvatar={currentUserAvatar}
           entryMap={listMeta.entryMap}
         />
       {!atBottomNear && pendingCount > 0 && (
@@ -2068,19 +2461,38 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
         </View>
       )}
 
-      {/* Recording UI */}
-      {recording  && (
+      {recording && (
         <View style={[styles.recBar, { backgroundColor: theme.card, borderTopColor: theme.border }]} onLayout={setBarH('rec')}>
-          <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
-            <View style={[styles.recDot, { backgroundColor: theme.danger }]} />
-            <Icon name="mic" size={15} color={theme.danger} />
-            <Text style={[styles.recTime, { color: theme.text }]}>
-              {fmtDur(recordTime)}
-            </Text>
-          </View>
-          <View style={{ flex: 1 }} />
-          <TouchableOpacity onPress={() => stopRecording(true)} style={styles.recCancel} accessibilityLabel="Cancel recording">
+          <TouchableOpacity onPress={() => stopRecording(true)} style={styles.recCancel} accessibilityLabel="Delete recording">
             <Icon name="trash-outline" size={18} color={theme.danger} />
+          </TouchableOpacity>
+          <View style={[styles.recPill, { backgroundColor: theme.primaryLight }]}>
+            <View style={[styles.recDot, { backgroundColor: recPaused ? theme.textSecondary : theme.danger }]} />
+            <Text style={[styles.recTime, { color: theme.text }]} accessibilityLabel="Recording duration">
+              {fmtDur(Math.floor(recordTime / 1000))}
+            </Text>
+            <View style={styles.recWaveWrap}>
+              {recWaveform.map((level, i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.recWaveBar,
+                    {
+                      height: fs(4 + Math.max(0.08, level) * 20),
+                      backgroundColor: recPaused ? theme.textSecondary : theme.primary,
+                      opacity: recPaused ? 0.5 : 0.5 + level * 0.5,
+                    },
+                  ]}
+                />
+              ))}
+            </View>
+          </View>
+          <TouchableOpacity
+            onPress={toggleRecordPause}
+            style={[styles.recPause, { backgroundColor: theme.inputBg }]}
+            accessibilityLabel={recPaused ? 'Resume recording' : 'Pause recording'}
+          >
+            <Icon name={recPaused ? 'play' : 'pause'} size={17} color={theme.primary} />
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => stopRecording(false)}
@@ -2340,29 +2752,137 @@ function dedupeReactions(reactions) {
   return Array.from(map.entries()).map(([emoji, count]) => ({ emoji, count }));
 }
 
-function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, replyRef, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, onPlayVoice, animateEntry, rowKey }) {
+const VoiceMessageBubble = memo(function VoiceMessageBubble({
+  message, isSent, theme, voicePlaying, voiceProgress, voiceDurationMs, onPlayVoice, onRetry,
+  avatarUri, avatarName,
+}) {
+  const waveform = useMemo(() => parseWaveform(message.waveform), [message.waveform]);
+  const totalMs = voicePlaying && voiceDurationMs > 0
+    ? voiceDurationMs
+    : parseDuration(message.duration) * 1000;
+  const ratio = voicePlaying ? Math.min(1, Math.max(0, Number(voiceProgress) || 0)) : 0;
+  const playedBars = Math.ceil(ratio * waveform.bars.length);
+  const shownMs = voicePlaying && totalMs > 0 ? ratio * totalMs : totalMs;
+  const label = String(avatarName || (isSent ? 'You' : '?')).trim().charAt(0).toUpperCase() || '?';
+  const avatar = (
+    <View style={[styles.voiceAvatar, { backgroundColor: isSent ? theme.primary : theme.primaryDeep }]}>
+      {avatarUri ? (
+        <Image source={{ uri: absUrl(avatarUri) }} style={styles.voiceAvatarImg} />
+      ) : (
+        <Text style={styles.voiceAvatarText}>{label}</Text>
+      )}
+    </View>
+  );
+
+  return (
+    <TouchableOpacity
+      onPress={() => {
+        if (message._uploadError && onRetry) onRetry(message);
+        else if (onPlayVoice) onPlayVoice(message);
+      }}
+      activeOpacity={0.7}
+      style={styles.voiceBubble}
+      accessibilityLabel={voicePlaying ? 'Pause voice message' : 'Play voice message'}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        {!isSent && avatar}
+        <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
+          <Icon name={voicePlaying ? 'pause' : 'play'} size={18} color={isSent ? '#fff' : theme.primary} />
+        </View>
+        <View style={[styles.voiceWaveWrap, { marginLeft: isSent ? 0 : 8, marginRight: isSent ? 8 : 0 }]}>
+          <View style={styles.voiceWaveRow}>
+            {waveform.bars.map((level, i) => (
+              <View
+                key={i}
+                style={[
+                  styles.voiceBar,
+                  {
+                    height: fs(4 + level * 16),
+                    backgroundColor: isSent ? '#fff' : theme.primary,
+                    opacity: i < playedBars ? 1 : (isSent ? 0.45 : 0.35),
+                  },
+                ]}
+              />
+            ))}
+          </View>
+          <View style={[styles.voiceTrack, { backgroundColor: isSent ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.12)' }]}>
+            <View style={{ width: `${Math.round(ratio * 100)}%`, height: 2, backgroundColor: isSent ? '#fff' : theme.primary }} />
+          </View>
+          <Text style={[styles.voiceTime, { color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }]}>
+            {totalMs > 0 ? `${fmtDur(shownMs / 1000)}${voicePlaying ? ` / ${fmtDur(totalMs / 1000)}` : ''}` : '--:--'}
+          </Text>
+        </View>
+        {isSent && avatar}
+      </View>
+      {message._uploading && (
+        <View style={styles.voiceUploadRow}>
+          <ArcProgress size={28} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
+          <Text style={[styles.voiceUploadText, { color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }]}>
+            {Math.round((message._uploadProgress || 0) * 100)}%
+          </Text>
+        </View>
+      )}
+      {message._uploadError && (
+        <Text style={[styles.voiceUploadText, { color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger }]}>
+          Upload failed · tap to retry
+        </Text>
+      )}
+    </TouchableOpacity>
+  );
+});
+
+function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, ownId, otherName, voiceAvatarUri, voiceAvatarName, replyRef, onLongPress, onOpenMedia, onRetry, onReply, onDoubleTap, onJumpToReply, suggestEdit, onEditRow, onCancelUpload, voicePlaying, voiceProgress, voiceDurationMs, onPlayVoice, animateEntry, rowKey }) {
   const translateX = useRef(new Animated.Value(0)).current;
   const revealOpacity = useRef(new Animated.Value(0)).current;
   const translateRef = useRef(0);
   const swipeDirection = isSent ? -1 : 1; // sent bubbles swipe right→left, received left→right
   const replied = useRef(false);
-  const entryOpacity = useRef(new Animated.Value(1)).current;
-  const entryTranslate = useRef(new Animated.Value(0)).current;
-  const entryScale = useRef(new Animated.Value(1)).current;
-  const entryRunRef = useRef(false);
+  const entryViewRef = useRef(null);
+  const entryAnimationRef = useRef(null);
+  const entryOpacity = useRef(new Animated.Value(animateEntry ? 0 : 1)).current;
+  const entryTranslate = useRef(new Animated.Value(animateEntry ? (isSent ? 10 : -10) : 0)).current;
+  const entryScale = useRef(new Animated.Value(animateEntry ? 0.96 : 1)).current;
 
-  useEffect(() => { entryRunRef.current = false; }, [rowKey]);
-  useEffect(() => {
-    if (!animateEntry || entryRunRef.current) return;
-    entryRunRef.current = true;
-    entryOpacity.setValue(0);
-    entryTranslate.setValue(isSent ? 10 : -10);
-    entryScale.setValue(0.96);
-    Animated.parallel([
-      Animated.timing(entryOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
-      Animated.spring(entryTranslate, { toValue: 0, useNativeDriver: true, friction: 8, tension: 180 }),
-      Animated.spring(entryScale, { toValue: 1, useNativeDriver: true, friction: 9, tension: 200 }),
-    ]).start();
+  useLayoutEffect(() => {
+    let active = true;
+    if (entryAnimationRef.current) entryAnimationRef.current.stop();
+    if (!animateEntry) {
+      entryOpacity.setValue(1);
+      entryTranslate.setValue(0);
+      entryScale.setValue(1);
+      return () => { active = false; };
+    }
+    const settleVisible = () => {
+      entryOpacity.setValue(1);
+      entryTranslate.setValue(0);
+      entryScale.setValue(1);
+    };
+    const run = (rowY) => {
+      if (!active) return;
+      if (Number.isFinite(rowY) && (rowY < -8 || rowY > APP_H + 80)) {
+        settleVisible();
+        return;
+      }
+      entryOpacity.setValue(0);
+      entryTranslate.setValue(isSent ? 10 : -10);
+      entryScale.setValue(0.96);
+      const animation = Animated.parallel([
+        Animated.timing(entryOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+        Animated.spring(entryTranslate, { toValue: 0, useNativeDriver: true, friction: 8, tension: 180 }),
+        Animated.spring(entryScale, { toValue: 1, useNativeDriver: true, friction: 9, tension: 200 }),
+      ]);
+      entryAnimationRef.current = animation;
+      animation.start();
+    };
+    if (entryViewRef.current && entryViewRef.current.measure) {
+      entryViewRef.current.measure((_x, y) => run(y));
+    } else {
+      run(null);
+    }
+    return () => {
+      active = false;
+      if (entryAnimationRef.current) entryAnimationRef.current.stop();
+    };
   }, [animateEntry, rowKey, isSent, entryOpacity, entryTranslate, entryScale]);
 
   const swipeAction = (m) => (suggestEdit && onEditRow ? onEditRow(m) : onReply(m));
@@ -2397,7 +2917,6 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   })).current;
 
   const hasMedia = !!(message.media_url || message.thumb_url);
-  const voicePct = `${Math.min(100, Math.max(0, Math.round((voiceProgress || 0) * 100)))}%`;
   const statusIcon = message._queued || message._uploading
     ? 'time-outline'
     : message.status === 'READ'
@@ -2461,7 +2980,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   }
 
   return (
-    <Animated.View style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start', opacity: entryOpacity, transform: [{ translateX: entryTranslate }, { scale: entryScale }] }]}>
+    <Animated.View ref={entryViewRef} style={[styles.msgRow, { justifyContent: isSent ? 'flex-end' : 'flex-start', opacity: entryOpacity, transform: [{ translateX: entryTranslate }, { scale: entryScale }] }]}>
       <View style={{ maxWidth: '80%', position: 'relative' }}>
         {/* Swipe affordance revealed behind the bubble (reply, or edit for your own text) */}
         <Animated.View style={[styles.swipeReveal, replyRevealStyle, { backgroundColor: isSent ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)', opacity: revealOpacity }]}>
@@ -2515,48 +3034,18 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                   )}
                 </View>
               ) : message.type === 'VOICE' ? (
-                <TouchableOpacity onPress={() => (onPlayVoice ? onPlayVoice(message) : onOpenMedia(message))} activeOpacity={0.7} style={{ minWidth: 180 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
-                      <Icon name={voicePlaying ? 'pause' : 'play'} size={18} color={isSent ? '#fff' : theme.primary} />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 10 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-                        {[5, 9, 13, 7, 15, 11, 8, 13, 7, 10].map((h, i) => (
-                          <View
-                            key={i}
-                            style={{
-                              width: 3, height: h, borderRadius: 2,
-                              backgroundColor: isSent ? 'rgba(255,255,255,0.9)' : theme.primary,
-                              opacity: i / 10 <= (voiceProgress || 0) ? 1 : (isSent ? 0.45 : 0.35),
-                            }}
-                          />
-                        ))}
-                      </View>
-                      <View style={{ height: 2, marginTop: 5, borderRadius: 1, overflow: 'hidden', backgroundColor: isSent ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.12)' }}>
-                        <View style={{ width: voicePct, height: 2, backgroundColor: isSent ? '#fff' : theme.primary }} />
-                      </View>
-                      <Text style={{ marginTop: 5, fontSize: fs(11), color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary }}>
-                        {voicePlaying
-                          ? fmtDur(Math.min(message.duration || 0, (voiceProgress || 0) * (message.duration || 0)))
-                          : fmtDur(message.duration || 26)} · 1×
-                      </Text>
-                    </View>
-                  </View>
-                  {message._uploading && (
-                    <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center' }}>
-                      <ArcProgress size={28} thickness={3} progress={message._uploadProgress} color={isSent ? '#fff' : theme.primary} track={isSent ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)'} />
-                      <Text style={{ marginLeft: 6, fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.85)' : theme.textSecondary, fontWeight: '600' }}>
-                        {Math.round((message._uploadProgress || 0) * 100)}%
-                      </Text>
-                    </View>
-                  )}
-                  {message._uploadError && (
-                    <Text style={{ fontSize: fs(10), color: isSent ? 'rgba(255,255,255,0.85)' : theme.danger, marginTop: 4 }}>
-                      Upload failed · tap to retry
-                    </Text>
-                  )}
-                </TouchableOpacity>
+                <VoiceMessageBubble
+                  message={message}
+                  isSent={isSent}
+                  theme={theme}
+                  voicePlaying={voicePlaying}
+                  voiceProgress={voiceProgress}
+                  voiceDurationMs={voiceDurationMs}
+                  onPlayVoice={onPlayVoice}
+                  onRetry={onRetry}
+                  avatarUri={voiceAvatarUri}
+                  avatarName={voiceAvatarName}
+                />
               ) : message.type === 'FILE' || message.type === 'DOCUMENT' ? (
                 <View style={[styles.docRow, { backgroundColor: isSent ? 'rgba(255,255,255,0.14)' : theme.primaryLight, borderRadius: 10, padding: 8, flexDirection: 'row', alignItems: 'center', minWidth: 200 }]}>
                   <View style={[styles.docIcon, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primary }]}>
@@ -2687,9 +3176,9 @@ const MessageRow = memo(MessageRowFn);
 // composer) only re-renders the rows whose data actually changed. Row callbacks stay
 // referentially stable (read via refs) so memo(MessageRow) skips untouched bubbles.
 function MessageListFn({
-  messages, ownId, otherUserName, theme, listRef, bottomPad, onScroll, onContentSizeChange, onLayout,
+  messages, ownId, otherUserName, otherUserAvatar, currentUserAvatar, theme, listRef, bottomPad, onScroll, onScrollBeginDrag, onScrollEndDrag, onContentSizeChange, onLayout,
   onOpenMedia, onLongPress, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice,
-  playingVoiceId, voiceProgress, entryMap,
+  playingVoiceId, voiceProgress, voiceDurationMs, entryMap,
 }) {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -2758,6 +3247,8 @@ function MessageListFn({
           flash={highlightId === safe.id}
           ownId={ownId}
           otherName={otherUserName}
+          voiceAvatarUri={isSent ? currentUserAvatar : otherUserAvatar}
+          voiceAvatarName={isSent ? 'You' : otherUserName}
           replyRef={replyRef}
           onLongPress={onLongPress}
           onOpenMedia={onOpenMedia}
@@ -2770,6 +3261,7 @@ function MessageListFn({
           onCancelUpload={onCancelUpload}
           voicePlaying={playingVoiceId === safe.id}
           voiceProgress={playingVoiceId === safe.id ? voiceProgress : 0}
+          voiceDurationMs={playingVoiceId === safe.id ? voiceDurationMs : 0}
           onPlayVoice={onPlayVoice}
           animateEntry={entry.animate}
           rowKey={entry.key}
@@ -2777,7 +3269,7 @@ function MessageListFn({
       </RowBoundary>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme, ownId, otherUserName, onLongPress, onOpenMedia, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice, jumpToMessage, highlightId, playingVoiceId, voiceProgress, entryMap]);
+  }, [theme, ownId, otherUserName, otherUserAvatar, currentUserAvatar, onLongPress, onOpenMedia, onDoubleTap, onReply, onEditRow, onRetry, onCancelUpload, onPlayVoice, jumpToMessage, highlightId, playingVoiceId, voiceProgress, voiceDurationMs, entryMap]);
 
   return (
     <FlatList
@@ -2786,6 +3278,8 @@ function MessageListFn({
       keyExtractor={(item, idx) => (entryMap.get(String(item.id)) || {}).key || String(item.id || `tmp-${idx}`)}
       onContentSizeChange={onContentSizeChange}
       onScroll={onScroll}
+      onScrollBeginDrag={onScrollBeginDrag}
+      onScrollEndDrag={onScrollEndDrag}
       onScrollToIndexFailed={onScrollToIndexFailed}
       scrollEventThrottle={16}
       keyboardShouldPersistTaps="handled"
@@ -2972,9 +3466,12 @@ const styles = StyleSheet.create({
   recBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(14), paddingVertical: fs(10), borderTopWidth: 1 },
   recCancel: { width: fs(38), height: fs(38), borderRadius: fs(19), backgroundColor: 'rgba(229,57,53,0.08)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   recSend: { width: fs(38), height: fs(38), borderRadius: fs(19), alignItems: 'center', justifyContent: 'center' },
-  recPill: { flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: fs(14), paddingVertical: fs(8) },
-  recDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  recTime: { fontSize: fs(14), fontWeight: '700', marginLeft: 6, fontVariant: ['tabular-nums'] },
+  recPill: { flex: 1, flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: fs(12), paddingVertical: fs(8), marginHorizontal: 8 },
+  recDot: { width: 8, height: 8, borderRadius: 4 },
+  recTime: { fontSize: fs(13), fontWeight: '700', marginLeft: 6, fontVariant: ['tabular-nums'] },
+  recWaveWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: fs(26), marginLeft: 8, gap: 2 },
+  recWaveBar: { width: fs(2.5), borderRadius: fs(1.5) },
+  recPause: { width: fs(34), height: fs(34), borderRadius: fs(17), alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   replyBar: { flexDirection: 'row', alignItems: 'center', padding: fs(10), borderTopWidth: 1 },
   replyLine: { width: 3, height: fs(32), borderRadius: 2, marginRight: fs(10) },
   replyTitle: { fontWeight: '700', fontSize: fs(12) },
@@ -3017,6 +3514,17 @@ const styles = StyleSheet.create({
   videoPlay: { width: fs(48), height: fs(48), borderRadius: fs(24), alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)' },
   mediaError: { alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginBottom: 4 },
   voicePlay: { width: fs(34), height: fs(34), borderRadius: fs(17), alignItems: 'center', justifyContent: 'center' },
+  voiceBubble: { width: fs(236), maxWidth: '100%', minHeight: fs(58), justifyContent: 'center' },
+  voiceAvatar: { width: fs(26), height: fs(26), borderRadius: fs(13), alignItems: 'center', justifyContent: 'center', overflow: 'hidden', marginRight: 6 },
+  voiceAvatarImg: { width: '100%', height: '100%' },
+  voiceAvatarText: { color: '#fff', fontSize: fs(11), fontWeight: '700' },
+  voiceWaveWrap: { flex: 1 },
+  voiceWaveRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: fs(22), gap: 2 },
+  voiceBar: { width: fs(2.5), borderRadius: fs(1.5) },
+  voiceTrack: { height: 2, borderRadius: 1, overflow: 'hidden', marginTop: 4 },
+  voiceTime: { fontSize: fs(10), marginTop: 3, fontVariant: ['tabular-nums'] },
+  voiceUploadRow: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
+  voiceUploadText: { fontSize: fs(10), marginLeft: 6, fontWeight: '600' },
   docIcon: { width: fs(36), height: fs(36), borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   swipeReveal: { position: 'absolute', top: fs(6), width: fs(28), height: fs(28), borderRadius: fs(14), alignItems: 'center', justifyContent: 'center', zIndex: 0 },
   revealLeft: { left: 2 },

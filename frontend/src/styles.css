@@ -138,28 +138,62 @@ input, textarea {
 }
 
 @keyframes messageEnterSent {
-  from { opacity: 0; transform: translate3d(12px, 6px, 0) scale(0.98); }
+  from { opacity: 0; transform: translate3d(10px, 4px, 0) scale(0.985); }
   to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
 }
 
 @keyframes messageEnterReceived {
-  from { opacity: 0; transform: translate3d(-12px, 6px, 0) scale(0.98); }
+  from { opacity: 0; transform: translate3d(-10px, 4px, 0) scale(0.985); }
   to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
 }
 
 .message-enter-sent {
-  animation: messageEnterSent 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: messageEnterSent 0.22s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+  transform-origin: 100% 100%;
 }
 
 .message-enter-received {
-  animation: messageEnterReceived 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: messageEnterReceived 0.22s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+  transform-origin: 0 100%;
+}
+
+.unread-fab {
+  animation: slideInUp 0.18s ease both;
+}
+
+.recording-bar {
+  animation: slideInUp 0.18s ease both;
+}
+
+.rec-wave-bar,
+.voice-wave-bar {
+  display: inline-block;
+  border-radius: 2px;
+  transition: height 0.09s ease-out, background 0.18s ease;
+}
+
+.recording-wave .rec-wave-bar {
+  flex-shrink: 0;
+}
+
+.voice-waveform .voice-wave-bar {
+  flex-shrink: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .message-enter,
   .message-enter-sent,
-  .message-enter-received {
-    animation: none;
+  .message-enter-received,
+  .unread-fab,
+  .recording-bar,
+  .typing-dot,
+  .splash-logo {
+    animation: none !important;
+  }
+
+  .rec-wave-bar,
+  .voice-wave-bar {
+    transition: none;
   }
 }
 
@@ -178,7 +212,6 @@ input, textarea {
 .wave-bar {
   display: inline-block;
   border-radius: 2px;
-  animation: waveEq 1s ease-in-out infinite;
 }
 
 .chat-screen-enter {

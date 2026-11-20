@@ -485,6 +485,7 @@ function Shell() {
         <StatusBar barStyle="light-content" backgroundColor={TojeyColors.primaryDeep} />
         <SafeAreaView style={{ flex: 1 }}>
           <ChatRoomScreen
+            key={activeChat.id || activeChat.username || 'active-chat'}
             socket={socket}
             currentUser={session.user}
             otherUser={activeChat}

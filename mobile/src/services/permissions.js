@@ -9,29 +9,54 @@ const mic = (Platform.OS === 'android' ? PERMISSIONS.ANDROID.RECORD_AUDIO : PERM
 
 export async function ensureMediaPermission() {
   if (Platform.OS === 'web') return true;
-  const r = await check(media);
-  if (r === RESULTS.GRANTED) return true;
-  const req = await request(media);
-  return req === RESULTS.GRANTED || req === RESULTS.LIMITED;
+  try {
+    const r = await check(media);
+    if (r === RESULTS.GRANTED) return true;
+    const req = await request(media);
+    return req === RESULTS.GRANTED || req === RESULTS.LIMITED;
+  } catch (e) {
+    console.warn('media permission check failed', e);
+    return false;
+  }
 }
 
 export async function ensureCameraPermission() {
   if (Platform.OS === 'web') return true;
-  const r = await check(camera);
-  if (r === RESULTS.GRANTED) return true;
-  const req = await request(camera);
-  return req === RESULTS.GRANTED;
+  try {
+    const r = await check(camera);
+    if (r === RESULTS.GRANTED) return true;
+    const req = await request(camera);
+    return req === RESULTS.GRANTED;
+  } catch (e) {
+    console.warn('camera permission check failed', e);
+    return false;
+  }
+}
+
+export async function getMicPermissionStatus() {
+  if (Platform.OS === 'web') return RESULTS.GRANTED;
+  try {
+    return await check(mic);
+  } catch (e) {
+    console.warn('mic permission check failed', e);
+    return RESULTS.UNAVAILABLE;
+  }
 }
 
 export async function ensureMicPermission() {
   if (Platform.OS === 'web') return true;
-  const r = await check(mic);
-  if (r === RESULTS.GRANTED) return true;
-  const req = await request(mic);
-  return req === RESULTS.GRANTED;
+  try {
+    const r = await check(mic);
+    if (r === RESULTS.GRANTED) return true;
+    if (r === RESULTS.BLOCKED) return false;
+    const req = await request(mic);
+    return req === RESULTS.GRANTED;
+  } catch (e) {
+    console.warn('mic permission request failed', e);
+    return false;
+  }
 }
 
-// Video calls carry audio now, so camera AND microphone are required.
 export async function ensureVideoCallPermission() {
   const cameraOk = await ensureCameraPermission();
   const micOk = await ensureMicPermission();

@@ -215,6 +215,7 @@ export default function HomeLayout() {
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
                       {openChat ? (
                         <ChatRoomScreen
+                          key={openChat.id}
                           otherUser={openChat}
                           currentUser={currentUser}
                           onBack={() => setOpenChat(null)}
