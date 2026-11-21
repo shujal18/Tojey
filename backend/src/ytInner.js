@@ -124,7 +124,7 @@ function cacheSet(key, value, ttl = CACHE_TTL) {
 }
 
 async function call(endpoint, body, opts = {}) {
-  const { timeoutMs = 15000, skipCache = false, cacheKey, client = 'ANDROID', ttl } = opts;
+  const { timeoutMs = 8000, skipCache = false, cacheKey, client = 'ANDROID', ttl } = opts;
   const keyBase = cacheKey || `${client}:${endpoint}:${JSON.stringify(body)}`;
   if (!skipCache) {
     const hit = cacheGet(keyBase);
@@ -904,7 +904,7 @@ async function playerResponse(videoId, skipCache = false) {
           contentCheckOk: true,
           racyCheckOk: true,
           playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-        }, { client, skipCache: true });
+        }, { client, skipCache: true, timeoutMs: 12000 });
       } catch (e) {
         tried.push(`${client}:err`);
         if (!firstNonOk) firstNonOk = e;

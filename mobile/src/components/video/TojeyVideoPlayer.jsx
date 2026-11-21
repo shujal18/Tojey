@@ -103,6 +103,8 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   initialRepeat = false,
   showControls = true,
   enableGestures = true,
+  gestureLocked = false,
+  onSurfaceTap,
   watchTogetherRole = null,
   watchTogetherSessionId = null,
   sharedRate = null,
@@ -146,7 +148,11 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   const [volumeOverlay, setVolumeOverlay] = useState(null);
   const [brightnessOverlay, setBrightnessOverlay] = useState(null);
   const [rateHold, setRateHold] = useState(false);
+  const [controlsUnlocked, setControlsUnlocked] = useState(false);
   const [layout, setLayout] = useState({ width: windowWidth, height: Math.round(windowWidth * 9 / 16) });
+
+  const controlsAllowed = showControls || controlsUnlocked;
+  const gesturesAllowed = enableGestures && !gestureLocked;
 
   const controls = useVideoControls({
     sourceKey: sourceUri ? sourceKey : null,
@@ -374,8 +380,15 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     setBrightnessOverlay({ visible: true, level: value });
   }, []);
 
+  const handleSurfaceTap = useCallback(() => {
+    if (!showControls) setControlsUnlocked(true);
+    if (typeof onSurfaceTap === 'function') onSurfaceTap();
+    setLocked(false);
+    wakeControls();
+  }, [onSurfaceTap, showControls, setLocked, wakeControls]);
+
   const panHandlers = useVideoGestures({
-    enabled: !mini && !compact && !state.locked && !!sourceUri,
+    enabled: !mini && !compact && !!sourceUri,
     width: layout.width,
     height: layout.height,
     getDuration: () => state.duration,
@@ -383,16 +396,16 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     getVolume: () => getState().volume,
     getBrightness: () => brightnessRef.current,
     getZoom: () => getState().zoom,
-    onSingleTap: wakeControls,
-    onDoubleTap: handleDoubleTap,
-    onSeekPreview: beginSeek,
-    onSeekCommit: commitSeek,
-    onVolumeChange: handleVolumeGesture,
-    onBrightnessChange: handleBrightnessGesture,
-    onRateHold: handleRateHold,
-    onZoomChange: setZoom,
-    onResetZoom: resetZoom,
-    onMinimize: onMinimize,
+    onSingleTap: handleSurfaceTap,
+    onDoubleTap: gesturesAllowed ? handleDoubleTap : undefined,
+    onSeekPreview: gesturesAllowed ? beginSeek : undefined,
+    onSeekCommit: gesturesAllowed ? commitSeek : undefined,
+    onVolumeChange: gesturesAllowed ? handleVolumeGesture : undefined,
+    onBrightnessChange: gesturesAllowed ? handleBrightnessGesture : undefined,
+    onRateHold: gesturesAllowed ? handleRateHold : undefined,
+    onZoomChange: gesturesAllowed ? setZoom : undefined,
+    onResetZoom: gesturesAllowed ? resetZoom : undefined,
+    onMinimize: gesturesAllowed ? onMinimize : undefined,
     onGestureActive: setGestureActive,
   });
 
@@ -526,11 +539,9 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
       collapsable={false}
     >
       <View style={styles.surfaceWrap}>{surface}</View>
-      {mini || !showControls ? null : (
+      {mini || !controlsAllowed ? null : (
         <>
-          {enableGestures && !state.locked ? (
-            <VideoGestureLayer panHandlers={panHandlers} />
-          ) : null}
+          <VideoGestureLayer panHandlers={panHandlers} />
           <TojeyVideoControls
             visible={state.controlsVisible && !state.locked}
             compact={compact}
@@ -612,7 +623,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
 });
 
 const styles = StyleSheet.create({
-  root: { backgroundColor: '#000', overflow: 'hidden' },
+  root: { flex: 1, backgroundColor: '#000', overflow: 'hidden' },
   fullscreen: {
     position: 'absolute',
     top: 0,

@@ -16,10 +16,23 @@ const SCREEN_VIDEO = {
   frameRate: { ideal: 60, max: 60 },
 };
 
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  sampleRate: 48000,
+  channelCount: 1,
+};
+
 const LOCAL_CONSTRAINTS = {
-  audio: true,
+  audio: { ...AUDIO_CONSTRAINTS },
   video: { ...CAMERA_VIDEO },
 };
+
+const AUDIO_RTP_BITRATE = 96000;
+const VIDEO_RTP_BITRATE = 3000000;
+const SCREEN_RTP_BITRATE = 4000000;
+const PLACEHOLDER_RTP_BITRATE = 150000;
 
 let pc = null;
 let localStream = null;
@@ -32,6 +45,7 @@ let micMuted = false;
 let remoteAudioEnabled = true;
 let videoFacing = 'user';
 let originalVideoTrack = null;   // NEW: remember the camera track before screen share
+let placeholderVideoTrack = null;
 
 export function applyCallbacks(cb) {
   callbacks = cb || {};
@@ -85,7 +99,11 @@ export async function startLocalStream() {
     localStream = await navigator.mediaDevices.getUserMedia(LOCAL_CONSTRAINTS);
   } catch (e) {
     // Camera unavailable/denied: fall back to audio-only so the call can still work.
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: { ...AUDIO_CONSTRAINTS } });
+    } catch (e2) {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
   }
   return localStream;
 }
@@ -99,8 +117,11 @@ async function applyVideoEncoding(isScreen = false) {
   if (!pc) return;
   const sender = findVideoSender();
   if (!sender) return;
-  const maxBitrate = isScreen ? 5000000 : 2000000;
-  const maxFramerate = isScreen ? 60 : 30;
+  const isPlaceholder = !!placeholderVideoTrack && sender.track === placeholderVideoTrack;
+  const maxBitrate = isPlaceholder
+    ? PLACEHOLDER_RTP_BITRATE
+    : (isScreen ? SCREEN_RTP_BITRATE : VIDEO_RTP_BITRATE);
+  const maxFramerate = isPlaceholder ? 5 : (isScreen ? 60 : 30);
   try {
     const params = sender.getParameters();
     if (!params.encodings || !params.encodings.length) params.encodings = [{}];
@@ -135,6 +156,7 @@ function makePlaceholderVideoTrack() {
     const stream = canvas.captureStream(30);
     const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
     if (track) track.enabled = true;
+    placeholderVideoTrack = track;
     return track || null;
   } catch (e) {
     return null;
@@ -184,6 +206,7 @@ export function createPeerConnection() {
     }
   }
   applyVideoEncoding(false);
+  applyAudioEncoding();
   return pc;
 }
 
@@ -219,14 +242,21 @@ export async function flushPendingCandidates() {
   for (const candidate of queued) {
     try {
       await pc.addIceCandidate(candidate);
-      addedCandidates.add(`${candidate.sdpMid}:${candidate.sdpMLineIndex}`);
+      addedCandidates.add(candidateKey(candidate));
     } catch (e) {}
   }
 }
 
+function candidateKey(candidate) {
+  if (!candidate) return '';
+  const value = candidate.candidate != null ? candidate.candidate : candidate;
+  const sdp = typeof value === 'string' ? value : JSON.stringify(value);
+  return `${candidate.sdpMid}:${candidate.sdpMLineIndex}:${sdp}`;
+}
+
 export async function handleRemoteCandidate(candidate) {
   if (!pc) return;
-  const key = `${candidate.sdpMid}:${candidate.sdpMLineIndex}`;
+  const key = candidateKey(candidate);
   if (addedCandidates.has(key)) return;          // dup‑guard
   if (!pc.remoteDescription) {
     pendingCandidates.push(candidate);
@@ -251,6 +281,30 @@ function findVideoSender() {
   return transceiver ? transceiver.sender : null;
 }
 
+async function applyAudioEncoding() {
+  if (!pc) return;
+  const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+  if (!sender) return;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.encodings.forEach((enc) => { enc.maxBitrate = AUDIO_RTP_BITRATE; });
+    await sender.setParameters(params);
+  } catch (e) {}
+  try {
+    if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') return;
+    const capabilities = RTCRtpSender.getCapabilities('audio');
+    const opus = capabilities && capabilities.codecs
+      ? capabilities.codecs.filter((c) => /audio\/opus/i.test(c.mimeType || ''))
+      : null;
+    if (!opus || !opus.length || typeof pc.getTransceivers !== 'function') return;
+    const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
+    if (transceiver && typeof transceiver.setCodecPreferences === 'function') {
+      transceiver.setCodecPreferences(opus);
+    }
+  } catch (e) {}
+}
+
 // Acquire a camera track for a call that started audio-only (camera denied or
 // unavailable) and attach it to the existing video sender.
 export async function startCameraTrack() {
@@ -271,6 +325,10 @@ export async function startCameraTrack() {
     const sender = findVideoSender();
     if (sender) await sender.replaceTrack(track);
     else pc.addTrack(track, localStream);
+    if (placeholderVideoTrack && placeholderVideoTrack !== track) {
+      try { placeholderVideoTrack.stop(); } catch (e) {}
+      placeholderVideoTrack = null;
+    }
     await applyVideoEncoding(false);
   }
   return track;
@@ -292,6 +350,10 @@ export async function flipCamera() {
   if (pc) {
     const sender = findVideoSender();
     if (sender) await sender.replaceTrack(track);
+    if (placeholderVideoTrack && placeholderVideoTrack !== track) {
+      try { placeholderVideoTrack.stop(); } catch (e) {}
+      placeholderVideoTrack = null;
+    }
     await applyVideoEncoding(false);
   }
   try { localStream.removeTrack(current); } catch (e) {}
@@ -369,7 +431,12 @@ function cleanupCallButKeepStream() {
   }
   remoteStream = null;
   pendingCandidates = [];
+  addedCandidates = new Set();
   remoteAudioEnabled = true;
+  if (placeholderVideoTrack) {
+    try { placeholderVideoTrack.stop(); } catch (e) {}
+    placeholderVideoTrack = null;
+  }
 }
 
 export function clearCallbacks() {

@@ -16,6 +16,13 @@ const MAX_IMGVIEW_PX = 8000000;
 const MIN_CROP = 64;
 const DRAW_TOOLBAR_H = 72;
 
+function fmtVideoTime(s) {
+  const total = Math.max(0, Math.floor(s || 0));
+  const sec = total % 60;
+  const m = Math.floor(total / 60);
+  return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
 export default function MediaPreview({ uri, type, fileName, mimeType, theme, onCancel, onSend }) {
   const isVideo = type === 'VIDEO';
   const { width: winW, height: winH } = useWindowDimensions();
@@ -28,6 +35,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const [videoErr, setVideoErr] = useState(false);
   const [videoLoadDone, setVideoLoadDone] = useState(false);
   const [videoPaused, setVideoPaused] = useState(true);
+  const [videoPos, setVideoPos] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
   const [videoKey, setVideoKey] = useState(0);
   const [imgErr, setImgErr] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -87,6 +96,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     setVideoErr(false);
     setVideoLoadDone(false);
     setVideoPaused(true);
+    setVideoPos(0);
+    setVideoDuration(0);
     setImgErr(false);
     setApplyGeom(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -299,6 +310,8 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
   const retryVideo = () => {
     setVideoErr(false);
     setVideoLoadDone(false);
+    setVideoPos(0);
+    setVideoDuration(0);
     setVideoKey((k) => k + 1);
   };
 
@@ -397,20 +410,32 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
               )}
             </View>
           ) : (
-            <Video
-              key={videoKey}
-              source={{ uri }}
+            <TouchableOpacity
               style={StyleSheet.absoluteFill}
-              resizeMode="contain"
-              controls
-              repeat={false}
-              paused={videoPaused}
-              onPlay={() => setVideoPaused(false)}
-              onPause={() => setVideoPaused(true)}
-              bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
-              onLoad={() => setVideoLoadDone(true)}
-              onError={() => setVideoErr(true)}
-            />
+              activeOpacity={1}
+              onPress={() => setVideoPaused((p) => !p)}
+              accessibilityLabel={videoPaused ? 'Play video' : 'Pause video'}
+            >
+              <Video
+                key={videoKey}
+                source={{ uri }}
+                style={StyleSheet.absoluteFill}
+                resizeMode="contain"
+                controls={false}
+                repeat={false}
+                paused={videoPaused}
+                onPlay={() => setVideoPaused(false)}
+                onPause={() => setVideoPaused(true)}
+                bufferConfig={{ minBufferMs: 15000, maxBufferMs: 60000, bufferForPlaybackMs: 1000, bufferForPlaybackAfterRebufferMs: 2000 }}
+                onLoad={(d) => {
+                  setVideoLoadDone(true);
+                  setVideoDuration((d && d.duration) || 0);
+                }}
+                onProgress={(d) => setVideoPos((d && d.currentTime) || 0)}
+                onEnd={() => { setVideoPaused(true); setVideoPos(videoDuration); }}
+                onError={() => setVideoErr(true)}
+              />
+            </TouchableOpacity>
           )}
           {!videoLoadDone && !videoErr && previewSafe && (
             <View style={[StyleSheet.absoluteFill, styles.centerDim]} pointerEvents="none">
@@ -469,11 +494,25 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
                 <Text style={styles.topBarTitle} numberOfLines={1}>
                   {isVideo ? 'Video' : 'Photo'}
                 </Text>
+                {isVideo && videoLoadDone && (
+                  <Text style={styles.videoTime}>
+                    {fmtVideoTime(videoPos)} / {fmtVideoTime(videoDuration)}
+                  </Text>
+                )}
               </View>
               <View style={[overlayBtn, { opacity: 0 }]} pointerEvents="none">
                 <Icon name="close" size={26} color="#fff" />
               </View>
             </View>
+            {isVideo && videoLoadDone && (
+              <View style={styles.videoProgressTrack} pointerEvents="none">
+                <View
+                  style={[styles.videoProgressFill, {
+                    width: `${videoDuration ? Math.min(100, (videoPos / videoDuration) * 100) : 0}%`,
+                  }]}
+                />
+              </View>
+            )}
           </View>
         )}
 
@@ -580,6 +619,9 @@ const styles = StyleSheet.create({
 topBar: { position: 'absolute', top: 0, left: 0, right: 0, paddingBottom: fs(10), backgroundColor: 'rgba(0,0,0,0.45)' },
   topBarRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8 },
   topBarTitle: { color: '#fff', fontSize: fs(16), fontWeight: '700' },
+  videoTime: { color: 'rgba(255,255,255,0.8)', fontSize: fs(11), fontVariant: ['tabular-nums'], marginTop: 2 },
+  videoProgressTrack: { height: 2, backgroundColor: 'rgba(255,255,255,0.25)' },
+  videoProgressFill: { height: 2, backgroundColor: '#fff' },
   overlayBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center', borderRadius: fs(20), backgroundColor: 'rgba(255,255,255,0.16)' },
   bottomPanel: {
     position: 'absolute', left: 0, right: 0,

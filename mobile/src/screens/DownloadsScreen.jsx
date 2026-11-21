@@ -128,6 +128,7 @@ function OfflinePlayer({ item, theme, onClose }) {
   const [audioRate, setAudioRate] = useState(1);
   const [audioError, setAudioError] = useState(false);
   const [epoch, setEpoch] = useState(0);
+  const [controlsEnabled, setControlsEnabled] = useState(true);
 
   const toUri = (path) => {
     if (!path) return '';
@@ -137,6 +138,10 @@ function OfflinePlayer({ item, theme, onClose }) {
   const hasVideo = !!item.videoPath;
   const sourceUri = hasVideo ? toUri(item.videoPath) : toUri(item.audioPath);
   const audioUri = hasVideo && item.audioPath ? toUri(item.audioPath) : null;
+
+  useEffect(() => {
+    setControlsEnabled(true);
+  }, [sourceUri, epoch]);
 
   const retry = () => {
     setAudioError(false);
@@ -172,6 +177,8 @@ function OfflinePlayer({ item, theme, onClose }) {
           source={{ uri: sourceUri }}
           title={item.title}
           style={styles.offlineVideo}
+          showControls={controlsEnabled}
+          onSurfaceTap={() => setControlsEnabled(true)}
           initialRepeat
           availableQualities={['Auto']}
           statusLabel={audioError ? 'Audio track unavailable' : undefined}

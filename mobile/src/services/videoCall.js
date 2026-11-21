@@ -12,8 +12,17 @@ const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 // Camera + microphone getUserMedia. Mic mute and "remote-audio mute" are purely
 // local track toggles (see setMicMuted / setRemoteAudioEnabled below).
+const AUDIO_CONSTRAINTS = {
+  googEchoCancellation: true,
+  googNoiseSuppression: true,
+  googAutoGainControl: true,
+  googHighpassFilter: true,
+  sampleRate: 48000,
+  channelCount: 1,
+};
+
 const LOCAL_CONSTRAINTS = {
-  audio: true,
+  audio: { ...AUDIO_CONSTRAINTS },
   video: {
     facingMode: 'user',
     width: 1280,
@@ -22,16 +31,18 @@ const LOCAL_CONSTRAINTS = {
   },
 };
 
+const AUDIO_RTP_BITRATE = 96000;
+
 // Encoder profiles tuned for smooth motion. Camera keeps its framerate while
 // screen sharing favours a balance of resolution and framerate at a higher bitrate.
 const CAMERA_ENCODING = {
-  maxBitrate: 2000000,
+  maxBitrate: 3000000,
   maxFramerate: 30,
   scaleResolutionDownBy: 1,
   degradationPreference: 'MAINTAIN_FRAMERATE',
 };
 const SCREEN_ENCODING = {
-  maxBitrate: 8000000,
+  maxBitrate: 4000000,
   maxFramerate: 60,
   scaleResolutionDownBy: 1.35,
   degradationPreference: 'BALANCED',
@@ -173,6 +184,35 @@ async function tuneSender(sender, profile) {
   }
 }
 
+async function tuneAudioSender(sender) {
+  if (!sender || typeof sender.getParameters !== 'function' || typeof sender.setParameters !== 'function') return;
+  try {
+    const p = sender.getParameters();
+    if (!p) return;
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.encodings.forEach((e) => { e.maxBitrate = AUDIO_RTP_BITRATE; });
+    await sender.setParameters(p);
+  } catch (e) {
+    console.warn('tuneAudioSender failed', e && e.message);
+  }
+}
+
+function preferOpusCodec() {
+  try {
+    if (!pc || typeof pc.getTransceivers !== 'function') return;
+    const audioSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
+    if (!audioSender) return;
+    const transceiver = pc.getTransceivers().find((t) => t.sender === audioSender);
+    if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
+    if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') return;
+    const capabilities = RTCRtpSender.getCapabilities('audio');
+    const opus = capabilities && capabilities.codecs
+      ? capabilities.codecs.filter((c) => /audio\/opus/i.test((c && c.mimeType) || ''))
+      : null;
+    if (opus && opus.length) transceiver.setCodecPreferences(opus);
+  } catch (e) {}
+}
+
 export async function startLocalStream() {
   if (localStream) return localStream;
   const stream = await mediaDevices.getUserMedia(LOCAL_CONSTRAINTS);
@@ -210,6 +250,9 @@ export function createPeerConnection() {
   }
   const videoSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'video');
   if (videoSender) tuneSender(videoSender, CAMERA_ENCODING);
+  const audioSender = pc.getSenders().find((s) => !!s.track && s.track.kind === 'audio');
+  if (audioSender) tuneAudioSender(audioSender);
+  preferOpusCodec();
   return pc;
 }
 
@@ -245,14 +288,21 @@ export async function flushPendingCandidates() {
   for (const candidate of queued) {
     try {
       await pc.addIceCandidate(candidate);
-      addedCandidates.add(`${candidate.sdpMid}:${candidate.sdpMLineIndex}`);
+      addedCandidates.add(candidateKey(candidate));
     } catch (e) {}
   }
 }
 
+function candidateKey(candidate) {
+  if (!candidate) return '';
+  const value = candidate.candidate != null ? candidate.candidate : candidate;
+  const sdp = typeof value === 'string' ? value : JSON.stringify(value);
+  return `${candidate.sdpMid}:${candidate.sdpMLineIndex}:${sdp}`;
+}
+
 export async function handleRemoteCandidate(candidate) {
   if (!pc) return;
-  const key = `${candidate.sdpMid}:${candidate.sdpMLineIndex}`;
+  const key = candidateKey(candidate);
   if (addedCandidates.has(key)) return;          // dup-guard
   if (!pc.remoteDescription) {
     pendingCandidates.push(candidate);

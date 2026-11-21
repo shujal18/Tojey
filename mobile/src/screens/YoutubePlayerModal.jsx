@@ -269,15 +269,18 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const dlIcon = (st) => (!st ? 'download-outline' : st.status === 'done' ? 'checkmark-circle' : st.status === 'error' ? 'close-circle' : 'time-outline');
   const dlColor = (st) => (!st ? theme.text : st.status === 'done' ? theme.primary : st.status === 'error' ? theme.danger : theme.textSecondary);
 
-  const needsDashAudio = !!stream?.audioUrl && stream.videoHasAudio === false;
+  // Device-resolved adaptive streams already carry signed googlevideo URLs, so
+  // routing them through the backend DASH manifest only adds a bot-checked hop.
+  // Use the muxed byte proxy for those instead; keep DASH for proxy-resolved
+  // adaptive streams where the manifest is the only way to pair the tracks.
+  const deviceAdaptive = stream?.source === 'device' && stream.videoHasAudio === false;
+  const needsDashAudio = !!stream?.audioUrl && stream.videoHasAudio === false && !deviceAdaptive;
+  const useMuxed = muxFallback || deviceAdaptive;
   const streamSrc = audioOnly
     ? (stream?.audioUrl || stream?.videoUrl)
-    : (muxFallback ? mediaProxyUrl(cur.videoId, token, 'best', maxHeight) : (stream?.videoUrl || stream?.audioUrl));
-  // Prefer the adaptive manifest when the device resolver handed back separate
-  // audio and video tracks. If Media3 rejects it, onError falls back to the
-  // muxed progressive proxy instead of leaving the room silent.
+    : (useMuxed ? mediaProxyUrl(cur.videoId, token, 'best', maxHeight) : (stream?.videoUrl || stream?.audioUrl));
   const dashSrc = dashProxyUrl(cur.videoId, token);
-  const usingDash = (useDash || (needsDashAudio && !muxFallback)) && !audioOnly;
+  const usingDash = (useDash || (needsDashAudio && !muxFallback)) && !audioOnly && !deviceAdaptive;
   const sourceUri = usingDash ? dashSrc : streamSrc;
   const sourceType = usingDash ? 'mpd' : 'mp4';
 
@@ -395,6 +398,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
         <View style={styles.videoWrap}>
           <TojeyVideoPlayer
             ref={playerRef}
+            style={styles.video}
             source={{ uri: sourceUri, type: sourceType }}
             title={info?.title || cur.title}
             initialTime={posRef.current}

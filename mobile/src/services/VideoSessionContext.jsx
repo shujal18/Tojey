@@ -74,6 +74,7 @@ export function VideoSessionProvider({ children }) {
           <View style={styles.expanded}>
             <TojeyVideoPlayer
               {...sharedPlayerProps}
+              style={styles.expandedVideo}
               mode="full"
               onBack={minimizeSession}
               onMinimize={minimizeSession}
@@ -98,4 +99,5 @@ export function useVideoSession() {
 
 const styles = StyleSheet.create({
   expanded: { flex: 1, backgroundColor: '#000' },
+  expandedVideo: { flex: 1 },
 });

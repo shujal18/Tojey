@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Modal,
+  View, Text, TouchableOpacity, FlatList, StyleSheet, Modal,
   Dimensions, Image, ActivityIndicator, Alert, Animated, PanResponder, Platform,
 } from 'react-native';
 import Video from 'react-native-video';
@@ -26,10 +26,8 @@ function ZoomableImage({ uri, style, onExternal }) {
 
   const lastScale = useRef(1);
   const pinchStart = useRef(null);
+  const pinching = useRef(false);
   const baseTrans = useRef({ x: 0, y: 0 });
-  const lastTap = useRef(0);
-  const tapStart = useRef(0);
-  const didGesture = useRef(false);
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
@@ -42,76 +40,69 @@ function ZoomableImage({ uri, style, onExternal }) {
     lastScale.current = s;
   };
 
-  const doubleTapZoom = () => {
-    if (lastScale.current > 1.05) {
-      animateTo(1, 0, 0);
-    } else {
-      animateTo(2.6, 0, 0);
-    }
-  };
-
-  const handleTap = () => {
-    const now = Date.now();
-    if (now - lastTap.current < 320) {
-      lastTap.current = 0;
-      doubleTapZoom();
-    } else {
-      lastTap.current = now;
-    }
+  const startPinch = (touches) => {
+    if (!touches || touches.length < 2) return;
+    const d = dist(touches[0], touches[1]);
+    if (!d) return;
+    pinching.current = true;
+    pinchStart.current = { distance: d, scale: lastScale.current };
+    baseTrans.current = { x: translateX.__getValue(), y: translateY.__getValue() };
   };
 
   const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: (e) => e.nativeEvent.touches.length >= 2,
     onMoveShouldSetPanResponder: (e, g) => {
-      if (e.nativeEvent.touches.length === 2) return true;
+      if (e.nativeEvent.touches.length >= 2) return true;
       return lastScale.current > 1.02 && (Math.abs(g.dx) > 8 || Math.abs(g.dy) > 8);
     },
     onPanResponderGrant: (e) => {
-      didGesture.current = true;
       baseTrans.current = { x: translateX.__getValue(), y: translateY.__getValue() };
-      if (e.nativeEvent.touches.length === 2) {
-        pinchStart.current = { distance: dist(e.nativeEvent.touches[0], e.nativeEvent.touches[1]), scale: lastScale.current };
-      }
+      if (e.nativeEvent.touches.length >= 2) startPinch(e.nativeEvent.touches);
     },
     onPanResponderMove: (e, g) => {
-      if (e.nativeEvent.touches.length === 2) {
-        const t0 = e.nativeEvent.touches[0];
-        const t1 = e.nativeEvent.touches[1];
-        const d = dist(t0, t1);
+      const touches = e.nativeEvent.touches || [];
+      if (touches.length >= 2) {
+        if (!pinching.current || !pinchStart.current || !pinchStart.current.distance) {
+          startPinch(touches);
+          return;
+        }
+        const d = dist(touches[0], touches[1]);
         const base = pinchStart.current;
-        if (!base || !base.distance) return;
         const s = clamp(base.scale * (d / base.distance), 1, 4);
         lastScale.current = s;
         scale.setValue(s);
-      } else if (lastScale.current > 1.02) {
-        translateX.setValue(clamp(baseTrans.current.x + g.dx, -160, 160));
-        translateY.setValue(clamp(baseTrans.current.y + g.dy, -240, 240));
+      } else {
+        if (pinching.current) {
+          pinching.current = false;
+          pinchStart.current = null;
+          baseTrans.current = { x: translateX.__getValue(), y: translateY.__getValue() };
+          return;
+        }
+        if (lastScale.current > 1.02) {
+          translateX.setValue(clamp(baseTrans.current.x + g.dx, -160, 160));
+          translateY.setValue(clamp(baseTrans.current.y + g.dy, -240, 240));
+        }
       }
     },
     onPanResponderRelease: () => {
       const s = lastScale.current;
-      if (s < 1.15) {
-        animateTo(1, 0, 0);
-      } else if (s < 1.5) {
+      if (s < 1.5) {
         animateTo(1, 0, 0);
       } else {
         animateTo(s, clamp(translateX.__getValue(), -160, 160), clamp(translateY.__getValue(), -240, 240));
       }
+      pinching.current = false;
       pinchStart.current = null;
     },
     onPanResponderTerminate: () => {
+      pinching.current = false;
       pinchStart.current = null;
     },
+    onPanResponderTerminationRequest: () => false,
   })).current;
 
   return (
-    <View
-      style={[{ flex: 1, overflow: 'hidden' }, style]}
-      {...pan.panHandlers}
-      onTouchStart={() => { tapStart.current = Date.now(); didGesture.current = false; }}
-      onTouchEnd={() => {
-        if (!didGesture.current && Date.now() - tapStart.current < 320) handleTap();
-      }}
-    >
+    <View style={[styles.zoomRoot, style]} {...pan.panHandlers}>
       <Animated.View style={[styles.zoomWrap, { transform: [{ translateX }, { translateY }, { scale }] }]}>
         {loading && !failed && (
           <View style={styles.imgLoading}>
@@ -190,20 +181,18 @@ class VideoBoundary extends React.Component {
   }
 }
 
-export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onSendReplyMessage, onDelete, onSendDrawing, onExternalImage }) {
+export default function MediaViewer({ items = [], startIndex = 0, headerText = '', onClose, currentUserId, theme, onReact, onReply, onDelete, onSendDrawing, onExternalImage }) {
   const [index, setIndex] = useState(startIndex);
   const [showMenu, setShowMenu] = useState(false);
   const [videoErrors, setVideoErrors] = useState({});
   const [videoLoading, setVideoLoading] = useState({});
   const [activeVideoId, setActiveVideoId] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [replyText, setReplyText] = useState('');
   const [videoPlay, setVideoPlay] = useState({ paused: false, currentTime: 0, duration: 0, rate: 1 });
   const videoRef = useRef(null);
   const seekWRef = useRef(0);
   const listRef = useRef(null);
   const item = items[index] || null;
-  const canShare = !!item && !!item.media_url;
 
   const [drawMode, setDrawMode] = useState(false);
   const [strokes, setStrokes] = useState([]);
@@ -517,15 +506,6 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
     setShowMenu(false);
   };
 
-  const sendReply = () => {
-    const txt = replyText.trim();
-    if (!txt || !item) return;
-    setReplyText('');
-    if (onSendReplyMessage) onSendReplyMessage(item, txt);
-    else if (onReply) onReply(item);
-    onClose();
-  };
-
   const isOwn = !!item && item.sender_id === currentUserId;
   const isImage = !!item && item.type === 'IMAGE';
 
@@ -558,9 +538,25 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
   );
 
   return (
-    <Modal visible transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible transparent animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
       <View style={[styles.container, { backgroundColor: 'rgba(0,0,0,0.97)' }]}>
-        <View style={styles.topBar}>
+        <FlatList
+          ref={listRef}
+          data={items}
+          keyExtractor={(m, idx) => String(m.id || idx)}
+          horizontal
+          pagingEnabled
+          scrollEnabled={!drawMode}
+          showsHorizontalScrollIndicator={false}
+          viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairsRef.current}
+          initialScrollIndex={startIndex}
+          getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
+          renderItem={renderItem}
+          removeClippedSubviews={Platform.OS === 'android'}
+          style={StyleSheet.absoluteFill}
+        />
+
+        <View style={styles.topBar} pointerEvents="box-none">
           <TouchableOpacity onPress={onClose} style={styles.topBtn} accessibilityLabel="Close media viewer">
             <Icon name="close" size={26} color="#fff" />
           </TouchableOpacity>
@@ -589,70 +585,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
           )}
         </View>
 
-        <FlatList
-          ref={listRef}
-          data={items}
-          keyExtractor={(m, idx) => String(m.id || idx)}
-          horizontal
-          pagingEnabled
-          scrollEnabled={!drawMode}
-          showsHorizontalScrollIndicator={false}
-          viewabilityConfigCallbackPairs={viewabilityConfigCallbackPairsRef.current}
-          initialScrollIndex={startIndex}
-          getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
-          renderItem={renderItem}
-          removeClippedSubviews={Platform.OS === 'android'}
-          style={{ flex: 1 }}
-        />
-
-        {drawMode ? drawToolbar : (
-          canShare && (
-            <View style={[styles.bottomBar, { backgroundColor: theme.card }]}>
-              <View style={styles.replyRow}>
-                <TextInput
-                  style={[styles.replyInput, { backgroundColor: theme.inputBg, color: theme.text }]}
-                  placeholder="Reply…"
-                  placeholderTextColor={theme.textSecondary}
-                  value={replyText}
-                  onChangeText={setReplyText}
-                  onSubmitEditing={sendReply}
-                  returnKeyType="send"
-                />
-                <TouchableOpacity
-                  onPress={sendReply}
-                  disabled={!replyText.trim()}
-                  style={[styles.replySendBtn, { backgroundColor: theme.primary, opacity: replyText.trim() ? 1 : 0.5 }]}
-                  accessibilityLabel="Send reply"
-                >
-                  <Icon name="send" size={16} color="#fff" />
-                </TouchableOpacity>
-              </View>
-              <View style={[styles.reactRow, { borderTopColor: theme.border }]}>
-                {quickReactions.map((r) => (
-                  <TouchableOpacity
-                    key={r}
-                    onPress={() => doReact(r)}
-                    style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
-                    accessibilityLabel={`React ${r}`}
-                  >
-                    <ColorEmoji style={{ fontSize: fs(17) }}>{r}</ColorEmoji>
-                  </TouchableOpacity>
-                ))}
-                <TouchableOpacity
-                  onPress={() => setShowMenu(true)}
-                  style={[styles.reactBtn, { backgroundColor: theme.primaryLight }]}
-                  accessibilityLabel="More media actions"
-                >
-                  <Icon name="add" size={18} color={theme.primary} />
-                </TouchableOpacity>
-                <View style={{ flex: 1 }} />
-                <TouchableOpacity onPress={download} disabled={saving} style={styles.dlBtnSm} accessibilityLabel="Download media">
-                  {saving ? <ActivityIndicator color="#fff" size="small" /> : <Icon name="download" size={16} color={theme.primary} />}
-                </TouchableOpacity>
-              </View>
-            </View>
-          )
-        )}
+        {drawMode && <View style={styles.bottomOverlay}>{drawToolbar}</View>}
 
         {showMenu && !drawMode && (
           <View style={styles.menuOverlay}>
@@ -685,29 +618,26 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
 const styles = StyleSheet.create({
   container: { flex: 1 },
   topBar: {
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5,
     flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs(10), paddingTop: fs(44), paddingBottom: fs(10),
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
   topBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center' },
   topTitle: { color: '#fff', fontSize: fs(15), fontWeight: '700', maxWidth: SCREEN_W - fs(140) },
   topSub: { color: 'rgba(255,255,255,0.7)', fontSize: fs(12), marginTop: 2 },
-  slide: { width: SCREEN_W, height: '100%', alignItems: 'center', justifyContent: 'center' },
-  video: { width: SCREEN_W, height: SCREEN_H - 180 },
+  slide: { width: SCREEN_W, height: SCREEN_H, alignItems: 'center', justifyContent: 'center' },
+  video: { width: SCREEN_W, height: SCREEN_H },
   vidError: { alignItems: 'center', justifyContent: 'center' },
   vidFallback: { flexDirection: 'row', alignItems: 'center', marginTop: 16, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
   vidPosterWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', width: SCREEN_W },
   vidPlayBig: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.45)', borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)' },
   imgError: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   vidLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 3 },
-  zoomWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  zoomRoot: { flex: 1, width: SCREEN_W, height: SCREEN_H, overflow: 'hidden' },
+  zoomWrap: { flex: 1, width: SCREEN_W, height: SCREEN_H, alignItems: 'center', justifyContent: 'center' },
   zoomImg: { height: '100%' },
   imgLoading: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  bottomBar: { paddingVertical: 8, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.1)' },
-  replyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  replyInput: { flex: 1, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, fontSize: fs(14) },
-  replySendBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  reactRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, gap: 8 },
-  reactBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  dlBtnSm: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
+  bottomOverlay: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 5 },
   vidCtrlWrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'flex-end', paddingBottom: 10, alignItems: 'center' },
   vidCenterCtrl: { position: 'absolute', top: '42%', width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)' },
   vidCtrlRow: { flexDirection: 'row', alignItems: 'center', width: '100%', paddingHorizontal: 12, paddingTop: 10 },

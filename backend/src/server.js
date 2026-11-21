@@ -560,8 +560,9 @@ app.get('/api/youtube/feed', authMiddleware, async (req, res) => {
     const seeds = parseSeedList(req.query.seeds);
     const exclude = parseSeedList(req.query.exclude).filter((v) => YTID.test(v));
     const nonce = Number(req.query.nonce) || 0;
+    const force = req.query.refresh === 'true' || req.query.force === 'true';
     try {
-      const rec = await recommendedFeed(username, seeds, exclude, nonce, pageToken);
+      const rec = await recommendedFeed(username, seeds, exclude, nonce, pageToken, force);
       return res.json({
         videos: rec.videos.map((v) => ({
           videoId: v.videoId,
@@ -744,17 +745,21 @@ function shuffleInPlace(list) {
   return list;
 }
 
-async function recommendedFeed(username, seeds, exclude, nonce, pageToken) {
+async function recommendedFeed(username, seeds, exclude, nonce, pageToken, force = false) {
   const key = (seeds.length ? seeds.slice(0, 8) : REC_DEFAULT_SEEDS).join('|').toLowerCase();
   const continuation = typeof pageToken === 'string' && pageToken.startsWith('rec:');
+  const requestedIdx = continuation ? parseInt(String(pageToken).slice(4), 10) || 0 : 0;
   let st = recState.get(username);
-  let rebuild = !continuation;
-  if (!st || st.key !== key || Date.now() - st.at > REC_TTL_MS) {
+  const sameKey = !!st && st.key === key;
+  if (!sameKey) {
     st = { key, pool: [], idx: 0, at: Date.now(), served: new Set() };
     recState.set(username, st);
-    rebuild = true;
   }
-  if (!rebuild && st.idx >= st.pool.length) rebuild = true;
+  // Normal opens and background refreshes reuse the fresh pool and just hand
+  // back the next slice. Only an explicit refresh pays for new search calls.
+  const fresh = sameKey && Date.now() - st.at <= REC_TTL_MS && st.pool.length > 0;
+  let rebuild = !fresh || st.idx >= st.pool.length;
+  if (force) rebuild = true;
 
   if (rebuild) {
     const queries = recQueries(seeds, nonce);
@@ -797,7 +802,7 @@ async function recommendedFeed(username, seeds, exclude, nonce, pageToken) {
       } catch (e) { /* ignore */ }
     }
     st.pool = items;
-    st.idx = 0;
+    st.idx = Math.min(requestedIdx, st.pool.length);
     st.at = Date.now();
   }
 
@@ -806,7 +811,7 @@ async function recommendedFeed(username, seeds, exclude, nonce, pageToken) {
   if (st.served.size > 400) st.served = new Set([...st.served].slice(-300));
   st.idx += slice.length;
   const hasMore = st.idx < st.pool.length;
-  return { videos: slice, nextToken: hasMore ? `rec:${st.idx}` : null, hasMore, cached: false };
+  return { videos: slice, nextToken: hasMore ? `rec:${st.idx}` : null, hasMore, cached: !rebuild };
 }
 
 app.get('/api/yt/search', authMiddleware, async (req, res) => {
@@ -876,11 +881,12 @@ app.get('/api/yt/subfeed', authMiddleware, async (req, res) => {
     if (!ids.length) return res.json({ items: [], hasMore: false });
     const per = Math.max(1, Math.min(6, Number(req.query.per) || 4));
     const cap = Math.max(1, Math.min(40, Number(req.query.cap) || 24));
+    const skipCache = req.query.refresh === 'true';
     const out = [];
     for (let i = 0; i < ids.length; i += 4) {
       await Promise.all(ids.slice(i, i + 4).map(async (cid) => {
         try {
-          const c = await yt.channel(cid, 'videos', null, true);
+          const c = await yt.channel(cid, 'videos', null, skipCache);
           const items = (c.items || []).filter((x) => x.type === 'video').slice(0, per);
           if (c.channelTitle || c.avatar) {
             items.forEach((x) => {
@@ -1618,13 +1624,19 @@ app.post('/api/shorts/refresh', authMiddleware, async (req, res) => {
     const category = String(body.category || 'trending').slice(0, 30);
     const seeds = parseSeedList(body.seeds).slice(0, 8);
     const exclude = parseIdList(body.exclude);
-    const nonce = String(body.nonce || body.requestId || '').slice(0, 80) || String(Date.now());
+    const rawNonce = String(body.nonce || body.requestId || '');
+    const nonce = rawNonce.slice(0, 80) || String(Date.now());
+    const force = body.force === true || body.force === 'true'
+      || body.refresh === true || body.refresh === 'true'
+      || req.query.force === 'true'
+      || /^(refresh|tick)-/.test(rawNonce);
     const result = await shortsFeed.cycle(category, {
       seeds,
       exclude,
       nonce,
       key: (req.user && req.user.username) || 'anon',
-      skipCache: true,
+      skipCache: force,
+      force,
     });
     res.json({
       cycleId: result.cycleId,

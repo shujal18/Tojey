@@ -34,9 +34,12 @@ const SEEN_MAX_IDS = 200;
 const MAX_STREAM_CACHE = 12;
 const QUALITY_STORAGE_KEY = '@tojey_reels_quality';
 const SPEED_STORAGE_KEY = '@tojey_reels_speed';
+const CYCLE_CACHE_KEY = '@tojey_reels_cycle_cache_v1';
+const CYCLE_CACHE_TTL = 10 * 60 * 1000;
+const OPEN_NONCE = 'open-trending';
 
 const QUALITY_OPTIONS = [
-  { label: 'Auto', value: 'auto', maxHeight: 1080 },
+  { label: 'Auto', value: 'auto', maxHeight: 720 },
   { label: '1080p', value: '1080', maxHeight: 1080 },
   { label: '720p', value: '720', maxHeight: 720 },
   { label: '480p', value: '480', maxHeight: 480 },
@@ -81,7 +84,7 @@ function mediaType(kind) {
 
 function maxHeightFor(value) {
   const found = QUALITY_OPTIONS.find((q) => q.value === value);
-  return found ? found.maxHeight : 1080;
+  return found ? found.maxHeight : 720;
 }
 
 async function readJson(response) {
@@ -185,6 +188,33 @@ async function savePreference(key, value) {
   } catch (e) {}
 }
 
+async function loadCachedCycle(userId) {
+  try {
+    const raw = await AsyncStorage.getItem(`${CYCLE_CACHE_KEY}/${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.videos) || !parsed.videos.length) return null;
+    if (Date.now() - Number(parsed.savedAt || 0) > CYCLE_CACHE_TTL) return null;
+    const ids = new Set();
+    const videos = [];
+    for (const rawItem of parsed.videos) {
+      const id = sanitizeVideoId(rawItem && rawItem.videoId);
+      if (!id || ids.has(id)) continue;
+      ids.add(id);
+      videos.push({ ...rawItem, videoId: id });
+    }
+    return videos.length ? videos : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveCachedCycle(userId, videos) {
+  try {
+    await AsyncStorage.setItem(`${CYCLE_CACHE_KEY}/${userId}`, JSON.stringify({ savedAt: Date.now(), videos }));
+  } catch (e) {}
+}
+
 export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const { theme } = useTheme();
   const category = 'trending';
@@ -203,7 +233,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const [activePaused, setActivePaused] = useState(false);
   const [resolved, setResolved] = useState(() => new Map());
   const [streamEpoch, setStreamEpoch] = useState(() => new Map());
-  const [quality, setQuality] = useState('auto');
+  const [quality, setQuality] = useState('720');
   const [speed, setSpeed] = useState(1);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -220,7 +250,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const lastRecordedRef = useRef(null);
   const seenSetRef = useRef(new Set());
   const seenLoadedRef = useRef(false);
-  const qualityRef = useRef('auto');
+  const qualityRef = useRef('720');
   const speedRef = useRef(1);
   const streamCacheRef = useRef(new Map());
   const inflightStreamRef = useRef(new Map());
@@ -264,11 +294,11 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   useEffect(() => {
     let alive = true;
     Promise.all([
-      loadPreference(QUALITY_STORAGE_KEY, 'auto'),
+      loadPreference(QUALITY_STORAGE_KEY, '720'),
       loadPreference(SPEED_STORAGE_KEY, '1'),
     ]).then(([savedQuality, savedSpeed]) => {
       if (!alive) return;
-      const nextQuality = QUALITY_OPTIONS.some((q) => q.value === savedQuality) ? savedQuality : 'auto';
+      const nextQuality = QUALITY_OPTIONS.some((q) => q.value === savedQuality) ? savedQuality : '720';
       const parsedSpeed = Number(savedSpeed);
       const nextSpeed = SPEED_OPTIONS.includes(parsedSpeed) ? parsedSpeed : 1;
       qualityRef.current = nextQuality;
@@ -296,7 +326,9 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   const markSeenIds = useCallback((ids) => {
     if (!ids || !ids.length) return;
     const set = seenSetRef.current;
+    const before = set.size;
     ids.forEach((id) => { if (id) set.add(id); });
+    if (set.size === before) return;
     if (set.size > SEEN_MAX_IDS) {
       const arr = Array.from(set);
       seenSetRef.current = new Set(arr.slice(arr.length - SEEN_MAX_IDS));
@@ -320,11 +352,15 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
 
     const promise = (async () => {
       const maxHeight = maxHeightFor(qualityRef.current);
-      const playback = await getProxyPlayback(id, token, {
+      const streamOpts = {
         maxHeight,
         skipCache: opts.retry === true,
         retry: opts.retry === true,
-      });
+        // getShortStream honours attempts; timeout is ignored when unsupported.
+        attempts: 1,
+        timeout: 8000,
+      };
+      const playback = await getProxyPlayback(id, token, streamOpts);
       const needsMuxed = !!playback.audioUrl && playback.videoHasAudio === false;
       let url = needsMuxed ? mediaProxyUrl(id, token, 'best', maxHeight) : playback.videoUrl;
       const isProxy = needsMuxed || playback.source === 'proxy' || /\/api\/yt\//.test(String(url));
@@ -445,6 +481,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
     loadingRef.current = true;
 
     const hasList = videosRef.current.length > 0;
+    const background = !!opts.background && hasList;
     if (hasList) setRefreshing(true);
     else setLoading(true);
     setError(null);
@@ -471,7 +508,7 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
         ...failedVideoIdsRef.current,
         ...failedStreamsRef.current,
       ])).slice(-300);
-      const nonce = opts.nonce || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const nonce = opts.nonce || OPEN_NONCE;
 
       const { data, usedFallback } = await fetchShortsPayload(SERVER_URL, {
         category,
@@ -491,24 +528,48 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
       }
       if (!unique.length) throw new Error(data.message || 'No reels available right now');
 
-      videosRef.current = unique;
-      setVideos(unique);
+      saveCachedCycle(user.id, unique);
       setCycleId(usedFallback ? null : (data.cycleId || null));
       setUsingFeedFallback(usedFallback);
       failedVideoIdsRef.current.clear();
       failedStreamsRef.current.clear();
       playErrorTriesRef.current.clear();
-      streamCacheRef.current.clear();
       inflightStreamRef.current.clear();
-      setResolved(new Map());
-      thumbAnims.current.clear();
 
-      activeIndexRef.current = 0;
-      setActiveIdx(0);
-      setActivePaused(false);
-      pendingSkipRef.current = false;
-      scrollOffsetReset();
-      if (primeWindowRef.current) primeWindowRef.current(0);
+      if (background) {
+        const activeItem = videosRef.current[activeIndexRef.current];
+        const preservedIndex = activeItem ? unique.findIndex((v) => v.videoId === activeItem.videoId) : -1;
+        const nextIds = new Set(unique.map((v) => v.videoId));
+        streamCacheRef.current.forEach((_, id) => {
+          if (!nextIds.has(id)) streamCacheRef.current.delete(id);
+        });
+        setResolved((prev) => {
+          const next = new Map();
+          prev.forEach((value, id) => { if (nextIds.has(id)) next.set(id, value); });
+          return next;
+        });
+        videosRef.current = unique;
+        setVideos(unique);
+        const nextIndex = preservedIndex >= 0 ? preservedIndex : 0;
+        activeIndexRef.current = nextIndex;
+        setActiveIdx(nextIndex);
+        setTimeout(() => {
+          if (flatListRef.current) {
+            try { flatListRef.current.scrollToOffset({ offset: nextIndex * ITEM_HEIGHT, animated: false }); } catch (e) {}
+          }
+        }, 0);
+      } else {
+        videosRef.current = unique;
+        setVideos(unique);
+        streamCacheRef.current.clear();
+        thumbAnims.current.clear();
+        activeIndexRef.current = 0;
+        setActiveIdx(0);
+        setActivePaused(false);
+        pendingSkipRef.current = false;
+        scrollOffsetReset();
+        if (primeWindowRef.current) primeWindowRef.current(0);
+      }
       setToast(usedFallback ? 'Feed fallback active' : (data.message || ''));
     } catch (e) {
       if (!isMountedRef.current || requestId !== requestIdRef.current) return;
@@ -667,18 +728,36 @@ export default function ReelsScreen({ token, user, refreshTick = 0, onBack }) {
   }, []);
 
   useEffect(() => {
-    if (isMountedRef.current) {
+    let alive = true;
+    const bootstrap = async () => {
+      if (!isMountedRef.current) return;
       requestIdRef.current += 1;
       loadingRef.current = false;
-      setVideos([]);
-      videosRef.current = [];
-      setResolved(new Map());
-      streamCacheRef.current.clear();
-      inflightStreamRef.current.clear();
-      failedStreamsRef.current.clear();
-      setActivePaused(false);
-      if (fetchCycleRef.current) fetchCycleRef.current({ nonce: `open-${Date.now()}` });
-    }
+      const cached = await loadCachedCycle(user.id);
+      if (!alive || !isMountedRef.current) return;
+      if (cached && cached.length) {
+        videosRef.current = cached;
+        setVideos(cached);
+        setLoading(false);
+        setError(null);
+        activeIndexRef.current = 0;
+        setActiveIdx(0);
+        setActivePaused(false);
+        scrollOffsetReset();
+        if (primeWindowRef.current) primeWindowRef.current(0);
+      } else {
+        setVideos([]);
+        videosRef.current = [];
+        setResolved(new Map());
+        streamCacheRef.current.clear();
+        inflightStreamRef.current.clear();
+        failedStreamsRef.current.clear();
+        setActivePaused(false);
+      }
+      if (fetchCycleRef.current) fetchCycleRef.current({ nonce: OPEN_NONCE, background: !!cached });
+    };
+    bootstrap();
+    return () => { alive = false; };
   }, []);
 
   useEffect(() => {

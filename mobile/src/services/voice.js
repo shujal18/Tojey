@@ -14,9 +14,9 @@ let playbackToken = 0;
 const AUDIO_SET = {
   OutputFormatAndroid: 2,
   AudioEncoderAndroid: 3,
-  AudioSamplingRateAndroid: 44100,
+  AudioSamplingRateAndroid: 48000,
   AudioChannelsAndroid: 1,
-  AudioEncodingBitRateAndroid: 64000,
+  AudioEncodingBitRateAndroid: 96000,
 };
 
 function getRecorder() {

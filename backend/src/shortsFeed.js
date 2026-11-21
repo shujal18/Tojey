@@ -351,7 +351,11 @@ function cleanIds(raw) {
 
 function cycle(category, opts = {}) {
   const cat = isKnownCategory(category) ? category : 'trending';
-  const requestKey = `${cat}|${opts.key || ''}|${opts.nonce || ''}`;
+  const explicit = opts.force === true || /^(refresh|tick)-/.test(String(opts.nonce || ''));
+  // Normal opens share one dedupe key so repeated taps reuse the same cycle
+  // instead of regenerating because each client supplied a unique nonce.
+  const nonceKey = explicit ? String(opts.nonce || Date.now()) : 'open';
+  const requestKey = `${cat}|${opts.key || ''}|${nonceKey}`;
   const existing = cycleInflight.get(requestKey);
   if (existing && Date.now() - existing.at < CYCLE_TTL_MS) return existing.promise;
   const promise = generateCycle(cat, opts).catch((e) => {

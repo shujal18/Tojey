@@ -68,13 +68,18 @@ let subs = [];
 let bookmarks = [];
 let playlists = {}; // name -> [normalized item]
 const listeners = [];
+let initPromise = null;
 
-export async function initLibrary() {
-  history = await load(KEYS.history, []);
-  subs = await load(KEYS.subs, []);
-  bookmarks = await load(KEYS.bookmarks, []);
-  playlists = await load(KEYS.playlists, {});
-  emit();
+export async function initLibrary(force = false) {
+  if (initPromise && !force) return initPromise;
+  initPromise = (async () => {
+    history = await load(KEYS.history, []);
+    subs = await load(KEYS.subs, []);
+    bookmarks = await load(KEYS.bookmarks, []);
+    playlists = await load(KEYS.playlists, {});
+    emit();
+  })();
+  return initPromise;
 }
 
 export function subscribeLibrary(fn) {

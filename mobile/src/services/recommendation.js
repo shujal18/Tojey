@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DeviceEventEmitter } from 'react-native';
+import { AppState, DeviceEventEmitter } from 'react-native';
 
 export const SEARCH_HISTORY_KEY = 'tojey_search_history_v1';
 export const WATCH_HISTORY_KEY = 'tojey_watch_history_v1';
@@ -7,8 +7,22 @@ export const RECOMMENDATION_CHANGED_EVENT = 'tojey_recommendation_changed';
 
 const VIDEO_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
 const SEARCH_HISTORY_MAX = 12;
+const READ_CACHE_TTL = 3 * 1000;
+const WATCH_WRITE_DEBOUNCE = 1000;
+const WATCH_HISTORY_MAX = 250;
+
+const readCache = new Map(); // key -> { at, value }
+let watchWriteTimer = null;
+let pendingWatch = null;
+
+function invalidateReadCache(key) {
+  readCache.delete(key);
+  readCache.delete(`@${key}`);
+}
 
 async function readJSON(key) {
+  const hit = readCache.get(key);
+  if (hit && Date.now() - hit.at < READ_CACHE_TTL) return hit.value;
   const values = [];
   for (const k of [key, `@${key}`]) {
     try {
@@ -18,6 +32,7 @@ async function readJSON(key) {
       if (Array.isArray(parsed)) values.push(...parsed);
     } catch (e) {}
   }
+  readCache.set(key, { at: Date.now(), value: values });
   return values;
 }
 
@@ -30,6 +45,26 @@ export function subscribeRecommendationChanged(handler) {
   const subscription = DeviceEventEmitter.addListener(RECOMMENDATION_CHANGED_EVENT, handler);
   return () => subscription.remove();
 }
+
+// Watch-history writes are batched so scrolling through a feed does not hammer
+// AsyncStorage. Pending entries are visible to reads immediately via the cache,
+// and are flushed on background or when the feed unmounts.
+export function flushWatchWrites() {
+  if (watchWriteTimer) {
+    clearTimeout(watchWriteTimer);
+    watchWriteTimer = null;
+  }
+  if (!pendingWatch) return;
+  const value = pendingWatch;
+  pendingWatch = null;
+  AsyncStorage.setItem(WATCH_HISTORY_KEY, JSON.stringify(value)).catch(() => {});
+  readCache.set(WATCH_HISTORY_KEY, { at: Date.now(), value });
+  emitChanged();
+}
+
+AppState.addEventListener('change', (state) => {
+  if (state === 'background' || state === 'inactive') flushWatchWrites();
+});
 
 export async function getRecentSearches(limit = SEARCH_HISTORY_MAX) {
   const searches = (await readJSON(SEARCH_HISTORY_KEY)).filter((s) => typeof s === 'string');
@@ -54,6 +89,8 @@ export async function addRecentSearch(query) {
   try {
     await AsyncStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
   } catch (e) {}
+  invalidateReadCache(SEARCH_HISTORY_KEY);
+  readCache.set(SEARCH_HISTORY_KEY, { at: Date.now(), value: next });
   emitChanged();
   return next;
 }
@@ -63,6 +100,7 @@ export async function clearRecentSearches() {
     await AsyncStorage.removeItem(SEARCH_HISTORY_KEY);
     await AsyncStorage.removeItem(`@${SEARCH_HISTORY_KEY}`);
   } catch (e) {}
+  invalidateReadCache(SEARCH_HISTORY_KEY);
   emitChanged();
 }
 
@@ -98,9 +136,17 @@ export async function getWatchedVideoIds(limit = 250) {
 export async function recordWatched(entry) {
   if (!entry || !VIDEO_ID_RE.test(String(entry.videoId || ''))) return;
   const existing = (await readJSON(WATCH_HISTORY_KEY)).filter((w) => w && typeof w === 'object');
-  const next = [{ ...entry, watchedAt: Date.now() }, ...existing.filter((w) => w.videoId !== entry.videoId)].slice(0, 250);
-  try {
-    await AsyncStorage.setItem(WATCH_HISTORY_KEY, JSON.stringify(next));
-  } catch (e) {}
-  emitChanged();
+  if (pendingWatch && pendingWatch[0] && pendingWatch[0].videoId === entry.videoId) return;
+  const next = [
+    { ...entry, watchedAt: Date.now() },
+    ...existing.filter((w) => w.videoId !== entry.videoId),
+  ].slice(0, WATCH_HISTORY_MAX);
+  pendingWatch = next;
+  readCache.set(WATCH_HISTORY_KEY, { at: Date.now(), value: next });
+  if (!watchWriteTimer) {
+    watchWriteTimer = setTimeout(() => {
+      watchWriteTimer = null;
+      flushWatchWrites();
+    }, WATCH_WRITE_DEBOUNCE);
+  }
 }

@@ -48,6 +48,7 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   const timersRef = useRef(new Set());
 
   const switchTab = useCallback((next) => {
+    if (tabRef.current === next) return;
     setTab((prev) => {
       if (prev === next) return prev;
       tabStackRef.current = [...tabStackRef.current.filter((t) => t !== next), prev].slice(-10);

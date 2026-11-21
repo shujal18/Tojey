@@ -14,7 +14,7 @@ import { fs } from '../utils/size';
 import { enqueue, subscribe, thumbUrl } from '../services/downloadsStore';
 import { VideoCard } from '../components/YouTubeCards';
 import { initLibrary, subscribeLibrary, storeSnapshot } from '../services/library';
-import { getRecommendationSeeds, getWatchedVideoIds, recordWatched, subscribeRecommendationChanged } from '../services/recommendation';
+import { flushWatchWrites, getRecommendationSeeds, getWatchedVideoIds, recordWatched, subscribeRecommendationChanged } from '../services/recommendation';
 import YoutubePlayerModal from './YoutubePlayerModal';
 import YoutubeSearchScreen from './YoutubeSearchScreen';
 import YoutubeChannelScreen from './YoutubeChannelScreen';
@@ -38,9 +38,23 @@ const FEED_CACHE_TTL = 5 * 60 * 1000;
 const STRIP_CACHE_TTL = 10 * 60 * 1000;
 const SUBFEED_TTL = 5 * 60 * 1000;
 const REFRESH_COOLDOWN = 20 * 1000;
+const REC_CHANGED_DEBOUNCE = 45 * 1000;
 const MAX_SUB_IDS = 15;
 const MAX_STRIP = 8;
 const CACHE_WRITES_CAP = 24;
+const memoryCache = new Map();
+
+async function readStored(key) {
+  if (memoryCache.has(key)) return memoryCache.get(key);
+  const raw = await AsyncStorage.getItem(key);
+  memoryCache.set(key, raw);
+  return raw;
+}
+
+async function writeStored(key, payload) {
+  memoryCache.set(key, payload);
+  try { await AsyncStorage.setItem(key, payload); } catch (e) {}
+}
 
 async function getSignals() {
   try {
@@ -113,6 +127,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
   const subLoadedRef = useRef(false);
   const loadMoreInFlightRef = useRef(false);
   const lastInitialWatchRef = useRef(null);
+  const recChangedRef = useRef({ timer: null, lastRun: 0 });
 
   const [view, setView] = useState('home');
   const [channelRoute, setChannelRoute] = useState(null);
@@ -129,6 +144,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
       shortsInFlightRef.current = false;
       subInFlightRef.current = false;
       loadMoreInFlightRef.current = false;
+      flushWatchWrites();
     };
   }, []);
 
@@ -223,11 +239,13 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
       if (!aliveRef.current) return;
       const replace = !!opts.replace;
       const background = !!opts.background;
-      const key = `${cat}|${pageToken || ''}|${replace ? 'r' : 'p'}`;
+      const force = !!opts.force;
+      const key = `${cat}|${pageToken || ''}|${replace ? 'r' : 'p'}|${force ? 'f' : ''}`;
       if (inFlightRef.current.has(key)) return;
       inFlightRef.current.add(key);
       try {
         if (replace) requestIdRef.current += 1;
+        if (force) nonceRef.current += 1;
         const reqId = requestIdRef.current;
         try {
           if (aliveRef.current) {
@@ -235,13 +253,13 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
             if (replace && !background) setLoading(true);
             else if (!replace) setLoadingMore(true);
           }
-          const q = [`category=${encodeURIComponent(cat)}`, `refresh=${opts.refresh ? 'true' : 'false'}`];
+          const q = [`category=${encodeURIComponent(cat)}`, `refresh=${force ? 'true' : 'false'}`];
           if (pageToken) q.push(`pageToken=${encodeURIComponent(pageToken)}`);
           if (cat === 'recommended') {
             const { seeds, watched } = await getSignals();
             if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
             if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
-            q.push(`nonce=${replace ? nonceRef.current++ : nonceRef.current}`);
+            q.push(`nonce=${nonceRef.current}`);
           }
           const res = await fetch(`${SERVER_URL}/api/youtube/feed?${q.join('&')}`, { headers: authHeaders });
           const data = await res.json();
@@ -261,7 +279,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
               ts: Date.now(),
             });
             if (rememberWrite(cacheWritesRef, cacheKey, payload)) {
-              try { await AsyncStorage.setItem(cacheKey, payload); } catch (e) {}
+              await writeStored(cacheKey, payload);
             }
           }
         } catch (e) {
@@ -285,7 +303,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
     let active = true;
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(`${FEED_CACHE_KEY}_${category}`);
+        const raw = await readStored(`${FEED_CACHE_KEY}_${category}`);
         if (!active || !aliveRef.current) return;
         const cached = parseCache(raw);
         if (cached && Array.isArray(cached.videos) && cached.videos.length) {
@@ -306,26 +324,42 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
   useEffect(() => {
     if (refreshTick === refreshTickRef.current) return;
     refreshTickRef.current = refreshTick;
-    fetchPage(category, null, { replace: true, refresh: true, background: true });
+    fetchPage(category, null, { replace: true, background: true });
   }, [refreshTick, category, fetchPage]);
 
-  useEffect(() => subscribeRecommendationChanged(() => {
-    if (!aliveRef.current) return;
-    if (category === 'recommended') fetchPage(category, null, { replace: true, refresh: true, background: true });
-    setShortsSignalTick((tick) => tick + 1);
-  }), [category, fetchPage]);
+  useEffect(() => {
+    const handler = () => {
+      if (!aliveRef.current) return;
+      const state = recChangedRef.current;
+      if (state.timer) return;
+      const delay = Math.max(0, REC_CHANGED_DEBOUNCE - (Date.now() - state.lastRun));
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        state.lastRun = Date.now();
+        if (!aliveRef.current) return;
+        if (category === 'recommended') fetchPage(category, null, { replace: true, background: true });
+        setShortsSignalTick((tick) => tick + 1);
+      }, delay);
+    };
+    const unsub = subscribeRecommendationChanged(handler);
+    return () => {
+      unsub();
+      if (recChangedRef.current.timer) clearTimeout(recChangedRef.current.timer);
+      recChangedRef.current.timer = null;
+    };
+  }, [category, fetchPage]);
 
   useEffect(() => {
     let active = true;
     const authChanged = shortsAuthRef.current !== null && shortsAuthRef.current !== authHeaders;
     shortsAuthRef.current = authHeaders;
-    const tickChanged = refreshTick !== shortsTickRef.current || shortsSignalTick !== shortsSignalTickRef.current;
+    const tickChanged = refreshTick !== shortsTickRef.current;
     const forced = tickChanged || authChanged;
     shortsTickRef.current = refreshTick;
     shortsSignalTickRef.current = shortsSignalTick;
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(STRIP_CACHE_KEY);
+        const raw = await readStored(STRIP_CACHE_KEY);
         const cached = parseCache(raw);
         if (active && aliveRef.current && Array.isArray(cached?.items)) {
           setShortsStrip(cached.items.slice(0, MAX_STRIP));
@@ -349,7 +383,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
         shortsFetchedAtRef.current = Date.now();
         const payload = JSON.stringify({ items, ts: Date.now() });
         if (rememberWrite(cacheWritesRef, STRIP_CACHE_KEY, payload)) {
-          try { await AsyncStorage.setItem(STRIP_CACHE_KEY, payload); } catch (e) {}
+          await writeStored(STRIP_CACHE_KEY, payload);
         }
       } catch (e) {} finally {
         shortsInFlightRef.current = false;
@@ -380,7 +414,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
       if (!subLoadedRef.current) {
         subLoadedRef.current = true;
         try {
-          const raw = await AsyncStorage.getItem(SUBFEED_CACHE_KEY);
+          const raw = await readStored(SUBFEED_CACHE_KEY);
           const cached = parseCache(raw);
           if (active && aliveRef.current && Array.isArray(cached?.items)) {
             setSubFeed(cached.items);
@@ -402,7 +436,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
         subFetchedAtRef.current = Date.now();
         const payload = JSON.stringify({ items, ts: Date.now() });
         if (rememberWrite(cacheWritesRef, SUBFEED_CACHE_KEY, payload)) {
-          try { await AsyncStorage.setItem(SUBFEED_CACHE_KEY, payload); } catch (e) {}
+          await writeStored(SUBFEED_CACHE_KEY, payload);
         }
       } catch (e) {} finally {
         subInFlightRef.current = false;
@@ -599,7 +633,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
     loadingMore ? <ActivityIndicator color={theme.primary} style={{ marginVertical: 16 }} /> : null
   ), [loadingMore, theme.primary]);
 
-  const retry = useCallback(() => fetchPage(category, null, { replace: true }), [category, fetchPage]);
+  const retry = useCallback(() => fetchPage(category, null, { replace: true, force: true }), [category, fetchPage]);
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>

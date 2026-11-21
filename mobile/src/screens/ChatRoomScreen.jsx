@@ -1372,44 +1372,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     sendText();
   };
 
-  const sendReplyText = useCallback((target, content) => {
-    const c = (content || '').trim();
-    if (!target || !c) return;
-    const clientId = `tmp-${currentUser.id}-${Date.now()}`;
-    const localMsg = {
-      id: clientId,
-      sender_id: currentUser.id,
-      type: 'TEXT',
-      content: c,
-      created_at: new Date().toISOString(),
-      status: 'SENT',
-      reply_to: target.id || null,
-      reactions: [],
-      client_id: clientId,
-      _tempId: clientId,
-      _local: true,
-      _pending: true,
-    };
-    const replyTo = target.id || null;
-    pendingScrollToBottomRef.current = true;
-    atBottomRef.current = true;
-    atBottomNearRef.current = true;
-    setAtBottomNear(true);
-    pendingCountRef.current = 0;
-    setPendingCount(0);
-    if (socketReady()) {
-      setMessages((prev) => [...prev, localMsg]);
-      scrollToLatestAnimated();
-      socket.emit('message:send', { otherUserId, type: 'TEXT', content: c, replyTo, clientId }, (ack) => {
-        if (ack && ack.ok) applyAck(clientId, ack.message, clientId);
-      });
-    } else {
-      setMessages((prev) => [...prev, { ...localMsg, _queued: true }]);
-      scrollToLatestAnimated();
-      enqueueOutgoing(currentUser.id, otherUserId, { clientId, type: 'TEXT', content: c, replyTo });
-    }
-  }, [socket, otherUserId, currentUser.id, scrollToLatestAnimated, applyAck]);
-
   const queueVoiceItem = useCallback(async (item) => {
     const queue = await readVoiceQueue();
     await writeVoiceQueue(queue.filter((it) => it.clientId !== item.clientId).concat(item));
@@ -1575,7 +1537,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       setRecWaveform(Array.from({ length: REC_BARS }, () => 0.14));
       setRecording(true);
       setShowAttach(false);
-      setShowEmoji(false);
       recListenUnsub.current = trackVoiceRecording((e) => {
         if (!e) return;
         recDurationRef.current = Math.max(recDurationRef.current, e.elapsedMs || e.currentPosition || 0);
@@ -1594,6 +1555,27 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       });
     } catch (e) {
       console.error('startRecording failed', e);
+      const startedPath = voicePathRef.current;
+      voicePathRef.current = null;
+      voiceNameRef.current = null;
+      if (recListenUnsub.current) {
+        recListenUnsub.current();
+        recListenUnsub.current = null;
+      }
+      try {
+        const stopped = await stopVoiceRecording();
+        const leakedPath = (stopped && stopped.path) || startedPath;
+        if (leakedPath) deleteVoiceFile(leakedPath).catch(() => {});
+      } catch (stopErr) {
+        console.warn('recording cleanup failed', stopErr);
+        if (startedPath) deleteVoiceFile(startedPath).catch(() => {});
+      }
+      recDurationRef.current = 0;
+      recPausedRef.current = false;
+      recStoppingRef.current = false;
+      setRecording(false);
+      setRecPaused(false);
+      setRecordTime(0);
       Alert.alert('Could not start recording', voiceErrorMessage(e));
     }
   };
@@ -2591,7 +2573,6 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           onClose={() => setMediaViewer(null)}
           onReact={reactTo}
           onReply={(item) => setReplyingTo(item)}
-          onSendReplyMessage={sendReplyText}
           onDelete={(item, mode) => deleteMessage(item, mode)}
           onSendDrawing={uploadDrawing}
         />
@@ -2758,7 +2739,7 @@ const VoiceMessageBubble = memo(function VoiceMessageBubble({
         <View style={[styles.voicePlay, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : theme.primaryLight }]}>
           <Icon name={voicePlaying ? 'pause' : 'play'} size={18} color={isSent ? '#fff' : theme.primary} />
         </View>
-        <View style={[styles.voiceWaveWrap, { marginLeft: isSent ? 0 : 8, marginRight: isSent ? 8 : 0 }]}>
+        <View style={[styles.voiceWaveWrap, { marginLeft: isSent ? 0 : 8 }]}>
           <View style={styles.voiceWaveRow}>
             {waveform.bars.map((level, i) => (
               <View
@@ -2781,7 +2762,6 @@ const VoiceMessageBubble = memo(function VoiceMessageBubble({
             {totalMs > 0 ? `${fmtDur(shownMs / 1000)}${voicePlaying ? ` / ${fmtDur(totalMs / 1000)}` : ''}` : '--:--'}
           </Text>
         </View>
-        {isSent && avatar}
       </View>
       {message._uploading && (
         <View style={styles.voiceUploadRow}>
