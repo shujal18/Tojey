@@ -25,6 +25,8 @@ class MainApplication : Application(), ReactApplication {
           list.add(TojeyChatHeadPackage())
           list.add(TojeyBatteryPackage())
           list.add(TojeyPipPackage())
+          list.add(TojeyBrightnessPackage())
+          list.add(TojeyOrientationPackage())
           return list
         }
 

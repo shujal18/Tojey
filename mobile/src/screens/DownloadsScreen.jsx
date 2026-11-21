@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, FlatList, Image, StyleSheet, Modal, ActivityIndicator } from 'react-native';
-import { WebView } from 'react-native-webview';
 import Video from 'react-native-video';
+import TojeyVideoPlayer from '../components/video/TojeyVideoPlayer';
+import { useVideoSession } from '../services/VideoSessionContext';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { subscribe, removeDownload, clearAllDownloads, fmtSize } from '../services/downloadsStore';
-import { OFFLINE_PLAYER_HTML } from './OfflinePlayerHTML';
 
 export default function DownloadsScreen({ onBack }) {
   const { theme } = useTheme();
@@ -119,84 +119,101 @@ function DownloadRow({ item, theme, onPlay, onDelete }) {
 }
 
 function OfflinePlayer({ item, theme, onClose }) {
-  const webRef = useRef(null);
-  const loadedRef = useRef(false);
+  const videoSession = useVideoSession();
+  const audioRef = useRef(null);
+  const playingRef = useRef(true);
+  const audioTimeRef = useRef(0);
+  const suppressSeekRef = useRef(0);
+  const [audioPaused, setAudioPaused] = useState(false);
+  const [audioRate, setAudioRate] = useState(1);
   const [audioError, setAudioError] = useState(false);
+  const [epoch, setEpoch] = useState(0);
 
-  if (item.kind === 'audio' && item.audioPath) {
-    return (
-      <Modal visible transparent={false} animationType="fade" onRequestClose={onClose}>
-        <View style={{ flex: 1, backgroundColor: theme.background }}>
-          <View style={[styles.header, { backgroundColor: theme.background }]}>
-            <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
-              <Icon name="arrow-back" size={22} color={theme.text} />
-            </TouchableOpacity>
-            <Text style={[styles.title, { flex: 1, marginHorizontal: 8 }]} numberOfLines={1}>{item.title}</Text>
-            <Icon name="checkmark-circle" size={18} color="#fff" style={{ opacity: 0 }} />
-          </View>
-          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' }}>
-            <Icon name="musical-notes" size={64} color={theme.primaryLight} />
-            <Text style={{ color: theme.textSecondary, fontSize: fs(13), marginTop: 12 }}>
-              Playing audio · {item.channel || 'YouTube'}
-            </Text>
-            {audioError && (
-              <Text style={{ color: theme.danger, fontSize: fs(12), marginTop: 8 }}>Playback error</Text>
-            )}
-            <Video
-              source={{ uri: `file://${item.audioPath}` }}
-              style={{ width: 1, height: 1 }}
-              paused={false}
-              audioOnly
-              playInBackground
-              ignoreSilentSwitch="ignore"
-              repeat
-              onError={() => setAudioError(true)}
-            />
-          </View>
-        </View>
-      </Modal>
-    );
-  }
+  const toUri = (path) => {
+    if (!path) return '';
+    if (/^(file:|content:|http:|https:)/i.test(path)) return path;
+    return `file://${path}`;
+  };
+  const hasVideo = !!item.videoPath;
+  const sourceUri = hasVideo ? toUri(item.videoPath) : toUri(item.audioPath);
+  const audioUri = hasVideo && item.audioPath ? toUri(item.audioPath) : null;
 
-  const load = () => {
-    if (loadedRef.current || !webRef.current) return;
-    loadedRef.current = true;
-    const v = `file://${item.videoPath}`;
-    const a = item.audioPath ? `file://${item.audioPath}` : null;
-    webRef.current.injectJavaScript(
-      `window.__load(${JSON.stringify(v)},${JSON.stringify(a)},${JSON.stringify(item.title)},false); true;`
-    );
+  const retry = () => {
+    setAudioError(false);
+    setAudioPaused(true);
+    setEpoch((value) => value + 1);
+  };
+
+  const handleMinimize = () => {
+    if (audioUri) return;
+    videoSession.openSession({
+      source: { uri: sourceUri },
+      title: item.title,
+      availableQualities: ['Auto'],
+      onRetry: retry,
+    });
+    onClose();
+  };
+
+  const syncAudioTime = (current) => {
+    if (!audioRef.current || audioPaused || Date.now() < suppressSeekRef.current) return;
+    if (Math.abs(audioTimeRef.current - current) > 0.8) {
+      suppressSeekRef.current = Date.now() + 600;
+      audioTimeRef.current = current;
+      audioRef.current.seek(current);
+    }
   };
 
   return (
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: theme.background }}>
-        <View style={[styles.header, { backgroundColor: theme.background }]}>
-          <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
-            <Icon name="arrow-back" size={22} color={theme.text} />
-          </TouchableOpacity>
-          <Text style={[styles.title, { flex: 1, marginHorizontal: 8 }]} numberOfLines={1}>{item.title}</Text>
-          <Icon name="checkmark-circle" size={18} color="#fff" style={{ opacity: 0 }} />
-        </View>
-        <View style={{ flex: 1, backgroundColor: '#000' }}>
-          <WebView
-            ref={webRef}
-            source={{ html: OFFLINE_PLAYER_HTML, baseUrl: 'file:///' }}
-            style={{ flex: 1 }}
-            javaScriptEnabled
-            domStorageEnabled
-            allowFileAccess
-            allowFileAccessFromFileURLs
-            allowUniversalAccessFromFileURLs
-            onLoadEnd={load}
-            onMessage={(e) => {
-              try {
-                console.log('[OfflinePlayer]', e.nativeEvent.data);
-              } catch (err) {}
-            }}
-            androidLayerType="hardware"
-          />
-        </View>
+      <View style={styles.offlineRoot}>
+        <TojeyVideoPlayer
+          key={`${sourceUri}-${epoch}`}
+          source={{ uri: sourceUri }}
+          title={item.title}
+          style={styles.offlineVideo}
+          initialRepeat
+          availableQualities={['Auto']}
+          statusLabel={audioError ? 'Audio track unavailable' : undefined}
+          onPlayChange={(next) => {
+            playingRef.current = !!next;
+            setAudioPaused(!next);
+          }}
+          onSeek={(target) => {
+            const value = Math.max(0, Number(target) || 0);
+            audioTimeRef.current = value;
+            suppressSeekRef.current = Date.now() + 600;
+            if (audioRef.current) audioRef.current.seek(value);
+          }}
+          onRateChange={(rate) => {
+            const value = Number(rate) || 1;
+            setAudioRate(value);
+          }}
+          onTimeUpdate={(payload) => syncAudioTime(Number(payload && payload.currentTime) || 0)}
+          onError={(detail) => { if (audioUri) setAudioError(true); }}
+          onRetry={retry}
+          onMinimize={audioUri ? undefined : handleMinimize}
+          onBack={onClose}
+        />
+        {audioUri ? (
+          <View pointerEvents="none" style={styles.hiddenAudio}>
+            <Video
+              key={`${audioUri}-${epoch}`}
+              ref={audioRef}
+              source={{ uri: audioUri }}
+              paused={audioPaused}
+              rate={audioRate}
+              repeat
+              playInBackground
+              ignoreSilentSwitch="ignore"
+              onProgress={(payload) => {
+                const t = Number(payload && payload.currentTime) || 0;
+                if (t > 0) audioTimeRef.current = t;
+              }}
+              onError={() => setAudioError(true)}
+            />
+          </View>
+        ) : null}
       </View>
     </Modal>
   );
@@ -204,6 +221,9 @@ function OfflinePlayer({ item, theme, onClose }) {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  offlineRoot: { flex: 1, backgroundColor: '#000' },
+  offlineVideo: { flex: 1 },
+  hiddenAudio: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingTop: 10, paddingBottom: 8 },
   title: { fontSize: fs(18), fontWeight: '800' },
   headerBtn: { padding: 6 },

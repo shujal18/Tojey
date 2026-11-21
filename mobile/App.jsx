@@ -11,6 +11,7 @@ import { Icon } from './src/components/AppIcon';
 import IncomingBanner from './src/components/IncomingBanner';
 import WatchTogetherBanner from './src/components/WatchTogetherBanner';
 import { WatchTogetherProvider } from './src/services/WatchTogetherContext';
+import { VideoSessionProvider } from './src/services/VideoSessionContext';
 import { CallProvider } from './src/services/CallContext';
 import { getNotifPrefs } from './src/services/notifications';
 import LoginScreen from './src/screens/LoginScreen';
@@ -526,26 +527,28 @@ function Shell() {
 
   return (
     <WatchTogetherProvider socket={socket} currentUser={session.user}>
-      <CallProvider socket={socket} currentUser={session.user}>
-      <View style={{ flex: 1 }}>
-        {content}
-        {booted && !showLockScreen && !!session && (
-          <IncomingBanner
-            data={incomingBanner}
-            onPress={openBanner}
-            onDismiss={() => setIncomingBanner(null)}
-          />
-        )}
-        {!showLockScreen && <WatchTogetherBanner onOpenVideo={handleWatchVideo} />}
-        {showBatteryGuide && (
-          <View
-            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, zIndex: 50, elevation: 20 }}
-          >
-            <BatteryGuideScreen onClose={() => setShowBatteryGuide(false)} />
-          </View>
-        )}
-      </View>
-      </CallProvider>
+      <VideoSessionProvider>
+        <CallProvider socket={socket} currentUser={session.user}>
+        <View style={{ flex: 1 }}>
+          {content}
+          {booted && !showLockScreen && !!session && (
+            <IncomingBanner
+              data={incomingBanner}
+              onPress={openBanner}
+              onDismiss={() => setIncomingBanner(null)}
+            />
+          )}
+          {!showLockScreen && <WatchTogetherBanner onOpenVideo={handleWatchVideo} />}
+          {showBatteryGuide && (
+            <View
+              style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, zIndex: 50, elevation: 20 }}
+            >
+              <BatteryGuideScreen onClose={() => setShowBatteryGuide(false)} />
+            </View>
+          )}
+        </View>
+        </CallProvider>
+      </VideoSessionProvider>
     </WatchTogetherProvider>
   );
 }

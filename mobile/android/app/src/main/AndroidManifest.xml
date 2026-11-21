@@ -56,6 +56,15 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name=".TojeyPipReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.tojey.PIP_PLAY" />
+                <action android:name="com.tojey.PIP_PAUSE" />
+            </intent-filter>
+        </receiver>
+
         <!-- Floating chat-head bubble shown above other apps while chatting. -->
         <service
             android:name=".ChatHeadService"
