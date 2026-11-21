@@ -1,20 +1,26 @@
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
 
-const { TojeyPip } = NativeModules;
+const Native = (() => {
+  try {
+    return NativeModules.TojeyPip || null;
+  } catch (e) {
+    return null;
+  }
+})();
 
 export async function pipSupported() {
-  if (Platform.OS !== 'android' || !TojeyPip) return false;
+  if (Platform.OS !== 'android' || !Native) return false;
   try {
-    return !!(await TojeyPip.isSupported());
+    return !!(await Native.isSupported());
   } catch (e) {
     return false;
   }
 }
 
 export async function enterPip(width = 16, height = 9, playing = true) {
-  if (Platform.OS !== 'android' || !TojeyPip) return false;
+  if (Platform.OS !== 'android' || !Native) return false;
   try {
-    return !!(await TojeyPip.enterPip(width, height, !!playing));
+    return !!(await Native.enterPip(width, height, !!playing));
   } catch (e) {
     return false;
   }

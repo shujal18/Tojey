@@ -210,7 +210,12 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   });
 
   useEffect(() => {
-    pipSupported().then((ok) => setPipOk(!!ok && pipAllowed)).catch(() => setPipOk(false));
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => pipSupported())
+      .then((ok) => { if (!cancelled) setPipOk(!!ok && pipAllowed); })
+      .catch(() => { if (!cancelled) setPipOk(false); });
+    return () => { cancelled = true; };
   }, [pipAllowed]);
 
   useEffect(() => {

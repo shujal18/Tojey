@@ -14,7 +14,7 @@ import { fs } from '../utils/size';
 import { enqueue, subscribe, thumbUrl } from '../services/downloadsStore';
 import { VideoCard } from '../components/YouTubeCards';
 import { initLibrary, subscribeLibrary, storeSnapshot } from '../services/library';
-import { getRecommendationSeeds, getWatchedVideoIds, recordWatched } from '../services/recommendation';
+import { getRecommendationSeeds, getWatchedVideoIds, recordWatched, subscribeRecommendationChanged } from '../services/recommendation';
 import YoutubePlayerModal from './YoutubePlayerModal';
 import YoutubeSearchScreen from './YoutubeSearchScreen';
 import YoutubeChannelScreen from './YoutubeChannelScreen';
@@ -37,28 +37,18 @@ const SUBFEED_CACHE_KEY = 'yt_home_subfeed_v1';
 const FEED_CACHE_TTL = 5 * 60 * 1000;
 const STRIP_CACHE_TTL = 10 * 60 * 1000;
 const SUBFEED_TTL = 5 * 60 * 1000;
-const SIGNALS_TTL = 20 * 1000;
 const REFRESH_COOLDOWN = 20 * 1000;
 const MAX_SUB_IDS = 15;
 const MAX_STRIP = 8;
 const CACHE_WRITES_CAP = 24;
 
-let signalsPromise = null;
-let signalsAt = 0;
-
-function getSignals(force) {
-  const now = Date.now();
-  if (!force && signalsPromise && now - signalsAt < SIGNALS_TTL) return signalsPromise;
-  signalsAt = now;
-  signalsPromise = Promise.all([getRecommendationSeeds(8), getWatchedVideoIds(250)])
-    .then(([seeds, watched]) => ({ seeds, watched }))
-    .catch(() => ({ seeds: [], watched: [] }));
-  return signalsPromise;
-}
-
-function invalidateSignals() {
-  signalsPromise = null;
-  signalsAt = 0;
+async function getSignals() {
+  try {
+    const [seeds, watched] = await Promise.all([getRecommendationSeeds(8), getWatchedVideoIds(250)]);
+    return { seeds, watched };
+  } catch (e) {
+    return { seeds: [], watched: [] };
+  }
 }
 
 function parseCache(raw) {
@@ -100,6 +90,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
   const [snap, setSnap] = useState(null);
   const [categories] = useState(FALLBACK_CATEGORIES);
   const [headerReady, setHeaderReady] = useState(false);
+  const [shortsSignalTick, setShortsSignalTick] = useState(0);
 
   const requestIdRef = useRef(0);
   const nonceRef = useRef(0);
@@ -108,9 +99,9 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
   const cacheWritesRef = useRef(new Map());
   const dlSigRef = useRef('');
   const snapSigRef = useRef('');
-  const lastFetchAtRef = useRef(0);
   const refreshTickRef = useRef(refreshTick);
   const shortsTickRef = useRef(refreshTick);
+  const shortsSignalTickRef = useRef(shortsSignalTick);
   const shortsAuthRef = useRef(null);
   const shortsFetchedAtRef = useRef(0);
   const shortsInFlightRef = useRef(false);
@@ -247,7 +238,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
           const q = [`category=${encodeURIComponent(cat)}`, `refresh=${opts.refresh ? 'true' : 'false'}`];
           if (pageToken) q.push(`pageToken=${encodeURIComponent(pageToken)}`);
           if (cat === 'recommended') {
-            const { seeds, watched } = await getSignals(!!opts.refresh);
+            const { seeds, watched } = await getSignals();
             if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
             if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
             q.push(`nonce=${replace ? nonceRef.current++ : nonceRef.current}`);
@@ -262,7 +253,6 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
           if (data.videos && data.videos.length === 0 && !replace) setHasMore(false);
           if (data.warning) setError(data.warning);
           if (replace) {
-            lastFetchAtRef.current = Date.now();
             const cacheKey = `${FEED_CACHE_KEY}_${cat}`;
             const payload = JSON.stringify({
               videos: nextVideos || [],
@@ -316,17 +306,23 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
   useEffect(() => {
     if (refreshTick === refreshTickRef.current) return;
     refreshTickRef.current = refreshTick;
-    if (Date.now() - lastFetchAtRef.current < REFRESH_COOLDOWN) return;
-    invalidateSignals();
     fetchPage(category, null, { replace: true, refresh: true, background: true });
   }, [refreshTick, category, fetchPage]);
+
+  useEffect(() => subscribeRecommendationChanged(() => {
+    if (!aliveRef.current) return;
+    if (category === 'recommended') fetchPage(category, null, { replace: true, refresh: true, background: true });
+    setShortsSignalTick((tick) => tick + 1);
+  }), [category, fetchPage]);
 
   useEffect(() => {
     let active = true;
     const authChanged = shortsAuthRef.current !== null && shortsAuthRef.current !== authHeaders;
     shortsAuthRef.current = authHeaders;
-    const forced = refreshTick !== shortsTickRef.current || authChanged;
+    const tickChanged = refreshTick !== shortsTickRef.current || shortsSignalTick !== shortsSignalTickRef.current;
+    const forced = tickChanged || authChanged;
     shortsTickRef.current = refreshTick;
+    shortsSignalTickRef.current = shortsSignalTick;
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(STRIP_CACHE_KEY);
@@ -338,11 +334,10 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
       } catch (e) {}
       if (!active || !aliveRef.current) return;
       if (!forced && Date.now() - shortsFetchedAtRef.current < STRIP_CACHE_TTL) return;
-      if (forced && !authChanged && Date.now() - shortsFetchedAtRef.current < REFRESH_COOLDOWN) return;
       if (shortsInFlightRef.current) return;
       shortsInFlightRef.current = true;
       try {
-        const { seeds, watched } = await getSignals(forced);
+        const { seeds, watched } = await getSignals();
         const q = ['category=trending', 'refresh=false'];
         if (seeds.length) q.push(`seeds=${encodeURIComponent(JSON.stringify(seeds))}`);
         if (watched.length) q.push(`exclude=${encodeURIComponent(JSON.stringify(watched))}`);
@@ -361,7 +356,7 @@ function YoutubeHomeScreenInner({ token, refreshTick = 0, onOpenChats, onOpenSet
       }
     })();
     return () => { active = false; };
-  }, [authHeaders, refreshTick]);
+  }, [authHeaders, refreshTick, shortsSignalTick]);
 
   const subIdsKey = useMemo(() => {
     const ids = (snap?.subs || []).map((s) => s.channelId).filter(Boolean).slice(0, MAX_SUB_IDS);

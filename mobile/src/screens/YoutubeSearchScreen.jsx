@@ -10,7 +10,7 @@ import { Icon } from '../components/AppIcon';
 import { fs } from '../utils/size';
 import { VideoCard, ItemRow, ChannelRow } from '../components/YouTubeCards';
 import makeYoutubeApi from '../services/youtubeApi';
-import { SEARCH_HISTORY_KEY } from '../services/recommendation';
+import { SEARCH_HISTORY_KEY, addRecentSearch, clearRecentSearches } from '../services/recommendation';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -21,7 +21,6 @@ const FILTERS = [
 ];
 
 const HISTORY_KEY = SEARCH_HISTORY_KEY;
-const HISTORY_MAX = 12;
 
 export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChannel, onOpenPlaylist, dlMap, onDownload }) {
   const { theme } = useTheme();
@@ -46,19 +45,14 @@ export default function YoutubeSearchScreen({ token, onBack, onPlay, onOpenChann
       .catch(() => {});
   }, []);
 
-  const addRecent = useCallback((q) => {
-    const t = q.trim();
-    if (!t) return;
-    setHistory((prev) => {
-      const next = [t, ...prev.filter((x) => x.toLowerCase() !== t.toLowerCase())].slice(0, HISTORY_MAX);
-      AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(next)).catch(() => {});
-      return next;
-    });
+  const addRecent = useCallback(async (q) => {
+    const next = await addRecentSearch(q);
+    setHistory(next);
   }, []);
 
   const clearHistory = () => {
     setHistory([]);
-    AsyncStorage.removeItem(HISTORY_KEY).catch(() => {});
+    clearRecentSearches().catch(() => {});
   };
 
   // Debounced suggestions.

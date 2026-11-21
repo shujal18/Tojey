@@ -50,9 +50,9 @@ export default function VideoSeekBar({ duration = 0, currentTime = 0, buffered =
         widthRef.current = event.nativeEvent.layout.width || 1;
         xRef.current = event.nativeEvent.layout.x || 0;
       }}
-      accessibilityRole="slider"
+      accessibilityRole="adjustable"
       accessibilityLabel="Seek video"
-      accessibilityValue={{ min: 0, max: Math.round(duration), now: Math.round(currentTime) }}
+      accessibilityValue={{ min: 0, max: Math.round(Number(duration) || 0), now: Math.round(Number(currentTime) || 0) }}
     >
       {scrubbing ? (
         <View style={[styles.preview, { left: `${active * 100}%` }]} pointerEvents="none">
