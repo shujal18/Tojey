@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
-export default function VideoGestureLayer({ panHandlers }) {
+function VideoGestureOverlay({ panHandlers }) {
   return <View style={StyleSheet.absoluteFillObject} collapsable={false} {...panHandlers} />;
 }
+
+export default memo(VideoGestureOverlay);

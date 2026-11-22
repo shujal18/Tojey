@@ -1,19 +1,22 @@
 import React, { useEffect, useRef } from 'react';
-import { Animated, View } from 'react-native';
-import VideoTopBar from './VideoTopBar';
-import VideoCenterControls from './VideoCenterControls';
-import VideoBottomControls from './VideoBottomControls';
+import { Animated } from 'react-native';
+import VideoTopOverlay from './VideoTopOverlay';
+import VideoCenterOverlay from './VideoCenterOverlay';
+import VideoBottomBar from './VideoBottomBar';
 import { videoStyles } from './videoStyles';
+import { CONTROL_HIDE_MS, CONTROL_SHOW_MS } from './videoConfig';
 
 export default function TojeyVideoControls({ visible, compact, ...props }) {
   const opacity = useRef(new Animated.Value(visible ? 1 : 0)).current;
 
   useEffect(() => {
-    Animated.timing(opacity, {
+    const animation = Animated.timing(opacity, {
       toValue: visible ? 1 : 0,
-      duration: visible ? 150 : 220,
+      duration: visible ? CONTROL_SHOW_MS : CONTROL_HIDE_MS,
       useNativeDriver: true,
-    }).start();
+    });
+    animation.start();
+    return () => animation.stop();
   }, [opacity, visible]);
 
   return (
@@ -21,43 +24,34 @@ export default function TojeyVideoControls({ visible, compact, ...props }) {
       style={[videoStyles.fill, { opacity }]}
       pointerEvents={visible ? 'box-none' : 'none'}
     >
-      <View style={videoStyles.topShade} pointerEvents="none" />
-      <View style={videoStyles.bottomShade} pointerEvents="none" />
-      {!compact ? (
-        <VideoTopBar
+      {compact ? null : (
+        <VideoTopOverlay
           title={props.title}
-          badge={props.badge}
+          watchTogether={props.watchTogether}
           onBack={props.onBack}
-          onMinimize={props.onMinimize}
-          onMore={props.onSettings}
+          fullscreen={props.state.fullscreen}
         />
-      ) : null}
-      <VideoCenterControls
+      )}
+      <VideoCenterOverlay
         playing={props.state.playing}
-        disabled={props.sharedDisabled}
-        onRewind={props.onRewind}
+        disabled={props.guest}
         onToggle={props.onTogglePlay}
-        onForward={props.onForward}
-        compact={compact}
       />
-      {!compact ? (
-        <VideoBottomControls
+      {compact ? null : (
+        <VideoBottomBar
           state={props.state}
           fullscreen={props.state.fullscreen}
           guest={props.guest}
-          watchTogether={props.watchTogether}
           pipOk={props.pipOk}
+          previewTime={props.previewTime}
           onSeekPreview={props.onSeekPreview}
           onSeekCommit={props.onSeekCommit}
           onToggleMute={props.onToggleMute}
           onSettings={props.onSettings}
           onFullscreen={props.onToggleFullscreen}
           onPip={props.onPip}
-          onLock={props.onLock}
-          onRepeat={props.onRepeat}
-          onSubtitles={props.onToggleSubtitles}
         />
-      ) : null}
+      )}
     </Animated.View>
   );
 }

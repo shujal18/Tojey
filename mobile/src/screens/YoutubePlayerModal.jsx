@@ -16,6 +16,7 @@ import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
 import Toast from '../components/Toast';
 import TojeyVideoPlayer from '../components/video/TojeyVideoPlayer';
+import { VIDEO_ACCENT } from '../components/video/videoConfig';
 import { fs } from '../utils/size';
 import { thumbUrl } from '../services/downloadsStore';
 import { getProxyPlayback, dashProxyUrl, mediaProxyUrl } from '../services/ytPlayback';
@@ -176,6 +177,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     const t = Number(payload && payload.currentTime) || 0;
     posRef.current = t;
     setPos(t);
+    if (Date.now() < suppressRef.current) return;
     if (inRoomRef.current && !isHostRef.current) return;
     const segs = info?.sponsorSegments || [];
     for (const seg of segs) {
@@ -190,6 +192,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     const value = !!nextPlaying;
     playingRef.current = value;
     setPlaying(value);
+    if (Date.now() < suppressRef.current) return;
     if (inRoomRef.current && isHostRef.current) wt.reportLocal(value ? 'play' : 'pause', posRef.current);
   }, [wt]);
 
@@ -197,12 +200,14 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     const t = Number(target) || 0;
     posRef.current = t;
     setPos(t);
+    if (Date.now() < suppressRef.current) return;
     if (inRoomRef.current && isHostRef.current) wt.reportLocal('seek', t);
   }, [wt]);
 
   const handlePlayerRate = useCallback((rate) => {
     const next = Number(rate) || 1;
     setSpeed(next);
+    if (Date.now() < suppressRef.current) return;
     if (inRoomRef.current && isHostRef.current) wt.reportLocal('speed', next);
   }, [wt]);
 
@@ -407,8 +412,8 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             error={playError}
             statusLabel={streaming ? 'Refreshing stream…' : undefined}
             reconnecting={wt.room && wt.room.partnerOnline === false}
-            watchTogetherRole={inRoom ? wt.role : null}
-            watchTogetherSessionId={wt.room && wt.room.id}
+            watchTogetherRole={inRoom ? (isHost ? 'host' : 'guest') : null}
+            watchTogetherSessionId={wt.room && wt.room.roomId}
             sharedRate={inRoom && wtRate != null ? wtRate : null}
             availableQualities={availableQualities}
             onLoad={(meta) => { if (meta && meta.duration) setDur(meta.duration); }}
@@ -856,7 +861,7 @@ const styles = StyleSheet.create({
   },
   seekHit: { height: 22, justifyContent: 'center' },
   seekTrack: { height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.28)' },
-  seekFill: { height: 4, borderRadius: 2, backgroundColor: '#8B5CF6' },
+  seekFill: { height: 4, borderRadius: 2, backgroundColor: VIDEO_ACCENT },
   seekKnob: {
     position: 'absolute',
     top: -3,
@@ -894,7 +899,7 @@ const styles = StyleSheet.create({
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
   progressText: { fontSize: fs(11), fontWeight: '600' },
   progressTrack: { flex: 1, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },
-  progressFill: { height: 4, borderRadius: 2, backgroundColor: '#8B5CF6' },
+  progressFill: { height: 4, borderRadius: 2, backgroundColor: VIDEO_ACCENT },
   descBox: { borderRadius: 12, padding: 12, marginTop: 12 },
   desc: { fontSize: fs(12), lineHeight: 18 },
   section: { paddingHorizontal: 16, marginTop: 22 },

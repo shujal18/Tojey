@@ -4,6 +4,7 @@ import useVideoAutoHide from './useVideoAutoHide';
 
 const INITIAL_STATE = {
   playing: true,
+  currentTime: 0,
   duration: 0,
   buffered: 0,
   muted: false,
@@ -49,6 +50,7 @@ export default function useVideoControls({
   const [state, setState] = useState(() => ({
     ...INITIAL_STATE,
     playing: true,
+    currentTime: Number(initialTime) || 0,
     muted: !!initialMuted,
     volume: clamp(initialVolume, 0, 1),
     playbackRate: initialRate || 1,
@@ -56,6 +58,8 @@ export default function useVideoControls({
     repeat: !!initialRepeat,
   }));
   const [holdCount, setHoldCount] = useState(0);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const timeRef = useRef(Number(initialTime) || 0);
   const durationRef = useRef(0);
@@ -104,7 +108,7 @@ export default function useVideoControls({
 
   const publishTime = useCallback((force = false) => {
     const now = Date.now();
-    if (!force && now - lastUiRef.current < 240) return;
+    if (!force && now - lastUiRef.current < 300) return;
     lastUiRef.current = now;
     patch({
       currentTime: timeRef.current,
@@ -236,7 +240,7 @@ export default function useVideoControls({
   const setRotationLock = useCallback((value) => patch({ rotationLock: !!value }), [patch]);
 
   const getState = useCallback(() => ({
-    ...state,
+    ...stateRef.current,
     currentTime: timeRef.current,
     duration: durationRef.current,
     buffered: bufferedRef.current,
@@ -245,7 +249,7 @@ export default function useVideoControls({
     volume: volumeRef.current,
     playbackRate: rateRef.current,
     zoom: zoomRef.current,
-  }), [state]);
+  }), []);
 
   useEffect(() => {
     if (sourceKeyRef.current === sourceKey) return;
@@ -300,6 +304,7 @@ export default function useVideoControls({
   return {
     state,
     lastProgressRef,
+    setControlsVisible,
     wakeControls,
     holdControls,
     releaseControls,
