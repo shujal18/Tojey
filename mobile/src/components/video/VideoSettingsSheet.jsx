@@ -146,11 +146,11 @@ export default function VideoSettingsSheet({
         icon: 'speed',
         label: 'Playback speed',
         value: `${state.playbackRate}x`,
-        disabled: guest || watchTogether,
+        disabled: guest,
         options: SPEED_OPTIONS.map((v) => ({ label: `${v}x`, value: v })),
         onSelect: onSpeed,
       },
-      {
+      ...(state.textTracks.length > 0 ? [{
         key: 'subtitles',
         icon: 'subtitles',
         label: 'Subtitles',
@@ -162,7 +162,7 @@ export default function VideoSettingsSheet({
           ...state.textTracks.map((track, index) => ({ label: trackLabel(track, index), value: index })),
         ],
         onSelect: onSubtitle,
-      },
+      }] : []),
       {
         key: 'resize',
         icon: 'resize',
@@ -425,10 +425,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     paddingBottom: 18,
-    shadowColor: '#000',
-    shadowOpacity: 0.45,
-    shadowRadius: 28,
-    elevation: 24,
   },
   handleHit: {
     alignItems: 'center',

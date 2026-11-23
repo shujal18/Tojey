@@ -1,12 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated } from 'react-native';
 import VideoTopOverlay from './VideoTopOverlay';
-import VideoCenterOverlay from './VideoCenterOverlay';
 import VideoBottomBar from './VideoBottomBar';
 import { videoStyles } from './videoStyles';
 import { CONTROL_HIDE_MS, CONTROL_SHOW_MS } from './videoConfig';
 
-export default function TojeyVideoControls({ visible, compact, ...props }) {
+export default function TojeyVideoControls({ visible, compact, safeTop = 0, safeBottom = 8, ...props }) {
   const opacity = useRef(new Animated.Value(visible ? 1 : 0)).current;
 
   useEffect(() => {
@@ -30,15 +29,12 @@ export default function TojeyVideoControls({ visible, compact, ...props }) {
           watchTogether={props.watchTogether}
           onBack={props.onBack}
           fullscreen={props.state.fullscreen}
+          safeTop={safeTop}
         />
       )}
-      <VideoCenterOverlay
-        playing={props.state.playing}
-        disabled={props.guest}
-        onToggle={props.onTogglePlay}
-      />
       {compact ? null : (
         <VideoBottomBar
+          safeBottom={safeBottom}
           state={props.state}
           fullscreen={props.state.fullscreen}
           guest={props.guest}

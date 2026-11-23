@@ -41,6 +41,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const wt = useWatchTogether();
   const videoSession = useVideoSession();
   const [cur, setCur] = useState(initial);
+  const [fullscreen, setFullscreen] = useState(false);
   const playerRef = useRef(null);
 
   const [info, setInfo] = useState(null);
@@ -290,7 +291,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   const sourceType = usingDash ? 'mpd' : 'mp4';
 
   const recoverPlayback = useCallback(() => {
-    if (recoveringRef.current || loading || playError || !stream || playingRef.current === false) return;
+    if (recoveringRef.current || playError || playingRef.current === false) return;
     recoveringRef.current = true;
     setStreaming(true);
     if (!muxFallback) {
@@ -373,6 +374,18 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     if (onClose) onClose();
   };
 
+  const handleFullscreenChange = useCallback((value) => {
+    setFullscreen(!!value);
+  }, []);
+
+  const handleHardwareBack = useCallback(() => {
+    if (fullscreen) {
+      setFullscreen(false);
+      return;
+    }
+    handleClose();
+  }, [fullscreen, handleClose]);
+
   const toggleWatchTogether = () => {
     if (inRoom) {
       wt.leaveRoom();
@@ -388,22 +401,27 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
   };
 
   return (
-    <Modal visible transparent={false} animationType="slide" onRequestClose={handleClose}>
+    <Modal visible transparent={false} animationType="slide" onRequestClose={handleHardwareBack}>
       <View style={[styles.root, { backgroundColor: theme.background }]}>
-        <View style={[styles.header, { backgroundColor: theme.background }]}>
-          <TouchableOpacity onPress={handleClose} style={styles.headerBtn}>
-            <Icon name="chevron-down" size={24} color={theme.text} />
-          </TouchableOpacity>
-          <Text style={[styles.headerTitle, { color: theme.textSecondary }]} numberOfLines={1}>
-            {inRoom ? `Watching with ${partnerName}` : 'Now playing'}
-          </Text>
-          <View style={{ width: 30 }} />
-        </View>
+        {!fullscreen && (
+          <View style={[styles.header, { backgroundColor: theme.background }]}>
+            <TouchableOpacity onPress={handleClose} style={styles.headerBtn}>
+              <Icon name="chevron-down" size={24} color={theme.text} />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { color: theme.textSecondary }]} numberOfLines={1}>
+              {inRoom ? `Watching with ${partnerName}` : 'Now playing'}
+            </Text>
+            <View style={{ width: 30 }} />
+          </View>
+        )}
 
-        <View style={styles.videoWrap}>
+        <View style={[styles.videoWrap, fullscreen && styles.videoWrapFullscreen]}>
           <TojeyVideoPlayer
             ref={playerRef}
             style={styles.video}
+            fullscreen={fullscreen}
+            contentKey={cur.videoId}
+            onFullscreenChange={handleFullscreenChange}
             source={{ uri: sourceUri, type: sourceType }}
             title={info?.title || cur.title}
             initialTime={posRef.current}
@@ -495,7 +513,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           )}
         </View>
 
-        {nextVideo && (
+        {!fullscreen && nextVideo && (
           <TouchableOpacity style={styles.nextBanner} activeOpacity={0.9} onPress={cancelNext}>
             <View style={{ flex: 1 }}>
               <Text style={{ color: '#fff', fontSize: fs(12), fontWeight: '700' }} numberOfLines={1}>
@@ -509,7 +527,8 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           </TouchableOpacity>
         )}
 
-        <ScrollView contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
+        {!fullscreen && (
+          <ScrollView contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
           <View style={styles.titleBlock}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Text style={[styles.title, { color: theme.text, flex: 1 }]} numberOfLines={2}>
@@ -773,7 +792,8 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
               <Text style={{ color: theme.textSecondary, fontSize: fs(13), textAlign: 'center', marginTop: 16 }}>No related videos.</Text>
             )}
           </View>
-        </ScrollView>
+          </ScrollView>
+        )}
 
         {!!wt.invite && (
           <View style={styles.wtInviteOverlay}>
@@ -822,6 +842,15 @@ const styles = StyleSheet.create({
   headerBtn: { padding: 6, width: 30 },
   headerTitle: { fontSize: fs(13), fontWeight: '600' },
   videoWrap: { height: Dimensions.get('window').width * 9 / 16, backgroundColor: '#000' },
+  videoWrapFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 100,
+    elevation: 30,
+  },
   video: { flex: 1 },
   videoLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   streamingBadge: { position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(16,11,26,0.7)', borderRadius: 14, padding: 8 },

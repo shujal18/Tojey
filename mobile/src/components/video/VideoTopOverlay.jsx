@@ -5,7 +5,7 @@ import { fs } from '../../utils/size';
 
 const GRADIENT_STOPS = [0, 1, 2, 3, 4];
 
-function VideoTopOverlay({ title, watchTogether = false, onBack, fullscreen = false }) {
+function VideoTopOverlay({ title, watchTogether = false, onBack, safeTop = 0 }) {
   return (
     <View style={styles.root} pointerEvents="box-none">
       <View style={styles.gradient} pointerEvents="none">
@@ -24,7 +24,7 @@ function VideoTopOverlay({ title, watchTogether = false, onBack, fullscreen = fa
         ))}
       </View>
 
-      <View style={[styles.topRow, fullscreen && styles.topRowFullscreen]} pointerEvents="box-none">
+      <View style={[styles.topRow, { paddingTop: 10 + safeTop }]} pointerEvents="box-none">
         {onBack ? (
           <TouchableOpacity
             style={styles.backButton}
@@ -43,7 +43,7 @@ function VideoTopOverlay({ title, watchTogether = false, onBack, fullscreen = fa
       </View>
 
       {watchTogether ? (
-        <View style={[styles.watchPill, fullscreen && styles.watchPillFullscreen]} pointerEvents="none">
+        <View style={[styles.watchPill, { marginTop: 4 + Math.max(0, safeTop - 8) }]} pointerEvents="none">
           <Icon name="people-outline" size={13} color="rgba(210,232,255,0.92)" />
           <Text style={styles.watchText}>Watching Together</Text>
         </View>
@@ -63,7 +63,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingTop: 10,
   },
-  topRowFullscreen: { paddingTop: 42, minHeight: 92 },
   backButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   emptyRight: { width: 40 },
   title: {
@@ -87,12 +86,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(18, 44, 78, 0.72)',
     borderWidth: 1,
     borderColor: 'rgba(140, 195, 255, 0.22)',
-    shadowColor: '#00152E',
-    shadowOpacity: 0.28,
-    shadowRadius: 12,
-    elevation: 6,
   },
-  watchPillFullscreen: { marginTop: 8 },
   watchText: { color: '#F2F8FF', fontSize: fs(11), fontWeight: '700', letterSpacing: 0.2 },
 });
 

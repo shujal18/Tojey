@@ -31,7 +31,6 @@ export default function useVideoGestures({
   getVolume,
   getBrightness,
   getZoom,
-  onTapCandidate,
   onSingleTap,
   onDoubleTap,
   onSeekPreview,
@@ -53,7 +52,6 @@ export default function useVideoGestures({
     getVolume,
     getBrightness,
     getZoom,
-    onTapCandidate,
     onSingleTap,
     onDoubleTap,
     onSeekPreview,
@@ -76,6 +74,7 @@ export default function useVideoGestures({
   const lastUiRef = useRef(0);
   const suppressTapRef = useRef(false);
   const longPressActiveRef = useRef(false);
+  const gestureActiveRef = useRef(false);
 
   const clearTimers = () => {
     if (singleTimerRef.current) clearTimeout(singleTimerRef.current);
@@ -90,6 +89,30 @@ export default function useVideoGestures({
     suppressTapRef.current = false;
   };
 
+  const setGestureActive = (value) => {
+    const next = !!value;
+    if (gestureActiveRef.current === next) return;
+    gestureActiveRef.current = next;
+    const active = activeRef.current;
+    if (active) active.notified = next;
+    if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(next);
+  };
+
+  const startPinch = (touches) => {
+    if (activeRef.current) {
+      clearTimers();
+      activeRef.current = null;
+    }
+    if (pinchRef.current) return;
+    pinchRef.current = {
+      startDistance: distance(touches[0], touches[1]) || 1,
+      startZoom: Number((callbacks.current.getZoom && callbacks.current.getZoom()) || 1),
+      startedAt: Date.now(),
+      moved: false,
+    };
+    setGestureActive(true);
+  };
+
   const endRateHold = () => {
     if (!longPressActiveRef.current) return;
     longPressActiveRef.current = false;
@@ -99,19 +122,14 @@ export default function useVideoGestures({
   useEffect(() => () => {
     clearTimers();
     clearSuppress();
-    if (longPressActiveRef.current && callbacks.current.onRateHold) callbacks.current.onRateHold(null);
-    longPressActiveRef.current = false;
+    endRateHold();
     if (callbacks.current.onSeekPreview) callbacks.current.onSeekPreview(null);
-    if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(false);
+    setGestureActive(false);
   }, []);
 
   const panHandlers = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => !!enabled && !suppressTapRef.current,
-    onMoveShouldSetPanResponder: (event, gesture) => {
-      if (!enabled) return false;
-      if (touchesOf(event).length >= 2) return true;
-      return Math.abs(gesture.dx) > SWIPE_THRESHOLD || Math.abs(gesture.dy) > SWIPE_THRESHOLD;
-    },
+    onMoveShouldSetPanResponder: () => !!enabled && !suppressTapRef.current,
     onStartShouldSetPanResponderCapture: () => false,
     onMoveShouldSetPanResponderCapture: () => false,
 
@@ -121,13 +139,7 @@ export default function useVideoGestures({
       clearSuppress();
       const touches = touchesOf(event);
       if (touches.length >= 2) {
-        pinchRef.current = {
-          startDistance: distance(touches[0], touches[1]) || 1,
-          startZoom: Number((callbacks.current.getZoom && callbacks.current.getZoom()) || 1),
-          startedAt: Date.now(),
-          moved: false,
-        };
-        if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(true);
+        startPinch(touches);
         return;
       }
       activeRef.current = {
@@ -138,23 +150,26 @@ export default function useVideoGestures({
         moved: false,
         longPress: false,
         minimizeDone: false,
+        notified: false,
         startValue: 0,
         startTime: 0,
       };
-      if (callbacks.current.onTapCandidate) callbacks.current.onTapCandidate();
-      if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(true);
       longTimerRef.current = setTimeout(() => {
         const active = activeRef.current;
         if (!active || active.moved || active.mode || pinchRef.current) return;
+        if (!callbacks.current.onRateHold) return;
         active.longPress = true;
         longPressActiveRef.current = true;
-        if (callbacks.current.onRateHold) callbacks.current.onRateHold(2);
+        if (!gestureActiveRef.current) setGestureActive(true);
+        callbacks.current.onRateHold(2);
       }, LONG_PRESS_MS);
     },
 
     onPanResponderMove: (event, gesture) => {
       const touches = touchesOf(event);
-      if (pinchRef.current && touches.length >= 2) {
+      if (touches.length >= 2) {
+        if (!pinchRef.current) startPinch(touches);
+        if (!pinchRef.current) return;
         const now = Date.now();
         if (now - lastUiRef.current < UI_THROTTLE_MS) return;
         lastUiRef.current = now;
@@ -189,6 +204,7 @@ export default function useVideoGestures({
             ? callbacks.current.getBrightness && callbacks.current.getBrightness()
             : callbacks.current.getVolume && callbacks.current.getVolume()) || 0);
         }
+        if (active.mode && !gestureActiveRef.current) setGestureActive(true);
       }
 
       if (active.mode === 'minimize' && !active.minimizeDone) {
@@ -210,9 +226,7 @@ export default function useVideoGestures({
           0,
           duration,
         );
-        if (callbacks.current.onSeekPreview) {
-          callbacks.current.onSeekPreview({ target, delta: target - active.startTime });
-        }
+        if (callbacks.current.onSeekPreview) callbacks.current.onSeekPreview({ target, delta: target - active.startTime });
         return;
       }
 
@@ -239,26 +253,26 @@ export default function useVideoGestures({
         if (!pinch.moved && Date.now() - pinch.startedAt < 320 && callbacks.current.onResetZoom) {
           callbacks.current.onResetZoom();
         }
-        if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(false);
+        setGestureActive(false);
         return;
       }
 
       const active = activeRef.current;
       activeRef.current = null;
+      if (gestureActiveRef.current) setGestureActive(false);
       if (!active) return;
       endRateHold();
-      if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(false);
       if (active.longPress) return;
 
       if (active.mode === 'seek') {
         const duration = Number((callbacks.current.getDuration && callbacks.current.getDuration()) || 0);
-        if (duration > 0 && Math.abs(gesture.dx) > SWIPE_THRESHOLD) {
+        if (duration > 0 && Math.abs(gesture.dx) > SWIPE_THRESHOLD && callbacks.current.onSeekCommit) {
           const target = clamp(
             active.startTime + (gesture.dx / (callbacks.current.width || 1)) * seekWindowFor(duration),
             0,
             duration,
           );
-          if (callbacks.current.onSeekCommit) callbacks.current.onSeekCommit(target);
+          callbacks.current.onSeekCommit(target);
         }
         if (callbacks.current.onSeekPreview) callbacks.current.onSeekPreview(null);
         return;
@@ -293,7 +307,7 @@ export default function useVideoGestures({
       if (active && active.mode === 'seek' && callbacks.current.onSeekPreview) callbacks.current.onSeekPreview(null);
       pinchRef.current = null;
       activeRef.current = null;
-      if (callbacks.current.onGestureActive) callbacks.current.onGestureActive(false);
+      setGestureActive(false);
     },
 
     onPanResponderTerminationRequest: () => true,

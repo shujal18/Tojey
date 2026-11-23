@@ -1,70 +1,84 @@
-import React, { memo, useEffect, useRef } from 'react';
-import { Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { memo } from 'react';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Icon } from '../AppIcon';
+import { fs } from '../../utils/size';
+import { VIDEO_ACCENT } from './videoConfig';
 
-function VideoCenterOverlay({ playing = false, disabled = false, onToggle }) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const opacity = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    scale.setValue(0.94);
-    opacity.setValue(0.7);
-    const animation = Animated.parallel([
-      Animated.timing(scale, { toValue: 1, duration: 120, useNativeDriver: true }),
-      Animated.timing(opacity, { toValue: 1, duration: 120, useNativeDriver: true }),
-    ]);
-    animation.start();
-    return () => animation.stop();
-  }, [playing, opacity, scale]);
+function VideoCenterOverlay({
+  playing = false,
+  controlsVisible = true,
+  buffering = false,
+  error = null,
+  disabled = false,
+  locked = false,
+  onToggle,
+  onRetry,
+}) {
+  const showRetry = !!error;
+  const showSpinner = !showRetry && buffering;
+  const showPlayPause = !showRetry && !showSpinner && controlsVisible && !disabled && !locked;
 
   return (
-    <Animated.View
-      style={[
-        styles.root,
-        disabled && styles.disabled,
-        { opacity, transform: [{ scale }] },
-      ]}
-      pointerEvents="box-none"
-    >
-      <TouchableOpacity
-        style={styles.button}
-        onPress={onToggle}
-        disabled={disabled}
-        accessibilityLabel={playing ? 'Pause video' : 'Play video'}
-        accessibilityRole="button"
-        activeOpacity={0.72}
-      >
-        <Icon name={playing ? 'pause' : 'play'} size={34} color="#fff" />
-      </TouchableOpacity>
-    </Animated.View>
+    <View style={StyleSheet.absoluteFillObject} pointerEvents="box-none">
+      <View style={styles.center} pointerEvents="box-none">
+        {showRetry ? (
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={onRetry}
+            accessibilityLabel="Retry video"
+            accessibilityRole="button"
+            activeOpacity={0.8}
+          >
+            <Icon name="refresh-outline" size={30} color="#fff" />
+            <Text style={styles.retryText}>Retry</Text>
+          </TouchableOpacity>
+        ) : null}
+        {showSpinner ? <ActivityIndicator color={VIDEO_ACCENT} size="large" /> : null}
+        {showPlayPause ? (
+          <TouchableOpacity
+            style={styles.button}
+            onPress={onToggle}
+            disabled={disabled}
+            accessibilityLabel={playing ? 'Pause video' : 'Play video'}
+            accessibilityRole="button"
+            activeOpacity={0.78}
+          >
+            <Icon name={playing ? 'pause' : 'play'} size={34} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: '50%',
+  center: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 13,
   },
   button: {
-    width: 78,
-    height: 78,
-    borderRadius: 39,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(4, 10, 20, 0.56)',
+    backgroundColor: 'rgba(4, 10, 20, 0.58)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    shadowColor: '#000',
-    shadowOpacity: 0.24,
-    shadowRadius: 14,
-    elevation: 6,
+    borderColor: 'rgba(255,255,255,0.16)',
   },
-  disabled: { opacity: 0.5 },
+  retryButton: {
+    width: 94,
+    minHeight: 84,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(5, 12, 24, 0.84)',
+    borderWidth: 1,
+    borderColor: 'rgba(61,155,255,0.24)',
+  },
+  retryText: { color: '#fff', fontSize: fs(11), fontWeight: '800' },
 });
 
 export default memo(VideoCenterOverlay);

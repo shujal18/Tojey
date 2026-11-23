@@ -23,3 +23,16 @@ export async function unlockOrientation() {
     return false;
   }
 }
+
+export function immersiveSupported() {
+  return orientationSupported() && !!Native && typeof Native.setImmersive === 'function';
+}
+
+export async function setImmersive(enabled) {
+  if (!immersiveSupported()) return false;
+  try {
+    return !!(await Native.setImmersive(!!enabled));
+  } catch (e) {
+    return false;
+  }
+}

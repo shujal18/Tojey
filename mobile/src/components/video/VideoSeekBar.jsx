@@ -104,10 +104,6 @@ const styles = StyleSheet.create({
     backgroundColor: VIDEO_ACCENT,
     borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.92)',
-    shadowColor: VIDEO_ACCENT,
-    shadowOpacity: 0.5,
-    shadowRadius: 6,
-    elevation: 4,
   },
   knobActive: { top: -7, width: 18, height: 18, marginLeft: -9, borderRadius: 9 },
   preview: {

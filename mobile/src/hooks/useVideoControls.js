@@ -30,6 +30,8 @@ const INITIAL_STATE = {
 
 export default function useVideoControls({
   sourceKey,
+  contentKey = sourceKey,
+  fullscreen,
   initialTime = 0,
   initialRate = 1,
   initialMuted = false,
@@ -73,7 +75,7 @@ export default function useVideoControls({
   const lastUiRef = useRef(0);
   const lastReportedTimeRef = useRef(Number(initialTime) || 0);
   const guestSessionRef = useRef(null);
-  const sourceKeyRef = useRef(sourceKey);
+  const contentKeyRef = useRef(contentKey);
   const onPlayChangeRef = useRef(onPlayChange);
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onSeekRef = useRef(onSeek);
@@ -227,11 +229,15 @@ export default function useVideoControls({
 
   const setFullscreen = useCallback((value) => {
     const next = !!value;
+    if (typeof fullscreen === 'boolean') {
+      if (typeof onFullscreenChangeRef.current === 'function') onFullscreenChangeRef.current(next);
+      return;
+    }
     patch({ fullscreen: next });
     if (typeof onFullscreenChangeRef.current === 'function') onFullscreenChangeRef.current(next);
-  }, [patch]);
+  }, [fullscreen, patch]);
 
-  const toggleFullscreen = useCallback(() => setFullscreen(!state.fullscreen), [setFullscreen, state.fullscreen]);
+  const toggleFullscreen = useCallback(() => setFullscreen(!stateRef.current.fullscreen), [setFullscreen]);
 
   const setLocked = useCallback((value) => patch({ locked: !!value }), [patch]);
   const setRepeat = useCallback((value) => patch({ repeat: !!value }), [patch]);
@@ -252,8 +258,13 @@ export default function useVideoControls({
   }), []);
 
   useEffect(() => {
-    if (sourceKeyRef.current === sourceKey) return;
-    sourceKeyRef.current = sourceKey;
+    if (typeof fullscreen !== 'boolean' || stateRef.current.fullscreen === !!fullscreen) return;
+    patch({ fullscreen: !!fullscreen });
+  }, [fullscreen, patch]);
+
+  useEffect(() => {
+    if (contentKeyRef.current === contentKey) return;
+    contentKeyRef.current = contentKey;
     timeRef.current = Number(initialTime) || 0;
     durationRef.current = 0;
     bufferedRef.current = 0;
@@ -266,8 +277,6 @@ export default function useVideoControls({
       buffered: 0,
       buffering: false,
       error: null,
-      fullscreen: false,
-      locked: false,
       controlsVisible: true,
       zoom: 1,
       subtitleTrack: -1,
@@ -281,7 +290,7 @@ export default function useVideoControls({
     }
     publishTime(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceKey]);
+  }, [contentKey]);
 
   useEffect(() => {
     if (watchTogetherRole === 'guest' && watchTogetherSessionId && guestSessionRef.current !== watchTogetherSessionId) {

@@ -11,6 +11,7 @@ import React, {
 import {
   Animated,
   AppState,
+  Platform,
   StatusBar,
   StyleSheet,
   Text,
@@ -25,12 +26,11 @@ import useVideoControls from '../../hooks/useVideoControls';
 import useVideoGestures from '../../hooks/useVideoGestures';
 import useVideoRecovery from '../../hooks/useVideoRecovery';
 import { enterPip, onPipAction, pipSupported } from '../../services/pip';
-import { lockOrientation, unlockOrientation } from '../../services/orientation';
+import { lockOrientation, setImmersive, unlockOrientation } from '../../services/orientation';
 import { resetWindowBrightness, setWindowBrightness } from '../../services/brightness';
 import TojeyVideoControls from './TojeyVideoControls';
 import VideoGestureOverlay from './VideoGestureOverlay';
 import VideoSettingsSheet from './VideoSettingsSheet';
-import VideoStatusOverlay from './VideoStatusOverlay';
 import VideoVolumeOverlay from './VideoVolumeOverlay';
 import VideoBrightnessOverlay from './VideoBrightnessOverlay';
 import VideoSeekOverlay from './VideoSeekOverlay';
@@ -50,7 +50,9 @@ const VideoSurface = memo(function VideoSurface({
   repeat,
   backgroundPlayback,
   audioTrack,
+  audioTrackCount = 0,
   subtitleTrack,
+  textTrackCount = 0,
   onLoad,
   onProgress,
   onBuffer,
@@ -77,8 +79,8 @@ const VideoSurface = memo(function VideoSurface({
           playInBackground={backgroundPlayback}
           ignoreSilentSwitch="ignore"
           mixWithOthers="inherit"
-          selectedAudioTrack={{ type: 'index', value: audioTrack }}
-          selectedTextTrack={subtitleTrack >= 0 ? { type: 'index', value: subtitleTrack } : { type: 'disabled' }}
+          selectedAudioTrack={audioTrackCount > 0 ? { type: 'index', value: audioTrack } : undefined}
+          selectedTextTrack={textTrackCount > 0 && subtitleTrack >= 0 ? { type: 'index', value: subtitleTrack } : { type: 'disabled' }}
           onLoad={onLoad}
           onProgress={onProgress}
           onBuffer={onBuffer}
@@ -96,6 +98,8 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   source,
   title,
   style,
+  fullscreen,
+  contentKey,
   mode = 'full',
   initialTime = 0,
   initialRate = 1,
@@ -114,7 +118,6 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   loading = false,
   onLoad,
   onEnd,
-  statusLabel,
   error,
   pipSupported: pipAllowed = true,
   availableQualities = ['Auto'],
@@ -135,14 +138,17 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   const sourceUri = source && source.uri ? String(source.uri) : '';
   const sourceType = source && source.type ? String(source.type) : undefined;
   const sourceKey = `${sourceUri}|${sourceType || ''}`;
+  const trackKey = contentKey || sourceKey;
   const guest = watchTogetherRole === 'guest';
   const watchTogether = !!watchTogetherRole;
   const compact = mode === 'reels';
   const mini = mode === 'mini';
   const restoreTimeRef = useRef(Number(initialTime) || 0);
+  const sourceKeyRef = useRef(sourceKey);
   const brightnessRef = useRef(0.8);
   const tempRateRef = useRef(null);
-  const tapWokeRef = useRef(false);
+  const audioTracksRef = useRef([]);
+  const textTracksRef = useRef([]);
   const lastActionRef = useRef({});
   const infoAnimRef = useRef(null);
   const [pipActive, setPipActive] = useState(false);
@@ -164,6 +170,8 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
 
   const controls = useVideoControls({
     sourceKey: sourceUri ? sourceKey : null,
+    contentKey: sourceUri ? trackKey : null,
+    fullscreen,
     initialTime,
     initialRate,
     initialMuted,
@@ -209,7 +217,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     setResizeMode,
     setZoom,
     resetZoom,
-    toggleFullscreen,
+    setFullscreen,
     setLocked,
     setRepeat,
     setBackgroundPlayback,
@@ -220,11 +228,15 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
 
   const gesturesAllowed = enableGestures && !gestureLocked && !state.locked;
   const canSeek = gesturesAllowed && !guest;
+  const effectiveFullscreen = typeof fullscreen === 'boolean' ? !!fullscreen : state.fullscreen;
+  const safeTop = effectiveFullscreen && !mini && !compact ? 18 : 0;
+  const safeBottom = effectiveFullscreen && !mini && !compact ? 16 : 8;
 
   useVideoRecovery({
-    enabled: !!sourceUri && !loading && !error && state.playing && !guest && !mini && !compact,
+    enabled: !error && !state.error && state.playing && !guest && !mini && !compact,
     lastProgressRef,
     onRecover: () => { if (typeof onRetry === 'function') onRetry(); },
+    stallMs: 10000,
   });
 
   const shouldRun = useCallback((key, minGap = 300) => {
@@ -245,11 +257,6 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     });
     infoAnimRef.current.start();
   }, [infoOpacity]);
-
-  const handleTapCandidate = useCallback(() => {
-    tapWokeRef.current = !getState().controlsVisible;
-    wakeControls();
-  }, [getState, wakeControls]);
 
   useEffect(() => {
     if (!infoChip) return undefined;
@@ -281,10 +288,15 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   }, [pipAllowed]);
 
   useEffect(() => {
-    if (!sourceUri) return undefined;
-    restoreTimeRef.current = Number(initialTime) || 0;
-    return undefined;
-  }, [sourceKey, initialTime]);
+    if (sourceKeyRef.current === sourceKey) return;
+    sourceKeyRef.current = sourceKey;
+    if (!sourceUri) return;
+    restoreTimeRef.current = getState().currentTime || Number(initialTime) || 0;
+  }, [sourceKey, sourceUri, initialTime, getState]);
+
+  useEffect(() => {
+    if (state.audioTracks.length > 0 && state.audioTrack >= state.audioTracks.length) setAudioTrack(0);
+  }, [setAudioTrack, state.audioTrack, state.audioTracks.length]);
 
   useEffect(() => {
     if (settingsOpen) {
@@ -303,25 +315,29 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   }, [gestureActive, holdControls, releaseControls]);
 
   useEffect(() => {
-    const pausedByState = state.buffering || rateHold || pipActive || loading || reconnecting || !!error || !!state.error;
+    const pausedByState = rateHold || pipActive || loading || reconnecting || !!error || !!state.error;
     if (pausedByState) {
       holdControls();
       return releaseControls;
     }
     return undefined;
-  }, [error, holdControls, loading, pipActive, rateHold, reconnecting, releaseControls, state.buffering, state.error]);
+  }, [error, holdControls, loading, pipActive, rateHold, reconnecting, releaseControls, state.error]);
 
   useEffect(() => {
-    if (state.fullscreen) StatusBar.setHidden(true, 'fade');
-    else StatusBar.setHidden(false, 'fade');
-    return () => StatusBar.setHidden(false, 'none');
-  }, [state.fullscreen]);
+    StatusBar.setHidden(effectiveFullscreen && !mini && !compact, 'fade');
+    if (effectiveFullscreen && !mini && !compact) setImmersive(true);
+    else setImmersive(false);
+    return () => {
+      StatusBar.setHidden(false, 'none');
+      setImmersive(false);
+    };
+  }, [compact, effectiveFullscreen, mini]);
 
   useEffect(() => {
     let cancelled = false;
     const apply = async () => {
       if (compact || mini) return;
-      if (state.fullscreen) {
+      if (effectiveFullscreen) {
         if (state.rotationLock) {
           await lockOrientation(windowWidth >= windowHeight ? 'landscape' : 'portrait');
         } else if (sourceAspect >= 1.2) {
@@ -337,13 +353,13 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     };
     if (!cancelled) apply();
     return () => { cancelled = true; };
-  }, [state.fullscreen, state.rotationLock, sourceAspect, windowWidth, windowHeight, compact, mini]);
+  }, [effectiveFullscreen, state.rotationLock, sourceAspect, windowWidth, windowHeight, compact, mini]);
 
   useEffect(() => () => { resetWindowBrightness(); }, []);
 
   useEffect(() => {
-    if (!state.fullscreen) resetWindowBrightness();
-  }, [state.fullscreen]);
+    if (!effectiveFullscreen) resetWindowBrightness();
+  }, [effectiveFullscreen]);
 
   const togglePip = useCallback(async () => {
     if (!pipOk || !shouldRun('pip', 500)) return;
@@ -454,7 +470,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   }, [getState, guest, nudge, togglePlay, wakeControls]);
 
   const handleRateHold = useCallback((value) => {
-    if (guest || watchTogether) return;
+    if (guest) return;
     if (value === 2 && tempRateRef.current == null) {
       tickHaptic();
       tempRateRef.current = getState().playbackRate;
@@ -467,7 +483,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
       setRateHold(false);
       setInfoChip(null);
     }
-  }, [getState, guest, setRate, showInfo, watchTogether]);
+  }, [getState, guest, setRate, showInfo]);
 
   const handleVolumeGesture = useCallback((value) => {
     setVolume(value);
@@ -481,16 +497,16 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   }, []);
 
   const handleSurfaceTap = useCallback(() => {
-    if (!showControls) setControlsUnlocked(true);
-    if (typeof onSurfaceTap === 'function') onSurfaceTap();
-    if (tapWokeRef.current) {
-      tapWokeRef.current = false;
+    if (!showControls && !controlsUnlocked) {
+      setControlsUnlocked(true);
       wakeControls();
+      if (typeof onSurfaceTap === 'function') onSurfaceTap();
       return;
     }
+    if (typeof onSurfaceTap === 'function') onSurfaceTap();
     if (getState().controlsVisible) setControlsVisible(false);
     else wakeControls();
-  }, [getState, onSurfaceTap, setControlsVisible, showControls, wakeControls]);
+  }, [controlsUnlocked, getState, onSurfaceTap, setControlsVisible, showControls, wakeControls]);
 
   const panHandlers = useVideoGestures({
     enabled: gesturesAllowed && !!sourceUri,
@@ -501,14 +517,13 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     getVolume: () => getState().volume,
     getBrightness: () => brightnessRef.current,
     getZoom: () => getState().zoom,
-    onTapCandidate: handleTapCandidate,
     onSingleTap: handleSurfaceTap,
     onDoubleTap: canSeek ? handleDoubleTap : undefined,
     onSeekPreview: canSeek ? beginSeek : undefined,
     onSeekCommit: canSeek ? commitSeek : undefined,
     onVolumeChange: gesturesAllowed ? handleVolumeGesture : undefined,
     onBrightnessChange: gesturesAllowed ? handleBrightnessGesture : undefined,
-    onRateHold: gesturesAllowed && !watchTogether ? handleRateHold : undefined,
+    onRateHold: gesturesAllowed ? handleRateHold : undefined,
     onZoomChange: gesturesAllowed ? setZoom : undefined,
     onResetZoom: gesturesAllowed ? resetZoom : undefined,
     onMinimize: gesturesAllowed ? onMinimize : undefined,
@@ -587,16 +602,16 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
 
   const handleToggleFullscreen = useCallback(() => {
     if (!shouldRun('fullscreen', 350)) return;
-    toggleFullscreen();
+    setFullscreen(!effectiveFullscreen);
     wakeControls();
-  }, [shouldRun, toggleFullscreen, wakeControls]);
+  }, [effectiveFullscreen, setFullscreen, shouldRun, wakeControls]);
 
   const handleSpeed = useCallback((rate) => {
     if (!shouldRun('speed', 250)) return;
-    if (!guest && !watchTogether) setRate(rate);
+    if (!guest) setRate(rate);
     closeSettings();
-    if (!watchTogether) showInfo(`${rate}x`, 'speedometer-outline');
-  }, [closeSettings, guest, setRate, shouldRun, showInfo, watchTogether]);
+    showInfo(`${rate}x`, 'speedometer-outline');
+  }, [closeSettings, guest, setRate, shouldRun, showInfo]);
 
   const bufferingNow = !!(state.buffering || loading || reconnecting);
 
@@ -605,13 +620,9 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
       setBufferingVisible(false);
       return undefined;
     }
-    if (loading || reconnecting) {
-      setBufferingVisible(true);
-      return undefined;
-    }
     const timer = setTimeout(() => setBufferingVisible(true), 400);
     return () => clearTimeout(timer);
-  }, [bufferingNow, loading, reconnecting]);
+  }, [bufferingNow]);
 
   useImperativeHandle(ref, () => ({
     play: (options) => play(options),
@@ -625,17 +636,15 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   }), [controls, getState, pause, play, seek, setRate, setVolume, togglePip]);
 
   const visibleError = error || state.error;
-  const status = visibleError
-    ? null
-    : reconnecting
-      ? 'Reconnecting…'
-      : loading
-        ? 'Loading video…'
-        : statusLabel
-          ? statusLabel
-          : state.buffering
-            ? 'Buffering…'
-            : null;
+
+  const handleBack = useCallback(() => {
+    if (effectiveFullscreen && !mini && !compact) {
+      setFullscreen(false);
+      wakeControls();
+      return;
+    }
+    if (typeof onBack === 'function') onBack();
+  }, [compact, effectiveFullscreen, mini, onBack, setFullscreen, wakeControls]);
 
   const surface = sourceUri ? (
     <VideoSurface
@@ -651,21 +660,33 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
       repeat={state.repeat}
       backgroundPlayback={state.backgroundPlayback || pipActive}
       audioTrack={state.audioTrack}
+      audioTrackCount={audioTracksRef.current.length}
       subtitleTrack={state.subtitleTrack}
+      textTrackCount={textTracksRef.current.length}
       onLoad={handleLoad}
       onProgress={handleProgress}
       onBuffer={handleBuffer}
       onError={handleNativeError}
-      onAudioTracks={(payload) => setTracks(payload && payload.audioTracks, state.textTracks)}
-      onTextTracks={(payload) => setTracks(state.audioTracks, payload && payload.textTracks)}
+      onAudioTracks={(payload) => {
+        audioTracksRef.current = Array.isArray(payload && payload.audioTracks) ? payload.audioTracks : [];
+        setTracks(audioTracksRef.current, textTracksRef.current);
+      }}
+      onTextTracks={(payload) => {
+        textTracksRef.current = Array.isArray(payload && payload.textTracks) ? payload.textTracks : [];
+        setTracks(audioTracksRef.current, textTracksRef.current);
+      }}
       onEnd={handleEnd}
     />
   ) : null;
 
+  const displayState = effectiveFullscreen === state.fullscreen
+    ? state
+    : { ...state, fullscreen: effectiveFullscreen };
+
   const rootStyle = [
     styles.root,
-    state.fullscreen && !mini && !compact ? styles.fullscreen : null,
-    !state.fullscreen && !mini ? style : null,
+    effectiveFullscreen && !mini && !compact ? styles.fullscreen : null,
+    !effectiveFullscreen && !mini ? style : null,
     mini ? styles.miniRoot : null,
   ];
 
@@ -685,23 +706,33 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
           <TojeyVideoControls
             visible={state.controlsVisible && !state.locked}
             compact={compact}
+            safeTop={safeTop}
+            safeBottom={safeBottom}
             title={title}
-            state={state}
+            state={displayState}
             guest={guest}
             watchTogether={watchTogether}
             pipOk={pipOk}
             previewTime={seekPreview && seekPreview.target != null ? seekPreview.target : null}
-            onTogglePlay={() => { tickHaptic(); togglePlay(); }}
             onToggleMute={() => { toggleMuted(); wakeControls(); }}
             onSettings={openSettings}
             onToggleFullscreen={handleToggleFullscreen}
             onPip={togglePip}
             onSeekPreview={beginSeek}
             onSeekCommit={commitSeek}
-            onBack={onBack}
+            onBack={handleBack}
+          />
+          <VideoCenterOverlay
+            playing={state.playing}
+            controlsVisible={state.controlsVisible && !state.locked}
+            buffering={bufferingVisible && bufferingNow}
+            error={visibleError}
+            disabled={guest}
+            locked={state.locked}
+            onToggle={() => { tickHaptic(); togglePlay(); }}
+            onRetry={handleRetry}
           />
           {state.locked ? <VideoLockOverlay onUnlock={() => setLocked(false)} /> : null}
-          <VideoStatusOverlay label={status} error={visibleError} buffering={bufferingVisible && bufferingNow} onRetry={handleRetry} />
           <VideoVolumeOverlay value={volumeOverlay} />
           <VideoBrightnessOverlay value={brightnessOverlay} />
           <VideoSeekOverlay value={seekPreview} duration={state.duration} />
@@ -715,7 +746,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
             visible={settingsOpen}
             initialPage={settingsPage}
             onClose={closeSettings}
-            state={state}
+            state={displayState}
             guest={guest}
             watchTogether={watchTogether}
             pipSupported={pipOk}

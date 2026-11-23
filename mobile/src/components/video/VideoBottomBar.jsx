@@ -27,6 +27,7 @@ function VideoBottomBar({
   fullscreen = false,
   guest = false,
   pipOk = false,
+  safeBottom = 8,
   previewTime = null,
   onSeekPreview,
   onSeekCommit,
@@ -39,7 +40,7 @@ function VideoBottomBar({
   const shownTime = previewTime != null ? previewTime : state.currentTime;
 
   return (
-    <View style={styles.root} pointerEvents="box-none">
+    <View style={[styles.root, { paddingBottom: safeBottom }]} pointerEvents="box-none">
       <View style={styles.gradient} pointerEvents="none">
         {GRADIENT_STOPS.map((index) => (
           <View
@@ -75,8 +76,8 @@ function VideoBottomBar({
         <QuickButton onPress={onToggleMute} label={state.muted ? 'Unmute video' : 'Mute video'}>
           <Icon name={state.muted ? 'volume-mute' : 'volume-high'} size={22} color="#fff" />
         </QuickButton>
-        <QuickButton onPress={() => onSettings('speed')} label="Playback speed">
-          <Text style={styles.speed}>{state.playbackRate}x</Text>
+        <QuickButton onPress={() => onSettings('speed')} disabled={guest} label="Playback speed">
+          <Text style={[styles.speed, guest && styles.disabled]}>{state.playbackRate}x</Text>
         </QuickButton>
         <QuickButton onPress={() => onSettings()} label="Video settings">
           <Icon name="settings-outline" size={22} color="#fff" />
