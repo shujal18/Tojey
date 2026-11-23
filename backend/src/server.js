@@ -2152,7 +2152,7 @@ io.on('connection', async (socket) => {
 
     socket.on('message:send', async (data, callback = () => {}) => {
       try {
-        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0, clientId = null } = data;
+        const { otherUserId, type = 'TEXT', content = '', mediaUrl = '', thumbUrl = '', duration = 0, waveform = '', replyTo = null, isViewOnce = false, transcript = '', fileName = '', fileSize = 0, mediaSize = 0, mediaWidth = 0, mediaHeight = 0, clientId = null } = data;
 
         if (!otherUserId) return callback({ error: 'otherUserId required' });
 
@@ -2177,10 +2177,12 @@ io.on('connection', async (socket) => {
         const result = await pool.query(
           `INSERT INTO messages
             (conversation_id, sender_id, reply_to, type, content, media_url, thumb_url,
+             media_width, media_height,
              duration, waveform, transcript, status, is_view_once, created_at, file_name, media_size, client_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SENT', $11, NOW(), $12, $13, $14)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'SENT', $13, NOW(), $14, $15, $16)
            RETURNING *`,
           [convo.id, dbUser.userId, replyTo, type, content, mediaUrl || null, thumbUrl || null,
+           mediaWidth || null, mediaHeight || null,
            duration || 0, waveform || '', transcript || '', isViewOnce || false, fileName || '', fileSize || mediaSize || 0, clientId ? String(clientId) : null]
         );
 

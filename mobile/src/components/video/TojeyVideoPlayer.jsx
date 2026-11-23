@@ -29,6 +29,7 @@ import { enterPip, onPipAction, pipSupported } from '../../services/pip';
 import { lockOrientation, setImmersive, unlockOrientation } from '../../services/orientation';
 import { resetWindowBrightness, setWindowBrightness } from '../../services/brightness';
 import TojeyVideoControls from './TojeyVideoControls';
+import VideoCenterOverlay from './VideoCenterOverlay';
 import VideoGestureOverlay from './VideoGestureOverlay';
 import VideoSettingsSheet from './VideoSettingsSheet';
 import VideoVolumeOverlay from './VideoVolumeOverlay';

@@ -75,6 +75,7 @@ class MainApplication : Application(), ReactApplication {
           list.add(TojeyPipPackage())
           list.add(TojeyBrightnessPackage())
           list.add(TojeyOrientationPackage())
+          list.add(TojeyMediaPackage())
           return list
         }
 

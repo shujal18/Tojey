@@ -30,8 +30,11 @@ import DocumentPicker, { types as DocTypes } from 'react-native-document-picker'
 import { ensureCameraPermission, ensureMediaPermission, ensureMicPermission, getMicPermissionStatus } from '../services/permissions';
 import { useCall } from '../services/CallContext';
 import { loadMessages, saveMessages, clearConversationCache, enqueueOutgoing, loadOutgoingQueue, dequeueOutgoing, flushAllOutgoingQueues } from '../services/cache';
-import MediaViewer from '../components/MediaViewer';
+import ChatImageMessage from '../components/chat/media/ChatImageMessage';
+import ChatVideoMessage from '../components/chat/media/ChatVideoMessage';
+import MediaViewerModal from '../components/chat/media/MediaViewerModal';
 import MediaPreview from '../components/MediaPreview';
+import { formatVideoDurationLabel, getVideoThumbnail } from '../services/videoThumbnail';
 import {
   startVoiceRecording, trackVoiceRecording, stopVoiceRecording, deleteVoiceFile,
   playVoice, stopVoicePlayback, resetVoice, pauseVoiceRecording, resumeVoiceRecording,
@@ -45,6 +48,17 @@ const REC_BARS = 28;
 
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
+
+// Local cache paths (e.g. native video thumbnails) must stay file URIs; absUrl()
+// would otherwise prepend the server host to any leading slash.
+function mediaUri(value) {
+  if (!value) return '';
+  const raw = String(value);
+  if (/^(https?:\/\/|file:\/\/|content:\/\/|data:)/i.test(raw)) return raw;
+  if (raw.startsWith('/uploads/')) return absUrl(raw);
+  if (raw.startsWith('/')) return `file://${raw}`;
+  return raw;
+}
 
 // Defensive shape guard: every row rendered by MessageRow goes through this, so a
 // single malformed/cached/legacy payload can never crash the whole chat screen.
@@ -537,38 +551,19 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   // on reconnect. Mirrors whatsapp's offline-queue behaviour.
   const socketReady = () => !!socket && socket.connected;
 
-  const mediaItems = useMemo(
-    () => messages.filter((m) =>
-      (m.type === 'IMAGE' || m.type === 'VIDEO') &&
-      m.media_url &&
-      !m._uploading &&
-      !m._pending &&
-      (m.media_url.startsWith('/uploads/') || m.media_url.startsWith('http'))
-    ),
-    [messages]
-  );
-  // Ref mirror so openMedia stays referentially stable across message arrivals: a
-  // changing onOpenMedia prop would defeat MessageRow memoization and re-render the
-  // whole visible window on every incoming message.
-  const mediaItemsRef = useRef(mediaItems);
-  mediaItemsRef.current = mediaItems;
-
+  // Stable callback: a changing onOpenMedia prop would defeat MessageRow memoization
+  // and re-render the whole visible window on every incoming message. The fullscreen
+  // viewer owns a single item so opening it never scans/rebuilds the message list.
   const openMedia = useCallback((message) => {
     if (!message || !message.media_url) return;
-    const items = mediaItemsRef.current;
     if (message.type === 'IMAGE' || message.type === 'VIDEO') {
-      const idx = items.findIndex((m) => m.id === message.id);
-      if (idx >= 0) {
-        setMediaViewer({ items, index: idx });
-        return;
-      }
-      Linking.openURL(absUrl(message.media_url)).catch(() => {});
+      setMediaViewer({ item: message });
     } else if (message.type === 'VOICE') {
       Linking.openURL(absUrl(message.media_url)).catch(() => {});
     } else if (message.type === 'FILE' || message.type === 'DOCUMENT') {
       const name = message.file_name || message.content || '';
       if (/\.(mp4|mov|mkv|webm|3gp|m4v|avi|wmv)(\?|#|$)/i.test(name)) {
-        setMediaViewer({ items: [{ id: message.id, type: 'VIDEO', media_url: message.media_url, file_name: name, content: name, sender_id: message.sender_id }], index: 0 });
+        setMediaViewer({ item: { ...message, type: 'VIDEO', file_name: name, content: name } });
         return;
       }
       downloadAndOpen(message);
@@ -785,8 +780,11 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     bumpCursor(id);
     setMessages((prev) => {
       const idx = prev.findIndex((m) => aliases.some((key) => String(m.id) === key || String(m.client_id || m._tempId || '') === key));
+      const existing = idx >= 0 ? prev[idx] : null;
       const row = {
         ...canonical,
+        media_width: canonical.media_width || existing?.media_width || 0,
+        media_height: canonical.media_height || existing?.media_height || 0,
         _tempId: tempId || canonical._tempId || null,
         client_id: clientId || canonical.client_id || null,
         _local: true,
@@ -805,7 +803,6 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         }
         return insertSorted(prev, row);
       }
-      const existing = prev[idx];
       const next = [];
       prev.forEach((m, i) => {
         if (i !== idx && isServerId(m) && Number(m.id) === id) return;
@@ -1916,7 +1913,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     });
   };
 
-  const sendMediaAsset = (opts) => {
+  const sendMediaAsset = async (opts) => {
     if (!opts || !opts.uri) return;
     const isVideo = !!opts.isVideo;
     const tempId = `tmp-${currentUser.id}-${Date.now()}`;
@@ -1924,13 +1921,24 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     const content = opts.caption && opts.caption.length ? opts.caption : (isVideo ? '🎬 Video' : '📷 Photo');
     const mimeType = opts.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
     const fileName = opts.fileName || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
+    let thumbInfo = null;
+    if (isVideo) {
+      try { thumbInfo = await getVideoThumbnail(opts.uri); } catch (e) { thumbInfo = null; }
+    }
+    const localThumbUri = isVideo && thumbInfo && thumbInfo.uri ? thumbInfo.uri : opts.uri;
+    const localWidth = thumbInfo && thumbInfo.width > 0 ? thumbInfo.width : 0;
+    const localHeight = thumbInfo && thumbInfo.height > 0 ? thumbInfo.height : 0;
+    const localDurationSec = thumbInfo && thumbInfo.durationMs > 0 ? Math.round(thumbInfo.durationMs / 1000) : 0;
     const localMsg = {
       id: tempId,
       sender_id: currentUser.id,
       type: isVideo ? 'VIDEO' : 'IMAGE',
       content,
       media_url: opts.uri,
-      thumb_url: opts.uri,
+      thumb_url: localThumbUri,
+      media_width: localWidth,
+      media_height: localHeight,
+      duration: localDurationSec,
       created_at: new Date().toISOString(),
       status: 'SENT',
       reactions: [],
@@ -1946,16 +1954,31 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     pendingScrollToBottomRef.current = true;
     scrollToLatestAnimated();
     uploadAsset({ uri: opts.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
-      .then((upData) => {
+      .then(async (upData) => {
         uploadTasks.current.delete(fileName);
+        let thumbUrl = upData.url;
+        if (isVideo && thumbInfo && thumbInfo.uri) {
+          try {
+            const thumbName = `${fileName.replace(/\.[^.]+$/, '')}-thumb.jpg`;
+            const thumbUpload = await uploadAsset({ uri: thumbInfo.uri, name: thumbName, type: 'image/jpeg' });
+            if (thumbUpload && thumbUpload.url) thumbUrl = thumbUpload.url;
+          } catch (e) {
+            console.warn('video thumbnail upload failed:', e);
+          }
+        }
         const payload = {
           otherUserId,
           type: isVideo ? 'VIDEO' : 'IMAGE',
           content,
           mediaUrl: upData.url,
-          thumbUrl: upData.url,
+          thumbUrl,
           fileName,
           clientId,
+          ...(isVideo ? {
+            duration: localDurationSec,
+            mediaWidth: localWidth,
+            mediaHeight: localHeight,
+          } : {}),
         };
         socket.emit('message:send', payload, (ack) => {
           if (ack && ack.ok) {
@@ -1994,18 +2017,34 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     pendingScrollToBottomRef.current = true;
     scrollToLatestInstant();
     uploadAsset({ uri: msg.media_url, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
-      .then((upData) => {
+      .then(async (upData) => {
         uploadTasks.current.delete(fileName);
+        let thumbUrl = isFile || isVoice ? '' : upData.url;
+        if (isVideo && msg.thumb_url && msg.thumb_url !== msg.media_url &&
+            !/^https?:\/\//i.test(msg.thumb_url) && !msg.thumb_url.startsWith('/uploads/')) {
+          try {
+            const thumbName = `${fileName.replace(/\.[^.]+$/, '')}-thumb.jpg`;
+            const thumbUpload = await uploadAsset({ uri: msg.thumb_url, name: thumbName, type: 'image/jpeg' });
+            if (thumbUpload && thumbUpload.url) thumbUrl = thumbUpload.url;
+          } catch (e) {
+            console.warn('video thumbnail retry upload failed:', e);
+          }
+        }
         socket.emit('message:send', {
           otherUserId,
           type: msg.type,
           content: isFile ? fileName : (isVoice ? 'Voice message' : (isVideo ? '🎬 Video' : '📷 Photo')),
           mediaSize: isFile ? (msg.media_size || 0) : 0,
           mediaUrl: upData.url,
-          thumbUrl: isFile || isVoice ? '' : upData.url,
+          thumbUrl,
           fileName,
           clientId,
           ...(isVoice ? { duration: msg.duration || 1, waveform: msg.waveform || '' } : {}),
+          ...(isVideo ? {
+            duration: msg.duration || 0,
+            mediaWidth: msg.media_width || 0,
+            mediaHeight: msg.media_height || 0,
+          } : {}),
         }, (ack) => {
           if (ack && ack.ok) {
             applyAck(clientId, ack.message, clientId);
@@ -2564,17 +2603,12 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
       )}
 
       {mediaViewer && (
-        <MediaViewer
-          items={mediaViewer.items}
-          startIndex={mediaViewer.index}
-          headerText={otherUserName}
-          currentUserId={currentUser.id}
+        <MediaViewerModal
+          visible
+          item={mediaViewer.item}
           theme={theme}
           onClose={() => setMediaViewer(null)}
-          onReact={reactTo}
-          onReply={(item) => setReplyingTo(item)}
-          onDelete={(item, mode) => deleteMessage(item, mode)}
-          onSendDrawing={uploadDrawing}
+          onExternal={(item) => downloadAndOpen(item)}
         />
       )}
 
@@ -2866,6 +2900,21 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
   })).current;
 
   const hasMedia = !!(message.media_url || message.thumb_url);
+  const isMediaBubble = !message.is_deleted_for_everyone &&
+    (message.type === 'IMAGE' || message.type === 'VIDEO') && hasMedia;
+  const mediaBubbleUri = mediaUri(message.media_url || message.thumb_url);
+  const mediaBubbleThumb = message.thumb_url ? mediaUri(message.thumb_url) : null;
+  const mediaBubbleAspect = (message.media_width && message.media_height)
+    ? Number(message.media_width) / Number(message.media_height)
+    : undefined;
+  const videoDurationLabel = message.type === 'VIDEO' && Number(message.duration) > 0
+    ? formatVideoDurationLabel(Number(message.duration) * 1000)
+    : '';
+  const mediaBubbleReceipt = { read: message.status === 'READ' };
+  const mediaBubbleGroupedStyle = grouped && {
+    borderBottomRightRadius: isSent ? 6 : 14,
+    borderBottomLeftRadius: isSent ? 14 : 6,
+  };
   const statusIcon = message._queued || message._uploading
     ? 'time-outline'
     : message.status === 'READ'
@@ -2936,6 +2985,54 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
           <Icon name={suggestEdit ? 'create-outline' : 'arrow-back'} size={14} color="#fff" />
         </Animated.View>
         <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
+          {isMediaBubble ? (
+            message.type === 'VIDEO' ? (
+              <ChatVideoMessage
+                uri={mediaBubbleUri}
+                thumbnailUri={mediaBubbleThumb}
+                aspect={mediaBubbleAspect}
+                width={message.media_width || undefined}
+                height={message.media_height || undefined}
+                durationLabel={videoDurationLabel}
+                timeLabel={message.created_at ? timeOf(message.created_at) : ''}
+                edited={!!message.is_edited}
+                receipt={mediaBubbleReceipt}
+                isSent={isSent}
+                uploading={!!(message._uploading || message._queued)}
+                uploadProgress={message._uploadProgress || 0}
+                error={!!message._uploadError}
+                borderColor={isSent ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.14)'}
+                onCancelUpload={onCancelUpload ? () => onCancelUpload(message) : null}
+                onRetry={onRetry ? () => onRetry(message) : null}
+                style={mediaBubbleGroupedStyle}
+                onPress={handlePress}
+                onLongPress={() => { clearTimeout(singleTimer.current); onLongPress(message); }}
+                delayLongPress={350}
+              />
+            ) : (
+              <ChatImageMessage
+                uri={mediaBubbleUri}
+                thumbnailUri={mediaBubbleThumb}
+                aspect={mediaBubbleAspect}
+                width={message.media_width || undefined}
+                height={message.media_height || undefined}
+                timeLabel={message.created_at ? timeOf(message.created_at) : ''}
+                edited={!!message.is_edited}
+                receipt={mediaBubbleReceipt}
+                isSent={isSent}
+                uploading={!!(message._uploading || message._queued)}
+                uploadProgress={message._uploadProgress || 0}
+                error={!!message._uploadError}
+                borderColor={isSent ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.14)'}
+                onCancelUpload={onCancelUpload ? () => onCancelUpload(message) : null}
+                onRetry={onRetry ? () => onRetry(message) : null}
+                style={mediaBubbleGroupedStyle}
+                onPress={handlePress}
+                onLongPress={() => { clearTimeout(singleTimer.current); onLongPress(message); }}
+                delayLongPress={350}
+              />
+            )
+          ) : (
             <TouchableOpacity
               style={[
                 styles.bubble,
@@ -3078,7 +3175,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               )}
 
-              {!message.is_deleted_for_everyone && (
+              {!message.is_deleted_for_everyone && !isMediaBubble && (
                 <View style={[
                   styles.msgMeta,
                   emojiInfo.only && { justifyContent: isSent ? 'flex-end' : 'flex-start' },
@@ -3094,6 +3191,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
                 </View>
               )}
             </TouchableOpacity>
+          )}
           </Animated.View>
 
         {message.reactions && message.reactions.length > 0 && (
