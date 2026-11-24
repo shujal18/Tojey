@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Animated, PanResponder, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
@@ -21,13 +21,14 @@ export default function ChatVideoControls({
   onSeek,
   onRate,
   onRetry,
+  onMenuVisibilityChange,
 }) {
   const fade = useRef(new Animated.Value(visible ? 1 : 0)).current;
   const [rateOpen, setRateOpen] = useState(false);
   const durationRef = useRef(duration);
   durationRef.current = duration;
   const callbacks = useRef({});
-  callbacks.current = { onSeek, onRate };
+  callbacks.current = { onSeek, onRate, onMenuVisibilityChange };
 
   useEffect(() => {
     Animated.timing(fade, {
@@ -37,9 +38,22 @@ export default function ChatVideoControls({
     }).start();
   }, [fade, visible]);
 
+  const setMenuOpen = useCallback((open) => {
+    setRateOpen(open);
+    if (typeof callbacks.current.onMenuVisibilityChange === 'function') {
+      callbacks.current.onMenuVisibilityChange(open);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!visible) setRateOpen(false);
-  }, [visible]);
+    if (!visible) setMenuOpen(false);
+  }, [setMenuOpen, visible]);
+
+  useEffect(() => () => {
+    if (typeof callbacks.current.onMenuVisibilityChange === 'function') {
+      callbacks.current.onMenuVisibilityChange(false);
+    }
+  }, []);
 
   const seekWidth = useRef(0);
   const grantX = useRef(0);
@@ -47,8 +61,8 @@ export default function ChatVideoControls({
 
   const applySeek = useMemo(() => (x) => {
     const total = Number(durationRef.current) || 0;
-    if (total <= 0 || typeof callbacks.current.onSeek !== 'function') return;
-    const ratio = clamp(x / (seekWidth.current || 1), 0, 1);
+    if (total <= 0 || !seekWidth.current || typeof callbacks.current.onSeek !== 'function') return;
+    const ratio = clamp(x / seekWidth.current, 0, 1);
     callbacks.current.onSeek(ratio * total);
   }, []);
 
@@ -59,7 +73,7 @@ export default function ChatVideoControls({
     onMoveShouldSetPanResponderCapture: () => true,
     onPanResponderGrant: (event) => {
       dragging.current = true;
-      grantX.current = Number(event.nativeEvent.locationX) || 0;
+      grantX.current = clamp(Number(event.nativeEvent.locationX) || 0, 0, seekWidth.current || 0);
       applySeek(grantX.current);
     },
     onPanResponderMove: (event, state) => {
@@ -110,6 +124,7 @@ export default function ChatVideoControls({
           style={styles.center}
           onPress={onTogglePlay}
           accessibilityLabel={playing ? 'Pause video' : 'Play video'}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Icon name={playing ? 'pause' : 'play'} size={fs(30)} color="#fff" />
         </TouchableOpacity>
@@ -122,7 +137,7 @@ export default function ChatVideoControls({
           onLayout={(event) => { seekWidth.current = event.nativeEvent.layout.width || 0; }}
           {...seekPan.panHandlers}
         >
-          <View style={styles.track}>
+          <View style={styles.track} pointerEvents="none">
             <View style={[styles.fill, { width: `${progress * 100}%` }]} />
             <View style={[styles.thumb, { left: `${progress * 100}%` }]} />
           </View>
@@ -135,10 +150,10 @@ export default function ChatVideoControls({
                 <TouchableOpacity
                   key={option}
                   style={[styles.rateOption, option === currentRate && styles.rateOptionActive]}
-                  onPress={() => {
-                    setRateOpen(false);
-                    if (typeof callbacks.current.onRate === 'function') callbacks.current.onRate(option);
-                  }}
+                onPress={() => {
+                  setMenuOpen(false);
+                  if (typeof callbacks.current.onRate === 'function') callbacks.current.onRate(option);
+                }}
                 >
                   <Text style={[
                     styles.rateOptionText,
@@ -153,10 +168,10 @@ export default function ChatVideoControls({
           ) : null}
           <TouchableOpacity
             style={styles.rateButton}
-            onPress={() => setRateOpen((open) => !open)}
+            onPress={() => setMenuOpen(!rateOpen)}
             accessibilityLabel="Playback speed"
           >
-            <Text style={styles.rateText}>{`${currentRate.toFixed(1)}x`}</Text>
+            <Text style={styles.rateText}>{`${currentRate}x`}</Text>
           </TouchableOpacity>
         </View>
       </View>

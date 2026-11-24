@@ -163,7 +163,9 @@ export async function flushAllOutgoingQueues(userId, socket, currentUserId) {
         if (!socket.connected) return; // went offline again mid-flush
         try {
           await new Promise((resolve) => {
+            const { otherId: _queuedOtherId, queuedAt: _queuedAt, ...queuedPayload } = item;
             socket.emit('message:send', {
+              ...queuedPayload,
               otherUserId: otherId,
               type: item.type || 'TEXT',
               content: item.content || '',

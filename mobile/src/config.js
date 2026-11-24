@@ -7,11 +7,16 @@
 export const SERVER_URL = "https://tojey.onrender.com";
 
 export function absUrl(url) {
-  if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  if (url.startsWith('/')) return SERVER_URL + url;
-  return url;
+  if (url === null || url === undefined) return '';
+  const raw = String(url).trim();
+  if (!raw) return '';
+  if (/^(https?:\/\/|file:\/\/|content:\/\/|data:|blob:)/i.test(raw)) return raw;
+  if (raw.startsWith('/uploads/')) return SERVER_URL + raw;
+  if (raw.startsWith('/')) return `file://${raw}`;
+  return raw;
 }
+
+export const mediaUri = absUrl;
 
 /**
  * Chat message-area background. Set to a URL/`require('...')` of the supplied

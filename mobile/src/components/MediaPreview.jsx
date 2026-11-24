@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput, StyleSheet, Modal, Image,
+  View, Text, TouchableOpacity, TextInput, StyleSheet, Modal, Image, Animated,
   ActivityIndicator, Alert, PanResponder, Platform, StatusBar, Keyboard,
 } from 'react-native';
 import { useWindowDimensions } from 'react-native';
@@ -247,6 +247,192 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     onPanResponderTerminate: () => { gestureStart.current = null; },
   })).current;
 
+  const zoomScale = useRef(new Animated.Value(1)).current;
+  const zoomX = useRef(new Animated.Value(0)).current;
+  const zoomY = useRef(new Animated.Value(0)).current;
+  const zoomState = useRef({ scale: 1, x: 0, y: 0 });
+  const zoomPinch = useRef(null);
+  const zoomActive = useRef(null);
+  const zoomLastTap = useRef({ time: 0, x: 0, y: 0 });
+  const zoomGeom = useRef({ iw: winW, ih: winH, bw: winW, bh: winH });
+  zoomGeom.current = {
+    iw: contained ? contained.iw : (box ? box.w : winW),
+    ih: contained ? contained.ih : (box ? box.h : winH),
+    bw: box ? box.w : winW,
+    bh: box ? box.h : winH,
+  };
+
+  const zoomLimits = (s) => ({
+    x: Math.max(0, (zoomGeom.current.iw * s - zoomGeom.current.bw) / 2),
+    y: Math.max(0, (zoomGeom.current.ih * s - zoomGeom.current.bh) / 2),
+  });
+  const zoomApply = (s, x, y) => {
+    zoomScale.stopAnimation();
+    zoomX.stopAnimation();
+    zoomY.stopAnimation();
+    zoomState.current = { scale: s, x, y };
+    zoomScale.setValue(s);
+    zoomX.setValue(x);
+    zoomY.setValue(y);
+  };
+  const zoomAnimate = (s, x, y) => {
+    zoomScale.stopAnimation();
+    zoomX.stopAnimation();
+    zoomY.stopAnimation();
+    zoomState.current = { scale: s, x, y };
+    Animated.parallel([
+      Animated.timing(zoomScale, { toValue: s, duration: 200, useNativeDriver: true }),
+      Animated.timing(zoomX, { toValue: x, duration: 200, useNativeDriver: true }),
+      Animated.timing(zoomY, { toValue: y, duration: 200, useNativeDriver: true }),
+    ]).start();
+  };
+  const zoomReset = () => {
+    zoomPinch.current = null;
+    zoomActive.current = null;
+    zoomAnimate(1, 0, 0);
+  };
+  const zoomClamp = (v, min, max) => Math.min(max, Math.max(min, v));
+  const zoomDistance = (a, b) => {
+    const dx = Number(a.pageX) - Number(b.pageX);
+    const dy = Number(a.pageY) - Number(b.pageY);
+    return Math.sqrt(dx * dx + dy * dy) || 1;
+  };
+  const zoomPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: (e) => (e.nativeEvent.touches || []).length >= 2,
+    onMoveShouldSetPanResponderCapture: (e) => (e.nativeEvent.touches || []).length >= 2,
+    onPanResponderGrant: (e, g) => {
+      const touches = e.nativeEvent.touches || [];
+      if (touches.length >= 2) {
+        const mid = {
+          x: (Number(touches[0].pageX) + Number(touches[1].pageX)) / 2,
+          y: (Number(touches[0].pageY) + Number(touches[1].pageY)) / 2,
+        };
+        zoomPinch.current = {
+          startDistance: zoomDistance(touches[0], touches[1]),
+          startScale: zoomState.current.scale,
+          startX: zoomState.current.x,
+          startY: zoomState.current.y,
+          focusX: mid.x - zoomGeom.current.bw / 2,
+          focusY: mid.y - zoomGeom.current.bh / 2,
+          moved: false,
+        };
+        zoomActive.current = null;
+        return;
+      }
+      zoomActive.current = {
+        moved: false,
+        baseX: zoomState.current.x,
+        baseY: zoomState.current.y,
+        panStartX: Number(touches[0] ? touches[0].pageX : g.x0) || 0,
+        panStartY: Number(touches[0] ? touches[0].pageY : g.y0) || 0,
+      };
+    },
+    onPanResponderMove: (e, g) => {
+      const touches = e.nativeEvent.touches || [];
+      if (touches.length >= 2) {
+        if (!zoomPinch.current) {
+          const mid = {
+            x: (Number(touches[0].pageX) + Number(touches[1].pageX)) / 2,
+            y: (Number(touches[0].pageY) + Number(touches[1].pageY)) / 2,
+          };
+          zoomPinch.current = {
+            startDistance: zoomDistance(touches[0], touches[1]),
+            startScale: zoomState.current.scale,
+            startX: zoomState.current.x,
+            startY: zoomState.current.y,
+            focusX: mid.x - zoomGeom.current.bw / 2,
+            focusY: mid.y - zoomGeom.current.bh / 2,
+            moved: false,
+          };
+        }
+        const p = zoomPinch.current;
+        const next = zoomClamp(p.startScale * (zoomDistance(touches[0], touches[1]) / p.startDistance), 1, 4);
+        if (Math.abs(next - p.startScale) > 0.03) p.moved = true;
+        const ratio = next / p.startScale;
+        const limits = zoomLimits(next);
+        zoomApply(
+          next,
+          zoomClamp(p.startX + p.focusX * (1 - ratio), -limits.x, limits.x),
+          zoomClamp(p.startY + p.focusY * (1 - ratio), -limits.y, limits.y),
+        );
+        return;
+      }
+      if (zoomPinch.current) {
+        zoomPinch.current = null;
+        zoomActive.current = {
+          moved: true,
+          baseX: zoomState.current.x,
+          baseY: zoomState.current.y,
+          panStartX: Number(touches[0] ? touches[0].pageX : g.x0) || 0,
+          panStartY: Number(touches[0] ? touches[0].pageY : g.y0) || 0,
+        };
+      }
+      const a = zoomActive.current;
+      if (!a) return;
+      const dx = touches[0] ? (Number(touches[0].pageX) || 0) - a.panStartX : Number(g.dx) || 0;
+      const dy = touches[0] ? (Number(touches[0].pageY) || 0) - a.panStartY : Number(g.dy) || 0;
+      if (Math.abs(dx) > 14 || Math.abs(dy) > 14) a.moved = true;
+      if (!a.moved || zoomState.current.scale <= 1.01) return;
+      const limits = zoomLimits(zoomState.current.scale);
+      zoomApply(
+        zoomState.current.scale,
+        zoomClamp(a.baseX + dx, -limits.x, limits.x),
+        zoomClamp(a.baseY + dy, -limits.y, limits.y),
+      );
+    },
+    onPanResponderRelease: (e, g) => {
+      if (zoomPinch.current) {
+        const p = zoomPinch.current;
+        zoomPinch.current = null;
+        const limits = zoomLimits(zoomState.current.scale);
+        zoomApply(
+          zoomState.current.scale,
+          zoomClamp(zoomState.current.x, -limits.x, limits.x),
+          zoomClamp(zoomState.current.y, -limits.y, limits.y),
+        );
+        if (!p.moved && zoomState.current.scale < 1.05) zoomAnimate(1, 0, 0);
+        return;
+      }
+      const a = zoomActive.current;
+      zoomActive.current = null;
+      if (a && !a.moved) {
+        const now = Date.now();
+        const x = Number(g.x0) || 0;
+        const y = Number(g.y0) || 0;
+        const last = zoomLastTap.current;
+        if (now - last.time < 300 && Math.abs(x - last.x) < 40 && Math.abs(y - last.y) < 40) {
+          zoomLastTap.current = { time: 0, x: 0, y: 0 };
+          if (zoomState.current.scale > 1.05) {
+            zoomAnimate(1, 0, 0);
+          } else {
+            const target = 2.5;
+            const limits = zoomLimits(target);
+            zoomAnimate(
+              target,
+              zoomClamp(-(x - zoomGeom.current.bw / 2) * (target - 1), -limits.x, limits.x),
+              zoomClamp(-(y - zoomGeom.current.bh / 2) * (target - 1), -limits.y, limits.y),
+            );
+          }
+        } else {
+          zoomLastTap.current = { time: now, x, y };
+        }
+      }
+    },
+    onPanResponderTerminate: () => {
+      zoomPinch.current = null;
+      zoomActive.current = null;
+    },
+  })).current;
+
+  useEffect(() => {
+    zoomPinch.current = null;
+    zoomActive.current = null;
+    zoomAnimate(1, 0, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayUri, mode]);
+
   const applyCrop = async () => {
     const g = geomRef.current;
     if (!g.contained || !g.crop || !srcSize) return;
@@ -447,10 +633,16 @@ export default function MediaPreview({ uri, type, fileName, mimeType, theme, onC
     }
     return (
       <View style={styles.body}>
-        <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false}>
-          <Image
+        <View style={StyleSheet.absoluteFill} onLayout={onBoxLayout} collapsable={false} {...zoomPan.panHandlers}>
+          <Animated.Image
             source={{ uri: displayUri }}
-            style={StyleSheet.absoluteFill}
+            style={[StyleSheet.absoluteFill, {
+              transform: [
+                { translateX: zoomX },
+                { translateY: zoomY },
+                { scale: zoomScale },
+              ],
+            }]}
             resizeMode="contain"
             onLoad={() => setImgReady(true)}
             onError={() => setImgErr(true)}

@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+import { absUrl } from '../config';
 
 const Native = (() => {
   try {
@@ -14,7 +15,7 @@ export async function getVideoThumbnail(uri) {
     const result = await Native.getVideoThumbnail(String(uri));
     if (!result || !result.uri) return null;
     return {
-      uri: result.uri,
+      uri: absUrl(result.uri),
       width: Number(result.width) || 0,
       height: Number(result.height) || 0,
       durationMs: Number(result.durationMs) || 0,
@@ -29,6 +30,14 @@ export function formatVideoDurationLabel(durationMs) {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+// Native thumbnails report milliseconds while chat messages store seconds. Old
+// rows may contain either unit; values above a day are safely treated as ms.
+export function durationSeconds(value) {
+  const raw = Number(value) || 0;
+  if (raw <= 0) return 0;
+  return raw > 86400 ? Math.round(raw / 1000) : Math.round(raw);
 }
 
 export default getVideoThumbnail;

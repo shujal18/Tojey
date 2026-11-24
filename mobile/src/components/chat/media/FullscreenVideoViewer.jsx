@@ -13,8 +13,8 @@ import ChatVideoControls from './ChatVideoControls';
 const AUTO_HIDE_MS = 3000;
 const FADE_MS = 180;
 const TAP_GAP = 320;
-const TAP_MOVE = 12;
-const SUPPRESS_MS = 340;
+const TAP_MOVE = 24;
+const SUPPRESS_MS = 260;
 const MAX_SCALE = 3;
 const SEEK_STEP = 10;
 
@@ -73,6 +73,8 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
 
   const playingRef = useRef(playing);
   const controlsRef = useRef(controlsVisible);
+  const menuOpenRef = useRef(false);
+  const hideTimerToken = useRef(0);
   const durationRef = useRef(duration);
   const timeRef = useRef(Number(currentTime) || 0);
   const layoutRef = useRef(layout);
@@ -81,7 +83,6 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
 
   inlineRef.current = inline;
   playingRef.current = playing;
-  controlsRef.current = controlsVisible;
   durationRef.current = duration;
   timeRef.current = Number(currentTime) || 0;
   layoutRef.current = layout;
@@ -102,14 +103,27 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
       clearTimeout(hideTimer.current);
       hideTimer.current = null;
     }
-    if (!inlineRef.current || !playingRef.current || !controlsRef.current || gesture.zoom > 1.01) return;
+    hideTimerToken.current += 1;
+    const token = hideTimerToken.current;
+    if (!inlineRef.current || !playingRef.current || !controlsRef.current ||
+        menuOpenRef.current || gesture.zoom > 1.01) return;
     hideTimer.current = setTimeout(() => {
       hideTimer.current = null;
-      if (!playingRef.current || gesture.zoom > 1.01) return;
+      if (token !== hideTimerToken.current) return;
+      if (!playingRef.current || menuOpenRef.current || gesture.zoom > 1.01) return;
+      if (!controlsRef.current) return;
       controlsRef.current = false;
+      gesture.suppressUntil = 0;
       setControlsVisible(false);
     }, AUTO_HIDE_MS);
   }, [gesture]);
+
+  const setControls = useCallback((next) => {
+    controlsRef.current = !!next;
+    gesture.suppressUntil = 0;
+    setControlsVisible(controlsRef.current);
+    if (controlsRef.current) scheduleHide();
+  }, [gesture, scheduleHide]);
 
   const limitsFor = useCallback((nextZoom) => ({
     x: Math.max(0, (displayRef.current.width * nextZoom - layoutRef.current.width) / 2),
@@ -117,6 +131,9 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
   }), []);
 
   const applyTransform = useCallback((nextZoom, x, y) => {
+    scale.stopAnimation();
+    translateX.stopAnimation();
+    translateY.stopAnimation();
     gesture.zoom = nextZoom;
     gesture.x = x;
     gesture.y = y;
@@ -161,12 +178,12 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
     if (videoRef.current && typeof videoRef.current.seek === 'function') {
       try {
         videoRef.current.seek(next);
+        timeRef.current = next;
+        setCurrentTime(next);
       } catch (e) {
         setError(true);
       }
     }
-    timeRef.current = next;
-    setCurrentTime(next);
     scheduleHide();
   }, [scheduleHide]);
 
@@ -186,9 +203,11 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
     setPlaying(true);
     setCurrentTime(0);
     timeRef.current = 0;
+    posterOpacity.stopAnimation();
     posterOpacity.setValue(1);
+    setControls(true);
     setVideoKey((key) => key + 1);
-  }, [posterOpacity]);
+  }, [posterOpacity, setControls]);
 
   const startPinch = useCallback((touches) => {
     if (!touches || touches.length < 2) return;
@@ -207,14 +226,13 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
       clearTimeout(singleTimer.current);
       singleTimer.current = null;
     }
-    gesture.suppressUntil = Date.now() + SUPPRESS_MS;
-    controlsRef.current = false;
-    setControlsVisible(false);
+    setControls(false);
     if (hideTimer.current) {
       clearTimeout(hideTimer.current);
       hideTimer.current = null;
+      hideTimerToken.current += 1;
     }
-  }, [gesture]);
+  }, [setControls]);
 
   api.current = {
     startPinch,
@@ -223,6 +241,7 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
     seekBy,
     togglePlay,
     scheduleHide,
+    setControls,
     animateTo,
     retry,
   };
@@ -230,8 +249,8 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
   const panHandlers = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onStartShouldSetPanResponderCapture: () => false,
-    onMoveShouldSetPanResponderCapture: () => false,
+    onStartShouldSetPanResponderCapture: (event) => (event.nativeEvent.touches || []).length >= 2,
+    onMoveShouldSetPanResponderCapture: (event) => (event.nativeEvent.touches || []).length >= 2,
     onPanResponderGrant: (event, state) => {
       if (singleTimer.current) {
         clearTimeout(singleTimer.current);
@@ -248,6 +267,8 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
         moved: false,
         baseX: gesture.x,
         baseY: gesture.y,
+        panStartX: null,
+        panStartY: null,
       };
       api.current.scheduleHide();
     },
@@ -263,8 +284,8 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
           MAX_SCALE,
         );
         const ratio = nextZoom / current.startZoom;
-        const rawX = current.focusX - (current.focusX - current.startX) * ratio;
-        const rawY = current.focusY - (current.focusY - current.startY) * ratio;
+        const rawX = current.startX + current.focusX * (1 - ratio);
+        const rawY = current.startY + current.focusY * (1 - ratio);
         const limits = api.current.limitsFor(nextZoom);
         api.current.applyTransform(
           nextZoom,
@@ -273,12 +294,28 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
         );
         return;
       }
-      if (pinch.current) return;
+      if (pinch.current) {
+        pinch.current = null;
+        active.current = {
+          x0: touches[0] ? Number(touches[0].pageX) || 0 : Number(state.x0) || 0,
+          y0: touches[0] ? Number(touches[0].pageY) || 0 : Number(state.y0) || 0,
+          moved: true,
+          baseX: gesture.x,
+          baseY: gesture.y,
+          panStartX: touches[0] ? Number(touches[0].pageX) || 0 : null,
+          panStartY: touches[0] ? Number(touches[0].pageY) || 0 : null,
+        };
+      }
       const current = active.current;
       if (!current) return;
-      const dx = Number(state.dx) || 0;
-      const dy = Number(state.dy) || 0;
-      if (Math.abs(dx) > TAP_MOVE || Math.abs(dy) > TAP_MOVE) current.moved = true;
+      const dx = current.panStartX != null && touches[0]
+        ? (Number(touches[0].pageX) || 0) - current.panStartX
+        : Number(state.dx) || 0;
+      const dy = current.panStartY != null && touches[0]
+        ? (Number(touches[0].pageY) || 0) - current.panStartY
+        : Number(state.dy) || 0;
+      if (gesture.zoom > 1.01 && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) current.moved = true;
+      else if (Math.abs(dx) > TAP_MOVE || Math.abs(dy) > TAP_MOVE) current.moved = true;
       if (!current.moved || gesture.zoom <= 1.01) return;
       const limits = api.current.limitsFor(gesture.zoom);
       api.current.applyTransform(
@@ -290,7 +327,6 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
     onPanResponderRelease: () => {
       if (pinch.current) {
         pinch.current = null;
-        gesture.suppressUntil = Date.now() + SUPPRESS_MS;
         const limits = api.current.limitsFor(gesture.zoom);
         api.current.applyTransform(
           gesture.zoom,
@@ -316,6 +352,7 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
           : x > layoutRef.current.width * 0.62 ? 'right' : 'center';
         if (side === 'left') api.current.seekBy(-SEEK_STEP);
         else if (side === 'right') api.current.seekBy(SEEK_STEP);
+        else if (gesture.zoom > 1.01) api.current.animateTo(1, 0, 0);
         return;
       }
       lastTap.current = { time: now, x, y };
@@ -324,9 +361,7 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
         singleTimer.current = null;
         if (Date.now() < gesture.suppressUntil) return;
         lastTap.current = { time: 0, x: 0, y: 0 };
-        controlsRef.current = !controlsRef.current;
-        setControlsVisible(controlsRef.current);
-        api.current.scheduleHide();
+        api.current.setControls(!controlsRef.current);
       }, TAP_GAP);
     },
     onPanResponderTerminate: () => {
@@ -336,7 +371,6 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
       }
       active.current = null;
       pinch.current = null;
-      gesture.suppressUntil = Date.now() + SUPPRESS_MS;
       setZoom(gesture.zoom);
     },
     onPanResponderTerminationRequest: () => false,
@@ -365,6 +399,8 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
     gesture.x = 0;
     gesture.y = 0;
     gesture.suppressUntil = 0;
+    menuOpenRef.current = false;
+    hideTimerToken.current += 1;
     scale.setValue(1);
     translateX.setValue(0);
     translateY.setValue(0);
@@ -488,6 +524,7 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
             setPlaying(false);
             timeRef.current = 0;
             setCurrentTime(0);
+            setControls(true);
             if (videoRef.current && typeof videoRef.current.seek === 'function') videoRef.current.seek(0);
           }}
           onError={() => {
@@ -538,6 +575,15 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
           scheduleHide();
         }}
         onRetry={retry}
+        onMenuVisibilityChange={(open) => {
+          menuOpenRef.current = !!open;
+          if (hideTimer.current) {
+            clearTimeout(hideTimer.current);
+            hideTimer.current = null;
+            hideTimerToken.current += 1;
+          }
+          if (!open) scheduleHide();
+        }}
       />
 
       {seekFeedback ? (

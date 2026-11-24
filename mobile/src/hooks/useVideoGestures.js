@@ -31,6 +31,7 @@ export default function useVideoGestures({
   getVolume,
   getBrightness,
   getZoom,
+  onTapStart,
   onSingleTap,
   onDoubleTap,
   onSeekPreview,
@@ -52,6 +53,7 @@ export default function useVideoGestures({
     getVolume,
     getBrightness,
     getZoom,
+    onTapStart,
     onSingleTap,
     onDoubleTap,
     onSeekPreview,
@@ -128,8 +130,8 @@ export default function useVideoGestures({
   }, []);
 
   const panHandlers = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => !!enabled && !suppressTapRef.current,
-    onMoveShouldSetPanResponder: () => !!enabled && !suppressTapRef.current,
+    onStartShouldSetPanResponder: () => !!enabled,
+    onMoveShouldSetPanResponder: () => !!enabled,
     onStartShouldSetPanResponderCapture: () => false,
     onMoveShouldSetPanResponderCapture: () => false,
 
@@ -154,6 +156,9 @@ export default function useVideoGestures({
         startValue: 0,
         startTime: 0,
       };
+      if (callbacks.current.onTapStart) {
+        callbacks.current.onTapStart(Number(gesture.x0) || 0, Number(gesture.y0) || 0);
+      }
       longTimerRef.current = setTimeout(() => {
         const active = activeRef.current;
         if (!active || active.moved || active.mode || pinchRef.current) return;
@@ -284,7 +289,8 @@ export default function useVideoGestures({
       const y = Number(gesture.y0) || 0;
       const now = Date.now();
       const last = lastTapRef.current;
-      if (now - last.time < DOUBLE_TAP_GAP && Math.abs(x - last.x) < 48 && Math.abs(y - last.y) < 48) {
+      if (callbacks.current.onDoubleTap && now - last.time < DOUBLE_TAP_GAP &&
+          Math.abs(x - last.x) < 48 && Math.abs(y - last.y) < 48) {
         lastTapRef.current = { time: 0, x: 0, y: 0 };
         const side = x < callbacks.current.width * 0.38
           ? 'left'

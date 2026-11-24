@@ -151,6 +151,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   const audioTracksRef = useRef([]);
   const textTracksRef = useRef([]);
   const lastActionRef = useRef({});
+  const wokeOnTapRef = useRef(false);
   const infoAnimRef = useRef(null);
   const [pipActive, setPipActive] = useState(false);
   const [pipOk, setPipOk] = useState(false);
@@ -230,7 +231,9 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
   const gesturesAllowed = enableGestures && !gestureLocked && !state.locked;
   const canSeek = gesturesAllowed && !guest;
   const effectiveFullscreen = typeof fullscreen === 'boolean' ? !!fullscreen : state.fullscreen;
-  const safeTop = effectiveFullscreen && !mini && !compact ? 18 : 0;
+  const safeTop = effectiveFullscreen && !mini && !compact
+    ? (Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 8 : 18)
+    : 0;
   const safeBottom = effectiveFullscreen && !mini && !compact ? 16 : 8;
 
   useVideoRecovery({
@@ -497,17 +500,24 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     setBrightnessOverlay({ visible: true, level: value });
   }, []);
 
+  const handleSurfaceTapStart = useCallback(() => {
+    wokeOnTapRef.current = false;
+    if (getState().controlsVisible) return;
+    wokeOnTapRef.current = true;
+    if (!showControls && !controlsUnlocked) setControlsUnlocked(true);
+    wakeControls();
+    if (typeof onSurfaceTap === 'function') onSurfaceTap();
+  }, [controlsUnlocked, getState, onSurfaceTap, showControls, wakeControls]);
+
   const handleSurfaceTap = useCallback(() => {
-    if (!showControls && !controlsUnlocked) {
-      setControlsUnlocked(true);
-      wakeControls();
-      if (typeof onSurfaceTap === 'function') onSurfaceTap();
+    if (wokeOnTapRef.current) {
+      wokeOnTapRef.current = false;
       return;
     }
     if (typeof onSurfaceTap === 'function') onSurfaceTap();
     if (getState().controlsVisible) setControlsVisible(false);
     else wakeControls();
-  }, [controlsUnlocked, getState, onSurfaceTap, setControlsVisible, showControls, wakeControls]);
+  }, [getState, onSurfaceTap, setControlsVisible, wakeControls]);
 
   const panHandlers = useVideoGestures({
     enabled: gesturesAllowed && !!sourceUri,
@@ -518,6 +528,7 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
     getVolume: () => getState().volume,
     getBrightness: () => brightnessRef.current,
     getZoom: () => getState().zoom,
+    onTapStart: handleSurfaceTapStart,
     onSingleTap: handleSurfaceTap,
     onDoubleTap: canSeek ? handleDoubleTap : undefined,
     onSeekPreview: canSeek ? beginSeek : undefined,

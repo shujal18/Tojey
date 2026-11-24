@@ -11,5 +11,5 @@ export function canInlineVideoPreview(fileName, mime) {
   if (UNSAFE_VIDEO_RE.test(name)) return false;
   const m = String(mime || '').toLowerCase();
   if (m.startsWith('video/')) return m === 'video/mp4' || m === 'video/mpeg';
-  return true;
+  return false;
 }

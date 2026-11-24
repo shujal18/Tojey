@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, Modal, Image, ScrollView, FlatList,
-  StyleSheet, ActivityIndicator, Dimensions,
+  StyleSheet, ActivityIndicator, Dimensions, Platform, StatusBar, useWindowDimensions,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -38,11 +38,18 @@ function fmt(sec) {
 
 export default function YoutubePlayerModal({ item: initial, authHeaders, token, onClose, onOpenChannel, onOpenPlaylist, onDownload, dlMap }) {
   const { theme } = useTheme();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const wt = useWatchTogether();
   const videoSession = useVideoSession();
   const [cur, setCur] = useState(initial);
   const [fullscreen, setFullscreen] = useState(false);
+  const topInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
+  const theaterHeight = Math.round(Math.min(
+    Math.max(windowWidth * 9 / 16, windowHeight * 0.54),
+    Math.max(fs(180), windowHeight - topInset - fs(48)),
+  ));
   const playerRef = useRef(null);
+  const errorAttemptsRef = useRef(0);
 
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -124,6 +131,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     setUseDash(false);
     setMuxFallback(false);
     recoveringRef.current = false;
+    errorAttemptsRef.current = 0;
     setSaved(isBookmarked(v.videoId));
     setSubbed(isSubscribed(v.channelId));
     addHistory(v).catch(() => {});
@@ -304,6 +312,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
     getProxyPlayback(cur.videoId, token, { maxHeight, retry: true })
       .then((nextStream) => {
         setStream(nextStream);
+        errorAttemptsRef.current = 0;
         setMuxFallback(false);
         setUseDash(!!nextStream.audioUrl && !nextStream.videoHasAudio);
       })
@@ -402,20 +411,14 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   return (
     <Modal visible transparent={false} animationType="slide" onRequestClose={handleHardwareBack}>
-      <View style={[styles.root, { backgroundColor: theme.background }]}>
-        {!fullscreen && (
-          <View style={[styles.header, { backgroundColor: theme.background }]}>
-            <TouchableOpacity onPress={handleClose} style={styles.headerBtn}>
-              <Icon name="chevron-down" size={24} color={theme.text} />
-            </TouchableOpacity>
-            <Text style={[styles.headerTitle, { color: theme.textSecondary }]} numberOfLines={1}>
-              {inRoom ? `Watching with ${partnerName}` : 'Now playing'}
-            </Text>
-            <View style={{ width: 30 }} />
-          </View>
-        )}
-
-        <View style={[styles.videoWrap, fullscreen && styles.videoWrapFullscreen]}>
+      <View style={[
+        styles.root,
+        { backgroundColor: theme.background, paddingTop: fullscreen ? 0 : topInset },
+      ]}>
+        <View style={[
+          styles.videoWrap,
+          fullscreen ? styles.videoWrapFullscreen : { height: theaterHeight },
+        ]}>
           <TojeyVideoPlayer
             ref={playerRef}
             style={styles.video}
@@ -441,6 +444,11 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
             onRateChange={handlePlayerRate}
             onEnd={handleEnd}
             onError={(detail) => {
+              errorAttemptsRef.current += 1;
+              if (errorAttemptsRef.current > 4) {
+                setPlayError(detail || 'Playback failed');
+                return;
+              }
               if (usingDash) {
                 setMuxFallback(true);
                 setUseDash(false);
@@ -838,10 +846,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingTop: 8, paddingBottom: 6 },
-  headerBtn: { padding: 6, width: 30 },
-  headerTitle: { fontSize: fs(13), fontWeight: '600' },
-  videoWrap: { height: Dimensions.get('window').width * 9 / 16, backgroundColor: '#000' },
+  videoWrap: { backgroundColor: '#000' },
   videoWrapFullscreen: {
     position: 'absolute',
     top: 0,
@@ -855,10 +860,6 @@ const styles = StyleSheet.create({
   videoLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   streamingBadge: { position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(16,11,26,0.7)', borderRadius: 14, padding: 8 },
   nextBanner: {
-    position: 'absolute',
-    top: Dimensions.get('window').width * 9 / 16,
-    left: 0,
-    right: 0,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(16,11,26,0.95)',

@@ -2,16 +2,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Animated, Dimensions, Image, PanResponder, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
+import { captureRef } from 'react-native-view-shot';
 import { clamp } from '../../../components/video/videoConfig';
 import { absUrl } from '../../../config';
+import { DRAW_COLORS, DRAW_SIZES, DrawableImage, DrawingToolbar } from '../../DrawingCanvas';
+import { quickReactions } from '../../../theme';
+import ColorEmoji from '../../ColorEmoji';
 import { fs } from '../../../utils/size';
 import { Icon } from '../../AppIcon';
 
 const CHROME_MS = 180;
 const FADE_MS = 180;
 const TAP_GAP = 320;
-const TAP_MOVE = 12;
-const SUPPRESS_MS = 340;
+const TAP_MOVE = 20;
+const SUPPRESS_MS = 260;
 const MAX_SCALE = 4;
 const DOUBLE_TAP_SCALE = 2.5;
 
@@ -28,7 +32,28 @@ function midpoint(a, b) {
   };
 }
 
-export default function FullscreenImageViewer({ item, onClose }) {
+function MenuButton({ icon, label, onPress, danger }) {
+  return (
+    <TouchableOpacity style={styles.menuButton} onPress={onPress} accessibilityLabel={label}>
+      <Icon name={icon} size={fs(17)} color={danger ? '#FF8A80' : '#fff'} />
+      <Text style={[styles.menuButtonText, danger && styles.menuButtonTextDanger]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+export default function FullscreenImageViewer({
+  item,
+  onClose,
+  onExternal,
+  onReact,
+  onReply,
+  onSave,
+  onCopy,
+  onDelete,
+  onSendDrawing,
+  currentUserId,
+  theme,
+}) {
   const screen = Dimensions.get('window');
   const [layout, setLayout] = useState({ width: screen.width || 1, height: screen.height || 1 });
   const [natural, setNatural] = useState(() => ({
@@ -39,6 +64,14 @@ export default function FullscreenImageViewer({ item, onClose }) {
   const [failed, setFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
   const [chromeVisible, setChromeVisible] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawingBusy, setDrawingBusy] = useState(false);
+  const [strokes, setStrokes] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const [eraser, setEraser] = useState(false);
+  const [color, setColor] = useState(DRAW_COLORS[1]);
+  const [brush, setBrush] = useState(DRAW_SIZES[1]);
 
   const fullUri = absUrl(item?.media_url);
   const thumbUri = absUrl(item?.thumb_url);
@@ -56,6 +89,21 @@ export default function FullscreenImageViewer({ item, onClose }) {
   const singleTimer = useRef(null);
   const lastTap = useRef({ time: 0, x: 0, y: 0 });
   const api = useRef({});
+  const drawRef = useRef(null);
+  const strokesRef = useRef(strokes);
+  const redoStackRef = useRef(redoStack);
+  const eraserRef = useRef(eraser);
+  const colorRef = useRef(color);
+  const brushRef = useRef(brush);
+  const drawModeRef = useRef(false);
+  const actionApi = useRef({});
+
+  strokesRef.current = strokes;
+  redoStackRef.current = redoStack;
+  eraserRef.current = eraser;
+  colorRef.current = color;
+  brushRef.current = brush;
+  drawModeRef.current = drawMode;
 
   const display = useMemo(() => {
     const w = Number(natural.width) > 0 ? Number(natural.width) : 4;
@@ -74,6 +122,9 @@ export default function FullscreenImageViewer({ item, onClose }) {
   }), []);
 
   const applyTransform = useCallback((nextScale, x, y) => {
+    scale.stopAnimation();
+    translateX.stopAnimation();
+    translateY.stopAnimation();
     gesture.scale = nextScale;
     gesture.x = x;
     gesture.y = y;
@@ -133,12 +184,54 @@ export default function FullscreenImageViewer({ item, onClose }) {
       moved: false,
     };
     active.current = null;
+    gesture.suppressUntil = 0;
     if (singleTimer.current) {
       clearTimeout(singleTimer.current);
       singleTimer.current = null;
     }
     setChrome(false, true);
   }, [gesture, setChrome]);
+
+  const undoDrawing = useCallback(() => {
+    const cur = strokesRef.current;
+    if (!cur.length) return;
+    setRedoStack((r) => [...r, cur[cur.length - 1]]);
+    setStrokes(cur.slice(0, -1));
+  }, []);
+
+  const redoDrawing = useCallback(() => {
+    const rs = redoStackRef.current;
+    if (!rs.length) return;
+    setStrokes((s) => [...s, rs[rs.length - 1]]);
+    setRedoStack(rs.slice(0, -1));
+  }, []);
+
+  const exitDrawing = useCallback(() => {
+    setDrawMode(false);
+    setDrawingBusy(false);
+    setStrokes([]);
+    strokesRef.current = [];
+    setRedoStack([]);
+    redoStackRef.current = [];
+  }, []);
+
+  const sendDrawing = useCallback(async () => {
+    if (!drawRef.current || drawingBusy) return;
+    setDrawingBusy(true);
+    try {
+      const shot = await captureRef(drawRef, { format: 'png', quality: 0.92, result: 'tmpfile' });
+      if (typeof onSendDrawing === 'function') {
+        onSendDrawing(shot, exitDrawing);
+      } else {
+        exitDrawing();
+      }
+    } catch (e) {
+      console.error('fullscreen draw capture failed', e);
+      setDrawingBusy(false);
+    }
+  }, [drawingBusy, exitDrawing, onSendDrawing]);
+
+  actionApi.current = { onExternal, onReact, onReply, onSave, onCopy, onDelete, onClose, exitDrawing };
 
   api.current = {
     startPinch,
@@ -152,8 +245,8 @@ export default function FullscreenImageViewer({ item, onClose }) {
   const panHandlers = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onStartShouldSetPanResponderCapture: () => false,
-    onMoveShouldSetPanResponderCapture: () => false,
+    onStartShouldSetPanResponderCapture: (event) => (event.nativeEvent.touches || []).length >= 2,
+    onMoveShouldSetPanResponderCapture: (event) => (event.nativeEvent.touches || []).length >= 2,
     onPanResponderGrant: (event, state) => {
       if (singleTimer.current) {
         clearTimeout(singleTimer.current);
@@ -171,6 +264,8 @@ export default function FullscreenImageViewer({ item, onClose }) {
         mode: null,
         baseX: gesture.x,
         baseY: gesture.y,
+        panStartX: null,
+        panStartY: null,
       };
     },
     onPanResponderMove: (event, state) => {
@@ -186,8 +281,8 @@ export default function FullscreenImageViewer({ item, onClose }) {
         );
         if (Math.abs(nextScale - current.startScale) > 0.03) current.moved = true;
         const ratio = nextScale / current.startScale;
-        const rawX = current.focusX - (current.focusX - current.startX) * ratio;
-        const rawY = current.focusY - (current.focusY - current.startY) * ratio;
+        const rawX = current.startX + current.focusX * (1 - ratio);
+        const rawY = current.startY + current.focusY * (1 - ratio);
         const limits = api.current.limitsFor(nextScale);
         api.current.applyTransform(
           nextScale,
@@ -196,11 +291,27 @@ export default function FullscreenImageViewer({ item, onClose }) {
         );
         return;
       }
-      if (pinch.current) return;
+      if (pinch.current) {
+        pinch.current = null;
+        active.current = {
+          x0: touches[0] ? Number(touches[0].pageX) || 0 : Number(state.x0) || 0,
+          y0: touches[0] ? Number(touches[0].pageY) || 0 : Number(state.y0) || 0,
+          moved: true,
+          mode: 'pan',
+          baseX: gesture.x,
+          baseY: gesture.y,
+          panStartX: touches[0] ? Number(touches[0].pageX) || 0 : null,
+          panStartY: touches[0] ? Number(touches[0].pageY) || 0 : null,
+        };
+      }
       const current = active.current;
       if (!current) return;
-      const dx = Number(state.dx) || 0;
-      const dy = Number(state.dy) || 0;
+      const dx = current.panStartX != null && touches[0]
+        ? (Number(touches[0].pageX) || 0) - current.panStartX
+        : Number(state.dx) || 0;
+      const dy = current.panStartY != null && touches[0]
+        ? (Number(touches[0].pageY) || 0) - current.panStartY
+        : Number(state.dy) || 0;
       if (Math.abs(dx) > TAP_MOVE || Math.abs(dy) > TAP_MOVE) current.moved = true;
       if (!current.moved || gesture.scale <= 1.01) return;
       current.mode = 'pan';
@@ -215,7 +326,6 @@ export default function FullscreenImageViewer({ item, onClose }) {
       if (pinch.current) {
         const current = pinch.current;
         pinch.current = null;
-        gesture.suppressUntil = Date.now() + SUPPRESS_MS;
         const limits = api.current.limitsFor(gesture.scale);
         api.current.applyTransform(
           gesture.scale,
@@ -255,7 +365,6 @@ export default function FullscreenImageViewer({ item, onClose }) {
       }
       active.current = null;
       pinch.current = null;
-      gesture.suppressUntil = Date.now() + SUPPRESS_MS;
     },
     onPanResponderTerminationRequest: () => false,
   }), [gesture]);
@@ -274,6 +383,13 @@ export default function FullscreenImageViewer({ item, onClose }) {
     setLoading(true);
     setFailed(false);
     setChromeVisible(true);
+    setMenuOpen(false);
+    setDrawMode(false);
+    setDrawingBusy(false);
+    setStrokes([]);
+    strokesRef.current = [];
+    setRedoStack([]);
+    redoStackRef.current = [];
     if (singleTimer.current) {
       clearTimeout(singleTimer.current);
       singleTimer.current = null;
@@ -339,6 +455,9 @@ export default function FullscreenImageViewer({ item, onClose }) {
 
   const senderLabel = item?.sender_name || item?.senderName || item?.name;
   const dateLabel = item?.created_at || item?.date || item?.timestamp;
+  const caption = item?.content ? String(item.content) : '';
+  const isOwn = !!item && Number(item.sender_id) === Number(currentUserId) && Number(currentUserId) > 0;
+  const menuTheme = theme || {};
 
   return (
     <View
@@ -347,7 +466,7 @@ export default function FullscreenImageViewer({ item, onClose }) {
         const { width, height } = event.nativeEvent.layout;
         if (width > 0 && height > 0) setLayout({ width, height });
       }}
-      {...panHandlers}
+      {...(drawMode ? {} : panHandlers)}
     >
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
         <Animated.View
@@ -417,29 +536,126 @@ export default function FullscreenImageViewer({ item, onClose }) {
 
       <Animated.View
         style={[styles.topBar, { opacity: chromeOpacity }]}
-        pointerEvents={chromeVisible ? 'box-none' : 'none'}
+        pointerEvents={chromeVisible || drawMode ? 'box-none' : 'none'}
       >
         <View style={styles.gradientStrong} pointerEvents="none" />
         <View style={styles.gradientSoft} pointerEvents="none" />
         <TouchableOpacity
-          onPress={onClose}
+          onPress={() => (drawMode ? actionApi.current.exitDrawing() : onClose())}
           style={styles.backButton}
-          accessibilityLabel="Back"
+          accessibilityLabel={drawMode ? 'Exit drawing' : 'Back'}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
           <Icon name="arrow-back" size={fs(26)} color="#fff" />
         </TouchableOpacity>
-        {senderLabel || dateLabel ? (
+        {senderLabel || dateLabel || drawMode ? (
           <View style={styles.meta} pointerEvents="none">
-            {senderLabel ? (
+            {drawMode ? (
+              <Text style={styles.metaPrimary} numberOfLines={1}>Draw on photo</Text>
+            ) : senderLabel ? (
               <Text style={styles.metaPrimary} numberOfLines={1}>{senderLabel}</Text>
             ) : null}
-            {dateLabel ? (
+            {!drawMode && dateLabel ? (
               <Text style={styles.metaSecondary} numberOfLines={1}>{dateLabel}</Text>
             ) : null}
           </View>
         ) : null}
+        {drawMode ? (
+          <TouchableOpacity
+            onPress={sendDrawing}
+            disabled={drawingBusy}
+            style={styles.actionButton}
+            accessibilityLabel="Send drawing"
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            {drawingBusy
+              ? <ActivityIndicator color="#fff" size="small" />
+              : <Icon name="send" size={fs(22)} color="#fff" />}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            onPress={() => setMenuOpen(true)}
+            style={styles.actionButton}
+            accessibilityLabel="More actions"
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Icon name="ellipsis-horizontal" size={fs(24)} color="#fff" />
+          </TouchableOpacity>
+        )}
       </Animated.View>
+
+      {drawMode ? (
+        <View style={styles.drawLayer}>
+          <DrawableImage
+            key={`${fullUri || retryKey}-draw`}
+            uri={fullUri}
+            drawRef={drawRef}
+            strokes={strokes}
+            strokesRef={strokesRef}
+            setStrokes={setStrokes}
+            setRedoStack={setRedoStack}
+            drawModeRef={drawModeRef}
+            eraserRef={eraserRef}
+            colorRef={colorRef}
+            brushRef={brushRef}
+          />
+          <View style={styles.drawToolbarWrap}>
+            <DrawingToolbar
+              theme={menuTheme}
+              color={color}
+              brush={brush}
+              setColor={setColor}
+              setBrush={setBrush}
+              onUndo={undoDrawing}
+              onRedo={redoDrawing}
+              onClear={() => { setStrokes([]); strokesRef.current = []; setRedoStack([]); redoStackRef.current = []; }}
+              onDone={sendDrawing}
+              onCancel={exitDrawing}
+              busy={drawingBusy}
+              eraser={eraser}
+              setEraser={setEraser}
+              canUndo={strokes.length > 0}
+              canRedo={redoStack.length > 0}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {menuOpen && !drawMode ? (
+        <View style={styles.menuOverlay} pointerEvents="box-none">
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setMenuOpen(false)} accessibilityLabel="Close actions" />
+          <View style={[styles.menu, { backgroundColor: menuTheme.card || '#1e2529' }]}>
+            <Text style={[styles.menuTitle, { color: menuTheme.textSecondary || 'rgba(255,255,255,0.7)' }]}>Media actions</Text>
+            <View style={styles.reactionRow}>
+              {quickReactions.map((reaction) => (
+                <TouchableOpacity
+                  key={reaction}
+                  style={[styles.reactionBtn, { backgroundColor: menuTheme.primaryLight || 'rgba(255,255,255,0.12)' }]}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    if (typeof actionApi.current.onReact === 'function') actionApi.current.onReact(item.id, reaction);
+                  }}
+                >
+                  <ColorEmoji style={{ fontSize: fs(22) }}>{reaction}</ColorEmoji>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.actionGrid}>
+              <MenuButton icon="color-wand" label="Draw" onPress={() => { setMenuOpen(false); setDrawMode(true); setChrome(true, true); }} />
+              <MenuButton icon="return-down-back-outline" label="Reply" onPress={() => { setMenuOpen(false); actionApi.current.onReply?.(item); }} />
+              <MenuButton icon="download-outline" label="Save" onPress={() => { setMenuOpen(false); actionApi.current.onSave?.(item); }} />
+              <MenuButton icon="open-outline" label="Open" onPress={() => { setMenuOpen(false); actionApi.current.onExternal?.(item); }} />
+              {caption ? (
+                <MenuButton icon="copy-outline" label="Copy" onPress={() => { setMenuOpen(false); actionApi.current.onCopy?.(caption); }} />
+              ) : null}
+              <MenuButton icon="trash-outline" label="Delete" danger onPress={() => { setMenuOpen(false); actionApi.current.onDelete?.(item, 'me'); }} />
+              {isOwn ? (
+                <MenuButton icon="arrow-undo-outline" label="Unsend" danger onPress={() => { setMenuOpen(false); actionApi.current.onDelete?.(item, 'everyone'); }} />
+              ) : null}
+            </View>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -541,5 +757,85 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.62)',
     fontSize: fs(11),
     marginTop: fs(2),
+  },
+  actionButton: {
+    width: fs(42),
+    height: fs(42),
+    marginLeft: 'auto',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  drawLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 18,
+    backgroundColor: '#050505',
+  },
+  drawToolbarWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 2,
+  },
+  menuOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 30,
+    justifyContent: 'flex-end',
+  },
+  menu: {
+    margin: fs(12),
+    padding: fs(14),
+    borderRadius: fs(16),
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: fs(12),
+    elevation: 12,
+  },
+  menuTitle: {
+    fontSize: fs(12),
+    fontWeight: '700',
+    marginBottom: fs(10),
+  },
+  reactionRow: {
+    flexDirection: 'row',
+    gap: fs(8),
+    marginBottom: fs(12),
+  },
+  reactionBtn: {
+    width: fs(44),
+    height: fs(44),
+    borderRadius: fs(22),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: fs(8),
+  },
+  menuButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: fs(12),
+    paddingVertical: fs(9),
+    borderRadius: fs(10),
+    backgroundColor: 'rgba(255,255,255,0.09)',
+  },
+  menuButtonText: {
+    color: '#fff',
+    fontSize: fs(12),
+    fontWeight: '600',
+    marginLeft: fs(6),
+  },
+  menuButtonTextDanger: {
+    color: '#FF8A80',
   },
 });

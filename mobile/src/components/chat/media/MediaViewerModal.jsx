@@ -4,14 +4,29 @@ import { setImmersive } from '../../../services/orientation';
 import FullscreenImageViewer from './FullscreenImageViewer';
 import FullscreenVideoViewer from './FullscreenVideoViewer';
 
-export default function MediaViewerModal({ visible, item, onClose, onExternal, theme }) {
+export default function MediaViewerModal({
+  visible,
+  item,
+  onClose,
+  onExternal,
+  onReact,
+  onReply,
+  onSave,
+  onCopy,
+  onDelete,
+  onSendDrawing,
+  currentUserId,
+  theme,
+}) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const hiddenRef = useRef(false);
 
   useEffect(() => {
     if (!visible) return undefined;
 
     StatusBar.setHidden(true, 'fade');
+    hiddenRef.current = true;
     setImmersive(true);
 
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -21,7 +36,8 @@ export default function MediaViewerModal({ visible, item, onClose, onExternal, t
 
     return () => {
       subscription.remove();
-      StatusBar.setHidden(false, 'fade');
+      if (hiddenRef.current) StatusBar.setHidden(false, 'fade');
+      hiddenRef.current = false;
       setImmersive(false);
     };
   }, [visible]);
@@ -40,7 +56,19 @@ export default function MediaViewerModal({ visible, item, onClose, onExternal, t
           item.type === 'VIDEO' ? (
             <FullscreenVideoViewer item={item} onClose={onClose} onExternal={onExternal} />
           ) : (
-            <FullscreenImageViewer item={item} onClose={onClose} />
+            <FullscreenImageViewer
+              item={item}
+              onClose={onClose}
+              onExternal={onExternal}
+              onReact={onReact}
+              onReply={onReply}
+              onSave={onSave}
+              onCopy={onCopy}
+              onDelete={onDelete}
+              onSendDrawing={onSendDrawing}
+              currentUserId={currentUserId}
+              theme={theme}
+            />
           )
         ) : null}
       </View>

@@ -785,6 +785,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
         ...canonical,
         media_width: canonical.media_width || existing?.media_width || 0,
         media_height: canonical.media_height || existing?.media_height || 0,
+        media_url: canonical.media_url || existing?.media_url || '',
+        thumb_url: canonical.thumb_url || existing?.thumb_url || '',
+        duration: canonical.duration || existing?.duration || 0,
+        file_name: canonical.file_name || existing?.file_name || '',
+        mime_type: canonical.mime_type || existing?.mime_type || '',
+        waveform: canonical.waveform || existing?.waveform || null,
         _tempId: tempId || canonical._tempId || null,
         client_id: clientId || canonical.client_id || null,
         _local: true,
@@ -812,6 +818,28 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
       return next;
     });
   }, [addKnownId, bumpCursor]);
+
+  const emitOrQueue = useCallback((payload, tempId) => {
+    const markQueued = () => setMessages((prev) => prev.map((m) =>
+      (m.id === tempId || String(m.client_id || m._tempId || '') === String(payload.clientId))
+        ? { ...m, _pending: false, _queued: true, _uploading: false, _uploadProgress: 1 }
+        : m
+    ));
+    if (socketReady()) {
+      socket.emit('message:send', payload, (ack) => {
+        if (ack && ack.ok) {
+          applyAck(payload.clientId, ack.message, payload.clientId);
+        } else {
+          markQueued();
+          enqueueOutgoing(currentUser.id, otherUserId, payload);
+        }
+      });
+    } else {
+      markQueued();
+      enqueueOutgoing(currentUser.id, otherUserId, payload);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyAck, currentUser.id, otherUserId, socket]);
 
   const updateStatus = useCallback((id, status) => {
     if (id == null || !status) return;
@@ -1765,7 +1793,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     uploadAsset({ uri: asset.uri, name: fileName, type: mimeType }, (p) => setUploadProgress(tempId, p))
       .then((upData) => {
         uploadTasks.current.delete(fileName);
-        socket.emit('message:send', {
+        emitOrQueue({
           otherUserId,
           type: 'FILE',
           content: fileName,
@@ -1773,13 +1801,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
           mediaSize: fileSize,
           mediaUrl: upData.url,
           clientId,
-        }, (ack) => {
-          if (ack && ack.ok) {
-            applyAck(clientId, ack.message, clientId);
-          } else {
-            setMessages((prev) => prev.filter((m) => m.id !== tempId));
-          }
-        });
+        }, tempId);
       })
       .catch((e) => {
         uploadTasks.current.delete(fileName);
@@ -1980,13 +2002,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             mediaHeight: localHeight,
           } : {}),
         };
-        socket.emit('message:send', payload, (ack) => {
-          if (ack && ack.ok) {
-            applyAck(clientId, ack.message, clientId);
-          } else {
-            setMessages((prev) => prev.filter((m) => m.id !== tempId));
-          }
-        });
+        emitOrQueue(payload, tempId);
       })
       .catch((e) => {
         uploadTasks.current.delete(fileName);
@@ -2030,7 +2046,7 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             console.warn('video thumbnail retry upload failed:', e);
           }
         }
-        socket.emit('message:send', {
+        emitOrQueue({
           otherUserId,
           type: msg.type,
           content: isFile ? fileName : (isVoice ? 'Voice message' : (isVideo ? '🎬 Video' : '📷 Photo')),
@@ -2045,20 +2061,14 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
             mediaWidth: msg.media_width || 0,
             mediaHeight: msg.media_height || 0,
           } : {}),
-        }, (ack) => {
-          if (ack && ack.ok) {
-            applyAck(clientId, ack.message, clientId);
-          } else {
-            setMessages((prev) => prev.filter((m) => m.id !== tempId));
-          }
-        });
+        }, tempId);
       })
       .catch((e) => {
         uploadTasks.current.delete(fileName);
         console.error('retry sendMedia failed:', e);
         setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _pending: false, _uploading: false, _uploadError: true } : m)));
       });
-  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, applyAck]);
+  }, [otherUserId, currentUser.id, uploadAsset, setUploadProgress, emitOrQueue]);
 
   const uploadDrawing = useCallback(async (filePath, onDone) => {
     if (!filePath) return;
@@ -2089,27 +2099,21 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     try {
       const upData = await uploadAsset({ uri: filePath, name: fileName, type: 'image/png' }, (p) => setUploadProgress(tempId, p));
       uploadTasks.current.delete(fileName);
-      socket.emit('message:send', {
+      emitOrQueue({
         otherUserId,
         type: 'IMAGE',
         content: '🖌️ Drawing',
         mediaUrl: upData.url,
         thumbUrl: upData.url,
         clientId,
-      }, (ack) => {
-        if (ack && ack.ok) {
-          applyAck(clientId, ack.message, clientId);
-          if (onDone) onDone();
-        } else {
-          setMessages((prev) => prev.filter((m) => m.id !== tempId));
-        }
-      });
+      }, tempId);
+      if (onDone) onDone();
     } catch (e) {
       uploadTasks.current.delete(fileName);
       console.error('uploadDrawing failed:', e);
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, _uploading: false, _uploadError: true } : m)));
     }
-  }, [otherUserId, socket, currentUser.id, uploadAsset, setUploadProgress, applyAck]);
+  }, [otherUserId, currentUser.id, uploadAsset, setUploadProgress, emitOrQueue]);
 
   const downloadAndOpen = useCallback(async (message) => {
     if (!message || !message.media_url) return;
@@ -2609,6 +2613,13 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           theme={theme}
           onClose={() => setMediaViewer(null)}
           onExternal={(item) => downloadAndOpen(item)}
+          onReact={(id, reaction) => reactTo(id, reaction)}
+          onReply={(message) => { setMediaViewer(null); setReplyingTo(message); }}
+          onSave={(message) => { setMediaViewer(null); saveToGallery(message); }}
+          onCopy={(text) => Clipboard.setString(String(text || ''))}
+          onDelete={(message, mode) => { setMediaViewer(null); deleteMessage(message, mode); }}
+          onSendDrawing={uploadDrawing}
+          currentUserId={currentUser?.id}
         />
       )}
 

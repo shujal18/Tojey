@@ -222,6 +222,7 @@ export function isImageUri(value) {
   const source = value.trim();
   if (/^data:image\//i.test(source)) return true;
   const path = source.split(/[?#]/)[0];
+  if (/^content:\/\//i.test(path)) return true;
   return /\.(jpe?g|png|gif|webp|bmp|heic|heif|avif)$/i.test(path);
 }
 

@@ -68,11 +68,11 @@ function VideoBottomBar({
           onPreview={onSeekPreview}
           onCommit={onSeekCommit}
         />
-        {guest ? <Text style={styles.synced}>● Synced</Text> : null}
+        {guest ? <Text style={styles.synced}>●</Text> : null}
         <Text style={[styles.time, styles.duration]}>{formatClock(duration)}</Text>
       </View>
 
-      <View style={styles.controlRow}>
+      <View style={[styles.controlRow, { gap: fullscreen ? 18 : 8 }]}>
         <QuickButton onPress={onToggleMute} label={state.muted ? 'Unmute video' : 'Mute video'}>
           <Icon name={state.muted ? 'volume-mute' : 'volume-high'} size={22} color="#fff" />
         </QuickButton>
@@ -116,11 +116,11 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   duration: { color: 'rgba(255,255,255,0.68)' },
-  synced: { color: 'rgba(190,222,255,0.72)', fontSize: fs(9), fontWeight: '700' },
+  synced: { color: 'rgba(190,222,255,0.72)', fontSize: fs(10), fontWeight: '700', width: 12, textAlign: 'center' },
   controlRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     paddingHorizontal: 18,
     paddingTop: 8,
   },
