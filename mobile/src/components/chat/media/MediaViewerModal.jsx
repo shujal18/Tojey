@@ -1,5 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BackHandler, Modal, StatusBar, StyleSheet, View } from 'react-native';
+import Toast from '../../Toast';
+import { fs } from '../../../utils/size';
 import { setImmersive } from '../../../services/orientation';
 import FullscreenImageViewer from './FullscreenImageViewer';
 import FullscreenVideoViewer from './FullscreenVideoViewer';
@@ -21,6 +23,17 @@ export default function MediaViewerModal({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const hiddenRef = useRef(false);
+  const [saveToast, setSaveToast] = useState(null);
+
+  const handleSave = async (message) => {
+    if (typeof onSave !== 'function') return;
+    const result = await onSave(message);
+    if (result && result.message) setSaveToast({ id: Date.now(), message: result.message });
+  };
+
+  useEffect(() => {
+    setSaveToast(null);
+  }, [visible, item && item.id]);
 
   useEffect(() => {
     if (!visible) return undefined;
@@ -54,7 +67,7 @@ export default function MediaViewerModal({
       <View style={styles.root}>
         {visible && item ? (
           item.type === 'VIDEO' ? (
-            <FullscreenVideoViewer item={item} onClose={onClose} onExternal={onExternal} />
+            <FullscreenVideoViewer item={item} onClose={onClose} onExternal={onExternal} onSave={handleSave} />
           ) : (
             <FullscreenImageViewer
               item={item}
@@ -62,7 +75,7 @@ export default function MediaViewerModal({
               onExternal={onExternal}
               onReact={onReact}
               onReply={onReply}
-              onSave={onSave}
+              onSave={handleSave}
               onCopy={onCopy}
               onDelete={onDelete}
               onSendDrawing={onSendDrawing}
@@ -71,6 +84,13 @@ export default function MediaViewerModal({
             />
           )
         ) : null}
+        <Toast
+          key={saveToast ? saveToast.id : 'save-toast'}
+          message={saveToast ? saveToast.message : ''}
+          bottom={fs(72)}
+          duration={3000}
+          variant="media"
+        />
       </View>
     </Modal>
   );

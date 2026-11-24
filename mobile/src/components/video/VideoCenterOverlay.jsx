@@ -17,10 +17,11 @@ function VideoCenterOverlay({
   const showRetry = !!error;
   const showSpinner = !showRetry && buffering;
   const showPlayPause = !showRetry && !showSpinner && controlsVisible && !disabled && !locked;
+  const interactive = showRetry || showPlayPause;
 
   return (
-    <View style={StyleSheet.absoluteFillObject} pointerEvents="box-none">
-      <View style={styles.center} pointerEvents="box-none">
+    <View style={StyleSheet.absoluteFillObject} pointerEvents={interactive ? 'box-none' : 'none'}>
+      <View style={styles.center} pointerEvents={interactive ? 'box-none' : 'none'}>
         {showRetry ? (
           <TouchableOpacity
             style={styles.retryButton}

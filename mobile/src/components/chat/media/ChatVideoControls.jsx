@@ -17,6 +17,7 @@ export default function ChatVideoControls({
   rate,
   error,
   onBack,
+  onSave,
   onTogglePlay,
   onSeek,
   onRate,
@@ -108,6 +109,16 @@ export default function ChatVideoControls({
         >
           <Icon name="arrow-back" size={fs(26)} color="#fff" />
         </TouchableOpacity>
+        {onSave ? (
+          <TouchableOpacity
+            onPress={onSave}
+            style={styles.actionButton}
+            accessibilityLabel="Save video"
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Icon name="download-outline" size={fs(22)} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {error ? (
@@ -194,6 +205,8 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: fs(112),
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     paddingHorizontal: fs(8),
     paddingTop: fs(10),
   },
@@ -216,6 +229,13 @@ const styles = StyleSheet.create({
   backButton: {
     width: fs(42),
     height: fs(42),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionButton: {
+    width: fs(42),
+    height: fs(42),
+    marginLeft: 'auto',
     alignItems: 'center',
     justifyContent: 'center',
   },

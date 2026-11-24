@@ -712,70 +712,74 @@ const TojeyVideoPlayer = forwardRef(function TojeyVideoPlayer({
       collapsable={false}
     >
       <View style={styles.surfaceWrap}>{surface}</View>
-      {mini || !controlsAllowed || pipActive ? null : (
+      {mini || pipActive ? null : (
         <>
-          {state.locked ? null : <VideoGestureOverlay panHandlers={panHandlers} />}
-          <TojeyVideoControls
-            visible={state.controlsVisible && !state.locked}
-            compact={compact}
-            safeTop={safeTop}
-            safeBottom={safeBottom}
-            title={title}
-            state={displayState}
-            guest={guest}
-            watchTogether={watchTogether}
-            pipOk={pipOk}
-            previewTime={seekPreview && seekPreview.target != null ? seekPreview.target : null}
-            onToggleMute={() => { toggleMuted(); wakeControls(); }}
-            onSettings={openSettings}
-            onToggleFullscreen={handleToggleFullscreen}
-            onPip={togglePip}
-            onSeekPreview={beginSeek}
-            onSeekCommit={commitSeek}
-            onBack={handleBack}
-          />
-          <VideoCenterOverlay
-            playing={state.playing}
-            controlsVisible={state.controlsVisible && !state.locked}
-            buffering={bufferingVisible && bufferingNow}
-            error={visibleError}
-            disabled={guest}
-            locked={state.locked}
-            onToggle={() => { tickHaptic(); togglePlay(); }}
-            onRetry={handleRetry}
-          />
-          {state.locked ? <VideoLockOverlay onUnlock={() => setLocked(false)} /> : null}
-          <VideoVolumeOverlay value={volumeOverlay} />
-          <VideoBrightnessOverlay value={brightnessOverlay} />
-          <VideoSeekOverlay value={seekPreview} duration={state.duration} />
-          {infoChip ? (
-            <Animated.View style={[styles.infoChip, { opacity: infoOpacity }]} pointerEvents="none">
-              <Icon name={infoChip.icon} size={14} color="#fff" />
-              <Text style={styles.infoText}>{infoChip.label}</Text>
-            </Animated.View>
+          {state.locked || !sourceUri ? null : <VideoGestureOverlay panHandlers={panHandlers} />}
+          {controlsAllowed ? (
+            <>
+              <TojeyVideoControls
+                visible={state.controlsVisible && !state.locked}
+                compact={compact}
+                safeTop={safeTop}
+                safeBottom={safeBottom}
+                title={title}
+                state={displayState}
+                guest={guest}
+                watchTogether={watchTogether}
+                pipOk={pipOk}
+                previewTime={seekPreview && seekPreview.target != null ? seekPreview.target : null}
+                onToggleMute={() => { toggleMuted(); wakeControls(); }}
+                onSettings={openSettings}
+                onToggleFullscreen={handleToggleFullscreen}
+                onPip={togglePip}
+                onSeekPreview={beginSeek}
+                onSeekCommit={commitSeek}
+                onBack={handleBack}
+              />
+              <VideoCenterOverlay
+                playing={state.playing}
+                controlsVisible={state.controlsVisible && !state.locked}
+                buffering={bufferingVisible && bufferingNow}
+                error={visibleError}
+                disabled={guest}
+                locked={state.locked}
+                onToggle={() => { tickHaptic(); togglePlay(); }}
+                onRetry={handleRetry}
+              />
+              {state.locked ? <VideoLockOverlay onUnlock={() => setLocked(false)} /> : null}
+              <VideoVolumeOverlay value={volumeOverlay} />
+              <VideoBrightnessOverlay value={brightnessOverlay} />
+              <VideoSeekOverlay value={seekPreview} duration={state.duration} />
+              {infoChip ? (
+                <Animated.View style={[styles.infoChip, { opacity: infoOpacity }]} pointerEvents="none">
+                  <Icon name={infoChip.icon} size={14} color="#fff" />
+                  <Text style={styles.infoText}>{infoChip.label}</Text>
+                </Animated.View>
+              ) : null}
+              <VideoSettingsSheet
+                visible={settingsOpen}
+                initialPage={settingsPage}
+                onClose={closeSettings}
+                state={displayState}
+                guest={guest}
+                watchTogether={watchTogether}
+                pipSupported={pipOk}
+                orientationSupported
+                qualities={availableQualities}
+                onSpeed={handleSpeed}
+                onQuality={handleQuality}
+                onSubtitle={handleSubtitle}
+                onAudio={handleAudio}
+                onResize={handleResize}
+                onRepeat={handleRepeat}
+                onBackground={handleBackground}
+                onAutoPip={handleAutoPip}
+                onRotationLock={handleRotationLock}
+                onLock={() => setLocked(true)}
+                onMinimize={onMinimize}
+              />
+            </>
           ) : null}
-          <VideoSettingsSheet
-            visible={settingsOpen}
-            initialPage={settingsPage}
-            onClose={closeSettings}
-            state={displayState}
-            guest={guest}
-            watchTogether={watchTogether}
-            pipSupported={pipOk}
-            orientationSupported
-            qualities={availableQualities}
-            onSpeed={handleSpeed}
-            onQuality={handleQuality}
-            onSubtitle={handleSubtitle}
-            onAudio={handleAudio}
-            onResize={handleResize}
-            onRepeat={handleRepeat}
-            onBackground={handleBackground}
-            onAutoPip={handleAutoPip}
-            onRotationLock={handleRotationLock}
-            onLock={() => setLocked(true)}
-            onMinimize={onMinimize}
-          />
         </>
       )}
     </View>

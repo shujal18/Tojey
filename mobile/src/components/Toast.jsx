@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, Text, StyleSheet } from 'react-native';
 
-export default function Toast({ message, bottom }) {
+export default function Toast({ message, bottom, duration = 2200, variant = 'default' }) {
   const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -10,14 +10,18 @@ export default function Toast({ message, bottom }) {
     Animated.timing(opacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
     const t = setTimeout(() => {
       Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
-    }, 2200);
+    }, duration);
     return () => clearTimeout(t);
-  }, [message, opacity]);
+  }, [duration, message, opacity]);
 
   if (!message) return null;
 
   return (
-    <Animated.View pointerEvents="none" style={[styles.wrap, { bottom: bottom != null ? bottom : 96, opacity }]}>
+    <Animated.View pointerEvents="none" style={[
+      styles.wrap,
+      variant === 'media' && styles.mediaWrap,
+      { bottom: bottom != null ? bottom : 96, opacity },
+    ]}>
       <Text style={styles.text}>{message}</Text>
     </Animated.View>
   );
@@ -31,5 +35,6 @@ const styles = StyleSheet.create({
     zIndex: 200, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
   },
+  mediaWrap: { backgroundColor: 'rgba(0,0,0,0.72)', borderRadius: 18 },
   text: { color: '#fff', fontSize: 13, fontWeight: '600' },
 });

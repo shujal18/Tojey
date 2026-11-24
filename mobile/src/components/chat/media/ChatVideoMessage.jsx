@@ -2,11 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, Image, Text, TouchableOpacity, View } from 'react-native';
 import { Icon } from '../../AppIcon';
 import { fs } from '../../../utils/size';
+import { getVideoThumbnail } from '../../../services/videoThumbnail';
 import {
   BOTTOM_SHADE_LAYERS,
   FADE_DURATION,
   MEDIA_COLORS,
   mediaAccessibilityLabel,
+  mediaSource,
   progressPercent,
   receiptVisual,
   resolveMediaSize,
@@ -14,6 +16,8 @@ import {
   stopTouchPropagation,
   styles,
 } from './chatMediaStyles';
+
+const generatedThumbCache = new Map();
 
 export default function ChatVideoMessage(props) {
   const {
@@ -36,7 +40,10 @@ export default function ChatVideoMessage(props) {
     ...touchProps
   } = props;
 
-  const thumbSource = resolveVideoThumbnail(thumbnailUri, uri);
+  const providedThumbSource = resolveVideoThumbnail(thumbnailUri, uri);
+  const hasProvidedThumb = !!providedThumbSource;
+  const [generatedThumbUri, setGeneratedThumbUri] = useState(null);
+  const [generatingThumb, setGeneratingThumb] = useState(false);
   const fade = useRef(new Animated.Value(0)).current;
   const activeRef = useRef(true);
   const [thumbLoaded, setThumbLoaded] = useState(false);
@@ -48,11 +55,38 @@ export default function ChatVideoMessage(props) {
     fade.setValue(0);
     setThumbLoaded(false);
     setThumbFailed(false);
+    setGeneratedThumbUri(uri && generatedThumbCache.has(String(uri)) ? (generatedThumbCache.get(String(uri)) || null) : null);
     return () => {
       activeRef.current = false;
       fade.stopAnimation();
     };
-  }, [thumbnailUri, uri, thumbRetryKey, fade]);
+  }, [thumbnailUri, uri, thumbRetryKey, generatedThumbUri, fade]);
+
+  useEffect(() => {
+    let active = true;
+    const key = uri ? String(uri) : '';
+    if (!key || (hasProvidedThumb && !thumbFailed) || generatedThumbUri || generatedThumbCache.has(key)) {
+      setGeneratingThumb(false);
+      return () => { active = false; };
+    }
+    setGeneratingThumb(true);
+    getVideoThumbnail(uri).then((result) => {
+      const next = result && result.uri ? result.uri : null;
+      generatedThumbCache.set(key, next);
+      if (active) {
+        setGeneratedThumbUri(next);
+        setGeneratingThumb(false);
+      }
+    }).catch(() => {
+      generatedThumbCache.set(key, null);
+      if (active) setGeneratingThumb(false);
+    });
+    return () => { active = false; };
+  }, [uri, hasProvidedThumb, thumbFailed, generatedThumbUri]);
+
+  const thumbSource = providedThumbSource && !thumbFailed
+    ? providedThumbSource
+    : (generatedThumbUri ? mediaSource(generatedThumbUri) : null);
 
   const handleThumbLoad = () => {
     if (!activeRef.current) return;
@@ -90,8 +124,8 @@ export default function ChatVideoMessage(props) {
     fallbackAspect: 16 / 9,
   });
   const hasError = !!error;
-  const showFallback = !thumbSource || thumbFailed;
-  const showLoading = !hasError && !uploading && !!thumbSource && !thumbLoaded && !thumbFailed;
+  const showFallback = !thumbSource && !generatingThumb;
+  const showLoading = !hasError && !uploading && ((!!thumbSource && !thumbLoaded && !thumbFailed) || (generatingThumb && !thumbSource));
   const percent = progressPercent(uploadProgress);
   const visibleReceipt = isSent && receipt ? receiptVisual(receipt) : null;
   const bubbleBorder = borderColor || (isSent ? 'rgba(255,255,255,0.2)' : MEDIA_COLORS.border);
@@ -117,7 +151,7 @@ export default function ChatVideoMessage(props) {
       {thumbSource && !thumbFailed ? (
         <Animated.View style={[styles.absoluteFill, { opacity: fade }]} pointerEvents="none">
           <Image
-            key={thumbRetryKey}
+            key={`${thumbRetryKey}-${generatedThumbUri || 'thumb'}`}
             source={thumbSource}
             style={styles.fillImage}
             resizeMode="cover"

@@ -3,6 +3,7 @@ import {
   View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, Image, Keyboard, Linking, Modal, ActivityIndicator, Alert,
   Animated, PanResponder, Dimensions, ScrollView, AppState, LayoutAnimation, UIManager, DeviceEventEmitter,
+  NativeModules, PermissionsAndroid,
 } from 'react-native';
 import { useTheme } from '../theme/ThemeContext';
 import { Icon } from '../components/AppIcon';
@@ -45,6 +46,18 @@ const { width: APP_W, height: APP_H } = Dimensions.get('window');
 const VOICE_QUEUE_KEY = '@tojey_voice_outbox';
 const VOICE_BARS = 34;
 const REC_BARS = 28;
+
+async function ensureWriteMediaPermission() {
+  if (Platform.OS !== 'android' || Platform.Version > 28) return true;
+  const result = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE, {
+    title: 'Save media',
+    message: 'Allow Tojey to save photos and videos to your device.',
+    buttonNeutral: 'Ask later',
+    buttonNegative: 'Cancel',
+    buttonPositive: 'OK',
+  });
+  return result === PermissionsAndroid.RESULTS.GRANTED;
+}
 
 // WhatsApp-like fixed incoming bubble color (constant, never tinted by theme/chat color).
 const INCOMING_MESSAGE_COLOR = '#1e2529';
@@ -1743,7 +1756,12 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
     else if (action === 'edit') { setEditing(message); setText(message.content || ''); }
     else if (action === 'deleteMe') { deleteMessage(message, 'me'); }
     else if (action === 'deleteAll') { deleteMessage(message, 'everyone'); }
-    else if (action === 'save') { if (message && message.media_url) downloadAndOpen(message); }
+    else if (action === 'save') {
+      if (message && message.media_url) {
+        (message.type === 'IMAGE' || message.type === 'VIDEO' ? saveToGallery(message) : downloadAndOpen(message))
+          .then((res) => { if (res && res.message) setNudgeToast(res.message); });
+      }
+    }
   };
 
   // Stable per-row edit handler (reads the latest doAction via ref so its identity is
@@ -2116,67 +2134,83 @@ export default function ChatRoomScreen({ socket, currentUser, otherUser, onBack 
   }, [otherUserId, currentUser.id, uploadAsset, setUploadProgress, emitOrQueue]);
 
   const downloadAndOpen = useCallback(async (message) => {
-    if (!message || !message.media_url) return;
+    if (!message || !message.media_url) return { ok: false, message: '' };
     const mime = mimeFor(message);
     let name = sanitizeFileName(message.file_name) || sanitizeFileName(fileNameFromUrl(message.media_url)) || `tojey_file_${Date.now()}`;
     if (!/\.[a-zA-Z0-9]{2,5}$/.test(name) && mime !== 'application/octet-stream') {
       name = `${name}.${extForMime(mime)}`;
     }
+    const url = absUrl(message.media_url);
     try {
-      const { dirs } = RNFetchBlob.fs;
-      const target = `${dirs.DownloadDir}/${name}`;
-      const res = await RNFetchBlob.config({
-        fileCache: false,
-        path: target,
-        addAndroidDownloads: {
-          useDownloadManager: true,
-          notification: true,
-          path: target,
-          description: `Tojey file: ${name}`,
-          mime,
-        },
-      }).fetch('GET', absUrl(message.media_url));
+      if (/^(file:\/\/|content:\/\/)/i.test(url)) {
+        if (Platform.OS === 'android') await RNFetchBlob.android.actionViewIntent(url.replace(/^file:\/\//i, ''), mime);
+        else await Linking.openURL(url);
+        return { ok: true, message: '' };
+      }
+      const res = await RNFetchBlob.config({ fileCache: true }).fetch('GET', url);
+      const status = Number(res.info && res.info().status) || 0;
+      if (status < 200 || status >= 300) throw new Error(`Download failed (${status})`);
+      const path = res.path();
+      const stat = await RNFetchBlob.fs.stat(path).catch(() => null);
+      if (!stat || !stat.size) throw new Error('Downloaded file is empty');
       if (Platform.OS === 'android') {
-        if (mime === 'application/octet-stream') {
-          Alert.alert('Saved', `Downloaded to Download/${name}\nOpen it from your Files app.`);
-        } else {
-          try {
-            await RNFetchBlob.android.actionViewIntent(res.path(), mime);
-          } catch (e) {
-            console.error('actionViewIntent failed, no handler for mime', mime, e);
-            Alert.alert('Saved', `Downloaded to Download/${name}.\nNo app found to preview it here — open it from your Files app.`);
-          }
+        try {
+          await RNFetchBlob.android.actionViewIntent(path, mime);
+        } catch (e) {
+          console.error('actionViewIntent failed, no handler for mime', mime, e);
+          Alert.alert('Downloaded', `Saved as ${name}. Open it from your Files app if no app can preview it.`);
         }
       } else {
-        Linking.openURL(absUrl(message.media_url)).catch(() => {});
+        await Linking.openURL(url);
       }
+      return { ok: true, message: '' };
     } catch (e) {
       console.error('downloadAndOpen failed:', e);
-      alert('Could not download file: ' + (e.message || 'Unknown error'));
+      return { ok: false, message: 'Could not download file' };
     }
   }, []);
 
-  // WhatsApp-style download: photos/videos go straight into the Gallery (DCIM/Tojey)
-  // via a media scan so they appear in the Photos app; documents go to Download/.
   const saveToGallery = useCallback(async (message) => {
-    if (!message || !message.media_url) return;
-    const isMedia = message.type === 'IMAGE' || message.type === 'VIDEO';
-    const mime = mimeFor(message);
-    let name = sanitizeFileName(message.file_name) || sanitizeFileName(fileNameFromUrl(message.media_url)) || `tojey_media_${Date.now()}`;
-    if (!/\.[a-zA-Z0-9]{2,5}$/.test(name) && mime !== 'application/octet-stream') {
-      name = `${name}.${extForMime(mime)}`;
+    if (!message || !message.media_url) return { ok: false, message: '' };
+    const isVideo = message.type === 'VIDEO' || /^video\//i.test(message.mime_type || '');
+    const isImage = message.type === 'IMAGE' || /^image\//i.test(message.mime_type || '');
+    if (!isVideo && !isImage) {
+      const result = await downloadAndOpen(message);
+      return result || { ok: true, message: 'Downloaded' };
     }
-    const { dirs } = RNFetchBlob.fs;
-    const path = isMedia ? `${dirs.DCIMDir}/Tojey/${name}` : `${dirs.DownloadDir}/${name}`;
+    const mime = mimeFor(message);
+    const kind = isVideo ? 'video' : 'image';
+    const ext = extForMime(mime);
+    let name = sanitizeFileName(message.file_name) || sanitizeFileName(fileNameFromUrl(message.media_url)) || `tojey_${kind}_${Date.now()}`;
+    name = `${name.replace(/\.[a-zA-Z0-9]{2,5}$/, '')}.${ext}`;
+    const url = absUrl(message.media_url);
     try {
-      await RNFetchBlob.config({ fileCache: false, path }).fetch('GET', absUrl(message.media_url));
-      Promise.resolve(RNFetchBlob.fs.scanFile([path])).catch(() => {});
-      Alert.alert('Saved', isMedia ? `Saved to Gallery (DCIM/Tojey/${name})` : `Downloaded to Download/${name}`);
+      if (!(await ensureWriteMediaPermission())) throw new Error('Storage permission denied');
+      let source = url;
+      if (/^file:\/\//i.test(url)) {
+        source = url.replace(/^file:\/\//i, '');
+      } else if (/^content:\/\//i.test(url)) {
+        const cachePath = `${RNFetchBlob.fs.dirs.CacheDir}/tojey-save-${Date.now()}.${ext}`;
+        await RNFetchBlob.fs.cp(url, cachePath);
+        source = cachePath;
+      } else {
+        const res = await RNFetchBlob.config({ fileCache: true }).fetch('GET', url);
+        const status = Number(res.info && res.info().status) || 0;
+        if (status < 200 || status >= 300) throw new Error(`Download failed (${status})`);
+        source = res.path();
+        const stat = await RNFetchBlob.fs.stat(source).catch(() => null);
+        if (!stat || !stat.size) throw new Error('Downloaded file is empty');
+      }
+      if (!NativeModules.TojeyMedia || typeof NativeModules.TojeyMedia.saveMediaToGallery !== 'function') {
+        throw new Error('Gallery saver unavailable');
+      }
+      await NativeModules.TojeyMedia.saveMediaToGallery(source, mime, name, kind);
+      return { ok: true, message: isVideo ? 'Video saved' : 'Image saved' };
     } catch (e) {
       console.error('saveToGallery failed:', e);
-      alert('Could not save file: ' + (e.message || 'Unknown error'));
+      return { ok: false, message: isVideo ? 'Could not save video' : 'Could not save image' };
     }
-  }, []);
+  }, [downloadAndOpen]);
 
 const isOnline = presence?.isOnline ?? otherUserOnline;
   const lastSeen = presence?.lastSeen ?? otherUserLastSeen;
@@ -2277,8 +2311,10 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
                   const m = reactionPop.msg;
                   setSelMenu(false);
                   setReactionPop(null);
-                  if (m.type === 'IMAGE' || m.type === 'VIDEO') saveToGallery(m);
-                  else downloadAndOpen(m);
+                  const task = m.type === 'IMAGE' || m.type === 'VIDEO' ? saveToGallery(m) : downloadAndOpen(m);
+                  if (task && typeof task.then === 'function') {
+                    task.then((res) => { if (res && res.message) setNudgeToast(res.message); });
+                  }
                 }}
                 accessibilityLabel="Save message"
               >
@@ -2407,7 +2443,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
             <View style={styles.reactionRow}>
               {sheetReactions.map((r) => (
                 <TouchableOpacity key={r} onPress={() => reactTo(reactionMenu.id, r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                  <ColorEmoji style={{ fontSize: fs(22) }}>{r}</ColorEmoji>
+                  <ColorEmoji style={{ fontSize: fs(22), lineHeight: fs(30) }}>{r}</ColorEmoji>
                 </TouchableOpacity>
               ))}
             </View>
@@ -2432,7 +2468,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
                 style={styles.reactionPopBtn}
                 accessibilityLabel={`React ${e}`}
               >
-                <ColorEmoji style={{ fontSize: fs(23) }}>{e}</ColorEmoji>
+                <ColorEmoji style={{ fontSize: fs(23), lineHeight: fs(30) }}>{e}</ColorEmoji>
               </TouchableOpacity>
             ))}
             <TouchableOpacity
@@ -2615,7 +2651,7 @@ const isOnline = presence?.isOnline ?? otherUserOnline;
           onExternal={(item) => downloadAndOpen(item)}
           onReact={(id, reaction) => reactTo(id, reaction)}
           onReply={(message) => { setMediaViewer(null); setReplyingTo(message); }}
-          onSave={(message) => { setMediaViewer(null); saveToGallery(message); }}
+          onSave={saveToGallery}
           onCopy={(text) => Clipboard.setString(String(text || ''))}
           onDelete={(message, mode) => { setMediaViewer(null); deleteMessage(message, mode); }}
           onSendDrawing={uploadDrawing}
@@ -2676,6 +2712,7 @@ function replyPreview(m) {
 }
 
 function mimeFor(m) {
+  if (m && typeof m.mime_type === 'string' && /^(image|video|audio)\/[a-z0-9.+_-]+$/i.test(m.mime_type)) return m.mime_type;
   if (m.type === 'VIDEO') return 'video/mp4';
   if (m.type === 'IMAGE') return 'image/jpeg';
   if (m.type === 'VOICE') return 'audio/mp4';
@@ -2719,14 +2756,32 @@ function sanitizeFileName(name) {
 function extForMime(mime) {
   if (!mime) return 'bin';
   if (mime === 'application/pdf') return 'pdf';
-  if (mime.startsWith('audio/')) return 'audio';
-  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) {
+    if (mime.includes('mpeg')) return 'mp3';
+    if (mime.includes('wav')) return 'wav';
+    if (mime.includes('ogg')) return 'ogg';
+    return 'm4a';
+  }
+  if (mime.startsWith('video/')) {
+    if (mime.includes('quicktime')) return 'mov';
+    if (mime.includes('webm')) return 'webm';
+    if (mime.includes('3gpp')) return '3gp';
+    if (mime.includes('x-matroska')) return 'mkv';
+    if (mime.includes('x-msvideo')) return 'avi';
+    return 'mp4';
+  }
   if (mime === 'application/zip') return 'zip';
   if (mime.startsWith('text/')) return 'txt';
   if (mime.includes('word') || mime.includes('msword')) return 'doc';
   if (mime.includes('excel') || mime.includes('sheet')) return 'xls';
   if (mime.includes('powerpoint')) return 'ppt';
-  if (mime.startsWith('image/')) return 'img';
+  if (mime.startsWith('image/')) {
+    if (mime.includes('png')) return 'png';
+    if (mime.includes('gif')) return 'gif';
+    if (mime.includes('webp')) return 'webp';
+    if (mime.includes('heic')) return 'heic';
+    return 'jpg';
+  }
   return 'bin';
 }
 
@@ -3216,7 +3271,7 @@ function MessageRowFn({ message, isSent, grouped, theme, receivedBubble, flash, 
           >
             {dedupeReactions(message.reactions).map(({ emoji, count }, i) => (
               <View key={i} style={styles.reactionBadgeItem}>
-                <ColorEmoji style={{ fontSize: fs(12) }}>{emoji}</ColorEmoji>
+                <ColorEmoji style={{ fontSize: fs(13), lineHeight: fs(18) }}>{emoji}</ColorEmoji>
                 {count > 1 ? <Text style={[styles.reactionBadgeCount, { color: theme.textSecondary }]}>{count}</Text> : null}
               </View>
             ))}
@@ -3504,7 +3559,7 @@ const styles = StyleSheet.create({
   msgMetaPill: { backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: fs(10), paddingHorizontal: fs(7), paddingVertical: 2 },
   metaText: { fontSize: fs(10), color: '#9B96A8' },
   replyRef: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3, marginBottom: 4, marginLeft: -2, borderLeftWidth: 3, borderLeftColor: '#6C3CE9' },
-  reactionBadge: { alignSelf: 'flex-end', marginTop: -8, borderRadius: fs(12), paddingHorizontal: fs(8), paddingVertical: 3, flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
+  reactionBadge: { alignSelf: 'flex-end', marginTop: -fs(4), borderRadius: fs(12), paddingHorizontal: fs(8), paddingVertical: fs(5), minHeight: fs(26), flexDirection: 'row', alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, zIndex: 5, elevation: 3, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 4, shadowOffset: { width: 0, height: 1 } },
   reactionBadgeItem: { flexDirection: 'row', alignItems: 'center' },
   reactionBadgeCount: { fontSize: fs(10), marginLeft: 2 },
   headerIconBtn: { width: fs(40), height: fs(40), alignItems: 'center', justifyContent: 'center', marginLeft: 4 },
@@ -3555,7 +3610,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 12,
   },
-  reactionPopBtn: { width: fs(38), height: fs(42), alignItems: 'center', justifyContent: 'center', borderRadius: fs(21) },
+  reactionPopBtn: { width: fs(38), minHeight: fs(46), paddingVertical: fs(3), alignItems: 'center', justifyContent: 'center', borderRadius: fs(21) },
   reactionPopCaret: {
     position: 'absolute',
     bottom: -6,
@@ -3568,7 +3623,7 @@ const styles = StyleSheet.create({
   menu: { position: 'absolute', bottom: 90, left: 24, right: 24, borderRadius: 18, padding: fs(14), shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, elevation: 8 },
   menuTitle: { fontSize: fs(13), fontWeight: '700' },
   reactionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, marginVertical: fs(12) },
-  reactionBtn: { borderRadius: fs(14), width: fs(48), height: fs(44), alignItems: 'center', justifyContent: 'center' },
+  reactionBtn: { borderRadius: fs(14), width: fs(48), minHeight: fs(48), paddingVertical: fs(4), alignItems: 'center', justifyContent: 'center' },
   mediaImage: { width: Math.min(APP_W * 0.62, 250), height: Math.min(APP_W * 0.62, 250) * 0.81, borderRadius: 12, marginBottom: 4 },
   uploadOverlay: { alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
   uploadCancel: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },

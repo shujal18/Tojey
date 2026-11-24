@@ -119,6 +119,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
       wt.leaveRoom();
     }
     setCur(v);
+    if (typeof wt.resetPartnerLeft === 'function') wt.resetPartnerLeft();
     setLoading(true);
     setInfo(null);
     setStream(null);
@@ -380,6 +381,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
 
   const handleClose = () => {
     if (inRoomRef.current) wt.leaveRoom();
+    if (typeof wt.resetPartnerLeft === 'function') wt.resetPartnerLeft();
     if (onClose) onClose();
   };
 
@@ -470,7 +472,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
           {inRoom && !!wt.bubble && (
             <View style={styles.wtBubble} pointerEvents="none">
               {wt.bubble.kind === 'reaction' ? (
-                <Text style={{ fontSize: fs(18), lineHeight: fs(22) }}>{wt.bubble.emoji}</Text>
+                <Text style={{ fontSize: fs(18), lineHeight: fs(26), includeFontPadding: true }}>{wt.bubble.emoji}</Text>
               ) : null}
               <Text style={styles.wtBubbleText} numberOfLines={1}>
                 <Text style={{ fontWeight: '800' }}>
@@ -617,7 +619,7 @@ export default function YoutubePlayerModal({ item: initial, authHeaders, token, 
                       onPress={() => wt.sendReaction(emoji)}
                       style={styles.wtReactionBtn}
                     >
-                      <Text style={{ fontSize: fs(20) }}>{emoji}</Text>
+                      <Text style={{ fontSize: fs(20), lineHeight: fs(26), includeFontPadding: true }}>{emoji}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>

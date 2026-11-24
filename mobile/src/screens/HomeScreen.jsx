@@ -46,6 +46,37 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
   const conversationsRef = useRef([]);
   const lastConvSigRef = useRef('');
   const timersRef = useRef(new Set());
+  const [serverOnline, setServerOnline] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    let timer = null;
+    const probe = async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      try {
+        const res = await fetch(SERVER_URL, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const body = await res.json().catch(() => null);
+        const online = !!res.ok && (!body || body.status === 'running' || body.app === 'Tojey');
+        if (mounted) setServerOnline(online);
+      } catch (e) {
+        if (mounted) setServerOnline(false);
+      } finally {
+        clearTimeout(timeout);
+        if (mounted) timer = setTimeout(probe, 10000);
+      }
+    };
+    probe();
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+    };
+  }, []);
 
   const switchTab = useCallback((next) => {
     if (tabRef.current === next) return;
@@ -444,6 +475,10 @@ export default function HomeScreen({ socket, user, token, setUser, onOpenChat, o
           <View style={[styles.header, { backgroundColor: theme.background }]}>
             <Text style={[styles.title, { color: theme.primaryDeep }]}>Tojey</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View
+                style={[styles.serverDot, { backgroundColor: serverOnline ? '#35D07F' : '#E53935' }]}
+                accessibilityLabel={serverOnline ? 'Server online' : 'Server offline'}
+              />
               <TouchableOpacity onPress={openHomeTab} style={styles.headerBtn}>
                 <Icon name="play-circle-outline" size={24} color={theme.primary} />
               </TouchableOpacity>
@@ -715,6 +750,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: fs(16), paddingTop: fs(14), paddingBottom: fs(10),
   },
   title: { fontSize: fs(26), fontWeight: '800' },
+  serverDot: { width: fs(10), height: fs(10), borderRadius: fs(5), marginRight: fs(8), borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(0,0,0,0.25)' },
   headerBtn: { padding: 6 },
   searchBox: {
     flexDirection: 'row', alignItems: 'center', gap: 8,

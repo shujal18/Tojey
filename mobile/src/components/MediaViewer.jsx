@@ -595,7 +595,7 @@ export default function MediaViewer({ items = [], startIndex = 0, headerText = '
               <View style={styles.reactionRow}>
                 {quickReactions.map((r) => (
                   <TouchableOpacity key={r} onPress={() => doReact(r)} style={[styles.reactionBtn, { backgroundColor: theme.primaryLight }]}>
-                    <ColorEmoji style={{ fontSize: fs(22) }}>{r}</ColorEmoji>
+                    <ColorEmoji style={{ fontSize: fs(22), lineHeight: fs(30) }}>{r}</ColorEmoji>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -651,6 +651,6 @@ const styles = StyleSheet.create({
   menu: { position: 'absolute', right: 12, top: 90, width: SCREEN_W - 60, borderRadius: 16, padding: 14, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
   menuTitle: { fontSize: fs(13), fontWeight: '700', marginBottom: 8 },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 14 },
-  reactionBtn: { borderRadius: 14, width: 44, height: 40, alignItems: 'center', justifyContent: 'center' },
+  reactionBtn: { borderRadius: 14, width: fs(44), minHeight: fs(44), paddingVertical: fs(3), alignItems: 'center', justifyContent: 'center' },
   menuItem: { flexDirection: 'row', alignItems: 'center', borderRadius: 9, paddingVertical: 9, paddingHorizontal: 12 },
 });

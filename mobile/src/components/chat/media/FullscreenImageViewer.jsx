@@ -573,14 +573,32 @@ export default function FullscreenImageViewer({
               : <Icon name="send" size={fs(22)} color="#fff" />}
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity
-            onPress={() => setMenuOpen(true)}
-            style={styles.actionButton}
-            accessibilityLabel="More actions"
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-          >
-            <Icon name="ellipsis-horizontal" size={fs(24)} color="#fff" />
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              onPress={() => { setDrawMode(true); setChrome(true, true); }}
+              style={styles.actionButton}
+              accessibilityLabel="Draw on image"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Icon name="color-wand" size={fs(21)} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => { if (typeof actionApi.current.onSave === 'function') actionApi.current.onSave(item); }}
+              style={styles.actionButton}
+              accessibilityLabel="Save image"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Icon name="download-outline" size={fs(22)} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setMenuOpen(true)}
+              style={styles.actionButton}
+              accessibilityLabel="More actions"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Icon name="ellipsis-horizontal" size={fs(24)} color="#fff" />
+            </TouchableOpacity>
+          </>
         )}
       </Animated.View>
 
@@ -636,14 +654,12 @@ export default function FullscreenImageViewer({
                     if (typeof actionApi.current.onReact === 'function') actionApi.current.onReact(item.id, reaction);
                   }}
                 >
-                  <ColorEmoji style={{ fontSize: fs(22) }}>{reaction}</ColorEmoji>
+                  <ColorEmoji style={{ fontSize: fs(22), lineHeight: fs(30) }}>{reaction}</ColorEmoji>
                 </TouchableOpacity>
               ))}
             </View>
             <View style={styles.actionGrid}>
-              <MenuButton icon="color-wand" label="Draw" onPress={() => { setMenuOpen(false); setDrawMode(true); setChrome(true, true); }} />
               <MenuButton icon="return-down-back-outline" label="Reply" onPress={() => { setMenuOpen(false); actionApi.current.onReply?.(item); }} />
-              <MenuButton icon="download-outline" label="Save" onPress={() => { setMenuOpen(false); actionApi.current.onSave?.(item); }} />
               <MenuButton icon="open-outline" label="Open" onPress={() => { setMenuOpen(false); actionApi.current.onExternal?.(item); }} />
               {caption ? (
                 <MenuButton icon="copy-outline" label="Copy" onPress={() => { setMenuOpen(false); actionApi.current.onCopy?.(caption); }} />
@@ -788,11 +804,14 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     zIndex: 30,
-    justifyContent: 'flex-end',
+    justifyContent: 'flex-start',
+    alignItems: 'flex-end',
+    paddingTop: fs(58),
+    paddingHorizontal: fs(12),
   },
   menu: {
-    margin: fs(12),
     padding: fs(14),
+    maxWidth: '100%',
     borderRadius: fs(16),
     shadowColor: '#000',
     shadowOpacity: 0.35,
@@ -811,7 +830,8 @@ const styles = StyleSheet.create({
   },
   reactionBtn: {
     width: fs(44),
-    height: fs(44),
+    minHeight: fs(48),
+    paddingVertical: fs(4),
     borderRadius: fs(22),
     alignItems: 'center',
     justifyContent: 'center',

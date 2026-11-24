@@ -31,7 +31,7 @@ function midpoint(a, b) {
   };
 }
 
-export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
+export default function FullscreenVideoViewer({ item, onClose, onExternal, onSave }) {
   const screen = Dimensions.get('window');
   const [layout, setLayout] = useState({ width: screen.width || 1, height: screen.height || 1 });
   const [playing, setPlaying] = useState(true);
@@ -461,6 +461,16 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
           >
             <Icon name="arrow-back" size={fs(26)} color="#fff" />
           </TouchableOpacity>
+          {onSave ? (
+            <TouchableOpacity
+              onPress={() => onSave(item)}
+              style={styles.actionButton}
+              accessibilityLabel="Save video"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Icon name="download-outline" size={fs(22)} color="#fff" />
+            </TouchableOpacity>
+          ) : null}
         </View>
         <View style={styles.externalWrap} pointerEvents="box-none">
           <TouchableOpacity
@@ -568,6 +578,7 @@ export default function FullscreenVideoViewer({ item, onClose, onExternal }) {
         rate={rate}
         error={error}
         onBack={onClose}
+        onSave={onSave ? () => onSave(item) : undefined}
         onTogglePlay={togglePlay}
         onSeek={seekTo}
         onRate={(value) => {
@@ -682,6 +693,8 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: fs(112),
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     paddingHorizontal: fs(8),
     paddingTop: fs(10),
     zIndex: 20,
@@ -689,6 +702,13 @@ const styles = StyleSheet.create({
   backButton: {
     width: fs(42),
     height: fs(42),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionButton: {
+    width: fs(42),
+    height: fs(42),
+    marginLeft: 'auto',
     alignItems: 'center',
     justifyContent: 'center',
   },

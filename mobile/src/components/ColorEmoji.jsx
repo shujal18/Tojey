@@ -164,11 +164,13 @@ export default function ColorEmoji({ children, style, numberOfLines, ...rest }) 
   const fontSize = parseFloat(base.fontSize) || 14;
   const lineHeight = base.lineHeight != null ? parseFloat(base.lineHeight) || 0 : 0;
   let emojiPx = Math.round(fontSize * 1.08);
-  if (lineHeight > 0 && emojiPx > lineHeight) emojiPx = Math.max(1, Math.round(lineHeight * 0.96));
+  const effectiveLineHeight = Math.max(
+    lineHeight > 0 ? lineHeight : 0,
+    emojiPx + 2,
+    Math.round(fontSize * 1.3),
+  );
+  emojiPx = Math.max(1, Math.min(emojiPx, Math.round(effectiveLineHeight * 0.9)));
   const fallbackStyle = [baseNoColor, { fontFamily: EMOJI_FONT, fontWeight: '400' }];
-  // Ensure the text container has enough line height to fit emoji images without clipping.
-  // Add a small padding to the calculated emoji size to prevent bottom cut-off.
-  const effectiveLineHeight = lineHeight > 0 ? lineHeight : Math.max(emojiPx + 2, Math.round(fontSize * 1.3));
   const textStyle = color != null ? baseNoColor : base;
   return (
     <Text style={[{ ...textStyle, lineHeight: effectiveLineHeight, includeFontPadding: true }]} numberOfLines={numberOfLines} {...rest}>
@@ -198,13 +200,13 @@ export function EmojiOnlyView({ children, size }) {
     }
   }
   return (
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', minHeight: size }}>
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', minHeight: Math.round(size * 1.1) }}>
       {clusters.map((c, i) => (
-        <View key={`${i}-${c}`} style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+        <View key={`${i}-${c}`} style={{ width: size, height: Math.round(size * 1.1), alignItems: 'center', justifyContent: 'center' }}>
           <EmojiImg
             cluster={c}
             size={size}
-            fallbackStyle={{ fontFamily: EMOJI_FONT, color: '#fff', fontWeight: '400' }}
+            fallbackStyle={{ fontFamily: EMOJI_FONT, color: '#fff', fontWeight: '400', fontSize: size, lineHeight: Math.round(size * 1.05), includeFontPadding: true }}
             candidates={emojiCandidates(c)}
           />
         </View>
